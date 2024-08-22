@@ -29,8 +29,9 @@ pub const ALPN_ACME: &[u8] = b"acme-tls/1";
 /// TODO improve
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("{0}")]
-    Generic(String),
+    //#[error("{0}")]
+    #[error(transparent)]
+    Generic(#[from] anyhow::Error),
 }
 
 // Calculate very approximate HTTP request/response headers size in bytes.

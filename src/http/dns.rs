@@ -4,6 +4,7 @@ use std::{
     sync::Arc,
 };
 
+use anyhow::Context;
 use async_trait::async_trait;
 use hickory_proto::rr::RecordType;
 use hickory_resolver::{
@@ -96,14 +97,13 @@ impl Resolve for Resolver {
 #[async_trait]
 impl Resolves for Resolver {
     async fn resolve(&self, name: &str, record: &str) -> Result<Vec<(String, String)>, Error> {
-        let record_type = RecordType::from_str(record)
-            .map_err(|e| Error::Generic(format!("unable to parse record: {e:#}")))?;
+        let record_type = RecordType::from_str(record).context("unable to parse record")?;
 
         let lookup = self
             .0
             .lookup(name, record_type)
             .await
-            .map_err(|e| Error::Generic(format!("lookup failed: {e:#}")))?;
+            .context("lookup failed")?;
 
         let rr = lookup
             .into_iter()

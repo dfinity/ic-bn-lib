@@ -1,5 +1,6 @@
 use std::{fmt, sync::Arc, time::Duration};
 
+use anyhow::Context;
 use async_trait::async_trait;
 use http::header::HeaderValue;
 use reqwest::dns::Resolve;
@@ -39,7 +40,7 @@ pub fn new(opts: Options, dns_resolver: impl Resolve + 'static) -> Result<reqwes
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .build()
-        .map_err(|e| Error::Generic(format!("unable to create Reqwest client: {e:#}")))?;
+        .context("unable to create reqwest client")?;
 
     Ok(client)
 }
