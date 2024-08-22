@@ -29,7 +29,12 @@ pub const ALPN_ACME: &[u8] = b"acme-tls/1";
 /// TODO improve
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    //#[error("{0}")]
+    #[error("HTTP body reading timed out")]
+    BodyTimedOut,
+    #[error("HTTP body is too big")]
+    BodyTooBig,
+    #[error("HTTP body reading failed: {0}")]
+    BodyReadingFailed(String),
     #[error(transparent)]
     Generic(#[from] anyhow::Error),
 }

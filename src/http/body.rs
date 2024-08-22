@@ -1,16 +1,48 @@
 use std::{
     pin::{pin, Pin},
     task::{Context, Poll},
+    time::Duration,
 };
 
-use axum::{body::Body, Error};
+use axum::body::Body;
 use bytes::{Buf, Bytes};
 use futures::Stream;
 use http_body::{Body as HttpBody, Frame, SizeHint};
+use http_body_util::{BodyExt, LengthLimitError, Limited};
 use sync_wrapper::SyncWrapper;
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
-use super::calc_headers_size;
+use super::{calc_headers_size, Error};
+
+// Read the given body enforcing a size & time limit
+pub async fn buffer_body<H: HttpBody>(
+    body: H,
+    size_limit: usize,
+    timeout: Duration,
+) -> Result<Bytes, Error>
+where
+    <H as HttpBody>::Error: std::error::Error + Send + Sync + 'static,
+{
+    // Collect the request body up to the limit
+    let body = tokio::time::timeout(timeout, Limited::new(body, size_limit).collect()).await;
+
+    // Body reading timed out
+    let Ok(body) = body else {
+        return Err(Error::BodyTimedOut);
+    };
+
+    let body = body
+        .map_err(|e| {
+            // TODO improve the inferring somehow
+            e.downcast_ref::<LengthLimitError>().map_or_else(
+                || Error::BodyReadingFailed(e.to_string()),
+                |_| Error::BodyTooBig,
+            )
+        })?
+        .to_bytes();
+
+    Ok(body)
+}
 
 pub type BodyResult = Result<u64, String>;
 
@@ -29,7 +61,7 @@ impl SyncBodyDataStream {
 }
 
 impl Stream for SyncBodyDataStream {
-    type Item = Result<Bytes, Error>;
+    type Item = Result<Bytes, axum::Error>;
 
     #[inline]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
