@@ -3,11 +3,13 @@ use std::{fmt, sync::Arc, time::Duration};
 use anyhow::Context;
 use async_trait::async_trait;
 use http::header::HeaderValue;
+use mockall::automock;
 use reqwest::dns::Resolve;
 
 use super::Error;
 
 /// Generic HTTP client trait
+#[automock]
 #[async_trait]
 pub trait Client: Send + Sync + fmt::Debug {
     async fn execute(&self, req: reqwest::Request) -> Result<reqwest::Response, reqwest::Error>;
