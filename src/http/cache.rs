@@ -7,21 +7,22 @@ use std::{
 };
 
 use ahash::RandomState;
-use axum::{
-    body::{to_bytes, Body},
-    extract::Request,
-    middleware::Next,
-    response::Response,
-};
+use axum::{body::Body, extract::Request, middleware::Next, response::Response};
 use bytes::Bytes;
-use http::{header::CONTENT_LENGTH, Method};
+use http::{
+    header::{CONTENT_LENGTH, RANGE},
+    Method,
+};
 use moka::sync::{Cache as MokaCache, CacheBuilder as MokaCacheBuilder};
 use prometheus::{
     register_counter_vec_with_registry, register_histogram_vec_with_registry, CounterVec,
     HistogramVec, Registry,
 };
+use sha1::{Digest, Sha1};
 use strum_macros::{Display, IntoStaticStr};
 use tokio::{select, sync::Mutex, time::sleep};
+
+use super::{body::buffer_body, Error as HttpError};
 
 #[derive(Debug, Clone, Display, PartialEq, Eq, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
@@ -55,6 +56,10 @@ impl CacheStatus {
 pub enum Error {
     #[error("unable to extract key from request: {0}")]
     ExtractKey(String),
+    #[error("timed out while fetching body")]
+    FetchBodyTimeout,
+    #[error("body is too big")]
+    FetchBodyTooBig,
     #[error("unable to fetch request body: {0}")]
     FetchBody(String),
     #[error("unable to parse content-length header")]
@@ -147,6 +152,7 @@ pub struct Opts {
     pub max_item_size: usize,
     pub ttl: Duration,
     pub lock_timeout: Duration,
+    pub body_timeout: Duration,
     pub xfetch_beta: f64,
     pub methods: Vec<Method>,
 }
@@ -355,8 +361,16 @@ impl<K: KeyExtractor + 'static> Cache<K> {
         }
 
         // Read the response body into a buffer
-        let response = fetch_body(response, body_size).await?;
-        Ok(ResponseType::Fetched(response))
+        let (parts, body) = response.into_parts();
+        let body = buffer_body(body, body_size, self.opts.body_timeout)
+            .await
+            .map_err(|e| match e {
+                HttpError::BodyTooBig => Error::FetchBodyTooBig,
+                HttpError::BodyTimedOut => Error::FetchBodyTimeout,
+                _ => Error::FetchBody(e.to_string()),
+            })?;
+
+        Ok(ResponseType::Fetched(Response::from_parts(parts, body)))
     }
 
     #[cfg(test)]
@@ -396,13 +410,34 @@ fn extract_content_length(resp: &Response) -> Result<Option<usize>, Error> {
     }
 }
 
-/// Read the full response body into memory while applying a limit on the length
-async fn fetch_body(response: Response, length: usize) -> Result<Response<Bytes>, Error> {
-    let (parts, body) = response.into_parts();
-    let body = to_bytes(body, length)
-        .await
-        .map_err(|x| Error::FetchBody(x.to_string()))?;
-    Ok(Response::from_parts(parts, body))
+#[derive(Clone, Debug)]
+pub struct KeyExtractorUriRange;
+
+impl KeyExtractor for KeyExtractorUriRange {
+    type Key = [u8; 20];
+
+    fn extract<T>(&self, request: &Request<T>) -> Result<Self::Key, Error> {
+        let authority = request
+            .uri()
+            .authority()
+            .ok_or_else(|| Error::ExtractKey("no authority found".into()))?
+            .host()
+            .as_bytes();
+        let paq = request
+            .uri()
+            .path_and_query()
+            .ok_or_else(|| Error::ExtractKey("no path_and_query found".into()))?
+            .as_str()
+            .as_bytes();
+
+        // Compute a composite hash
+        let mut hash = Sha1::new().chain_update(authority).chain_update(paq);
+        if let Some(v) = request.headers().get(RANGE) {
+            hash = hash.chain_update(v.as_bytes());
+        }
+
+        Ok(hash.finalize().into())
+    }
 }
 
 #[cfg(test)]
@@ -509,6 +544,7 @@ mod tests {
             cache_size: 1024,
             max_item_size: 1024,
             lock_timeout: PROXY_LOCK_TIMEOUT,
+            body_timeout: Duration::from_secs(1),
             xfetch_beta: 0.0,
             ttl: Duration::from_secs(3600),
             methods: vec![Method::GET],
@@ -524,6 +560,7 @@ mod tests {
             cache_size: MAX_CACHE_SIZE,
             max_item_size: MAX_ITEM_SIZE,
             lock_timeout: PROXY_LOCK_TIMEOUT,
+            body_timeout: Duration::from_secs(1),
             xfetch_beta: 0.0,
             ttl: Duration::from_secs(3600),
             methods: vec![Method::GET],
@@ -599,6 +636,7 @@ mod tests {
             cache_size: MAX_CACHE_SIZE,
             max_item_size: MAX_ITEM_SIZE,
             lock_timeout: PROXY_LOCK_TIMEOUT,
+            body_timeout: Duration::from_secs(1),
             xfetch_beta: 0.0,
             ttl,
             methods: vec![Method::GET],
@@ -711,6 +749,7 @@ mod tests {
             cache_size: MAX_CACHE_SIZE,
             max_item_size: MAX_ITEM_SIZE,
             lock_timeout: PROXY_LOCK_TIMEOUT,
+            body_timeout: Duration::from_secs(1),
             xfetch_beta: 0.0,
             ttl: Duration::from_millis(500),
             methods: vec![Method::GET],
