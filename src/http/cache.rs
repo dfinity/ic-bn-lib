@@ -445,6 +445,7 @@ mod tests {
     use super::*;
 
     use axum::{
+        body::to_bytes,
         extract::State,
         middleware::from_fn_with_state,
         response::IntoResponse,
