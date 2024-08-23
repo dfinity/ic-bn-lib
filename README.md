@@ -14,9 +14,6 @@ Modules planned:
   - Caching
   - Misc utils
 - TLS
-  - ACME
-    - DNS
-    - ALPN
   - Tickets
   - Sessions
 
