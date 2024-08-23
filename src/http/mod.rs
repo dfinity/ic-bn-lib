@@ -1,4 +1,5 @@
 pub mod body;
+pub mod cache;
 pub mod client;
 pub mod dns;
 pub mod headers;
