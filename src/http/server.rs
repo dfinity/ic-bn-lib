@@ -11,6 +11,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context};
+use async_trait::async_trait;
 use axum::{extract::Request, Router};
 use hyper::body::Incoming;
 use hyper_util::{
@@ -35,6 +36,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use super::{AsyncCounter, Error, Stats, ALPN_ACME};
+use crate::tasks::Run;
 
 pub const CONN_DURATION_BUCKETS: &[f64] = &[1.0, 8.0, 32.0, 64.0, 256.0, 512.0, 1024.0];
 pub const CONN_REQUESTS: &[f64] = &[1.0, 4.0, 8.0, 16.0, 32.0, 64.0, 256.0];
@@ -628,4 +630,12 @@ pub fn listen_unix_backlog(path: PathBuf, backlog: u32) -> Result<UnixListener, 
 
     let socket = socket.listen(backlog).context("unable to listen socket")?;
     Ok(socket)
+}
+
+#[async_trait]
+impl Run for Server {
+    async fn run(&self, token: CancellationToken) -> Result<(), anyhow::Error> {
+        self.serve(token).await?;
+        Ok(())
+    }
 }

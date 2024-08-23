@@ -28,6 +28,7 @@ pub const X_REQUESTED_WITH: HeaderName = HeaderName::from_static("x-requested-wi
 pub const CONTENT_TYPE_CBOR: HeaderValue = HeaderValue::from_static("application/cbor");
 pub const CONTENT_TYPE_OCTET_STREAM: HeaderValue =
     HeaderValue::from_static("application/octet-stream");
+pub const CONTENT_TYPE_HTML: HeaderValue = HeaderValue::from_static("text/html; charset=utf-8");
 pub const HSTS_1YEAR: HeaderValue = HeaderValue::from_static("max-age=31536000; includeSubDomains");
 pub const X_CONTENT_TYPE_OPTIONS_NO_SNIFF: HeaderValue = HeaderValue::from_static("nosniff");
 pub const X_FRAME_OPTIONS_DENY: HeaderValue = HeaderValue::from_static("DENY");

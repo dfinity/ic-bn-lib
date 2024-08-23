@@ -2,6 +2,7 @@ pub mod body;
 pub mod client;
 pub mod dns;
 pub mod headers;
+pub mod proxy;
 pub mod server;
 
 use std::{
@@ -35,6 +36,10 @@ pub enum Error {
     BodyTooBig,
     #[error("HTTP body reading failed: {0}")]
     BodyReadingFailed(String),
+    #[error("HTTP request failed: {0}")]
+    RequestFailed(#[from] reqwest::Error),
+    #[error("Generic HTTP failure: {0}")]
+    HttpError(#[from] http::Error),
     #[error(transparent)]
     Generic(#[from] anyhow::Error),
 }
