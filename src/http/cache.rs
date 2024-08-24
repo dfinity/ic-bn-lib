@@ -7,6 +7,7 @@ use std::{
 };
 
 use ahash::RandomState;
+use async_trait::async_trait;
 use axum::{body::Body, extract::Request, middleware::Next, response::Response};
 use bytes::Bytes;
 use http::{
@@ -15,14 +16,17 @@ use http::{
 };
 use moka::sync::{Cache as MokaCache, CacheBuilder as MokaCacheBuilder};
 use prometheus::{
-    register_counter_vec_with_registry, register_histogram_vec_with_registry, CounterVec,
-    HistogramVec, Registry,
+    register_counter_vec_with_registry, register_histogram_vec_with_registry,
+    register_int_gauge_with_registry, CounterVec, HistogramVec, IntGauge, Registry,
 };
 use sha1::{Digest, Sha1};
 use strum_macros::{Display, IntoStaticStr};
 use tokio::{select, sync::Mutex, time::sleep};
+use tokio_util::sync::CancellationToken;
 
-use super::{body::buffer_body, Error as HttpError};
+use crate::tasks::Run;
+
+use super::{body::buffer_body, calc_headers_size, Error as HttpError};
 
 #[derive(Debug, Clone, Display, PartialEq, Eq, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
@@ -113,6 +117,8 @@ pub struct Metrics {
     lock_await: HistogramVec,
     requests_count: CounterVec,
     requests_duration: HistogramVec,
+    memory: IntGauge,
+    entries: IntGauge,
 }
 
 impl Metrics {
@@ -143,6 +149,20 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+
+            memory: register_int_gauge_with_registry!(
+                "cache_memory",
+                "Memory usage by the cache in bytes",
+                registry,
+            )
+            .unwrap(),
+
+            entries: register_int_gauge_with_registry!(
+                "cache_entries",
+                "Count of entries in the cache",
+                registry,
+            )
+            .unwrap(),
         }
     }
 }
@@ -167,12 +187,9 @@ pub struct Cache<K: KeyExtractor> {
 
 fn weigh_entry<K: KeyExtractor>(_k: &K::Key, v: &Arc<Entry>) -> u32 {
     let mut size = size_of::<K::Key>() + size_of::<Arc<Entry>>();
-    size += v.response.body().len();
 
-    for (k, v) in v.response.headers() {
-        size += k.as_str().as_bytes().len();
-        size += v.as_bytes().len();
-    }
+    size += calc_headers_size(v.response.headers());
+    size += v.response.body().len();
 
     size as u32
 }
@@ -394,6 +411,31 @@ impl<K: KeyExtractor + 'static> Cache<K> {
         self.store.invalidate_all();
         self.locks.invalidate_all();
         self.housekeep();
+    }
+}
+
+#[async_trait]
+impl<K: KeyExtractor> Run for Cache<K> {
+    async fn run(&self, token: CancellationToken) -> Result<(), anyhow::Error> {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+
+        loop {
+            tokio::select! {
+                biased;
+                () = token.cancelled() => {
+                    break;
+                }
+
+                // Periodically update metrics
+                _ = interval.tick() => {
+                    self.store.run_pending_tasks();
+                    self.metrics.memory.set(self.store.weighted_size() as i64);
+                    self.metrics.entries.set(self.store.entry_count() as i64);
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
