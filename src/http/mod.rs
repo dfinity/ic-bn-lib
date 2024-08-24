@@ -45,9 +45,9 @@ pub enum Error {
     Generic(#[from] anyhow::Error),
 }
 
-// Calculate very approximate HTTP request/response headers size in bytes.
-// More or less accurate only for http/1.1 since in h2 headers are in HPACK-compressed.
-// But it seems there's no better way.
+/// Calculate very approximate HTTP request/response headers size in bytes.
+/// More or less accurate only for http/1.1 since in h2 headers are in HPACK-compressed.
+/// But it seems there's no better way.
 pub fn calc_headers_size(h: &HeaderMap) -> usize {
     h.iter().map(|(k, v)| k.as_str().len() + v.len() + 2).sum()
 }

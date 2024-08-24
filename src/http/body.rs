@@ -15,12 +15,13 @@ use tokio::sync::oneshot::{self, Receiver, Sender};
 use super::{calc_headers_size, Error};
 
 // Read the given body enforcing a size & time limit
-pub async fn buffer_body<H: HttpBody>(
+pub async fn buffer_body<H: HttpBody + Send>(
     body: H,
     size_limit: usize,
     timeout: Duration,
 ) -> Result<Bytes, Error>
 where
+    <H as HttpBody>::Data: Buf + Send + Sync + 'static,
     <H as HttpBody>::Error: std::error::Error + Send + Sync + 'static,
 {
     // Collect the request body up to the limit

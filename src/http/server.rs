@@ -229,7 +229,7 @@ pub enum RemoteAddr {
 }
 
 impl RemoteAddr {
-    pub fn family(&self) -> &str {
+    pub const fn family(&self) -> &str {
         match self {
             Self::Tcp(v) => {
                 if v.is_ipv4() {
@@ -242,7 +242,7 @@ impl RemoteAddr {
         }
     }
 
-    pub fn ip(&self) -> IpAddr {
+    pub const fn ip(&self) -> IpAddr {
         match self {
             Self::Tcp(v) => v.ip(),
             Self::Unix(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
