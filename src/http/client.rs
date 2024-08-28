@@ -18,6 +18,7 @@ pub trait Client: Send + Sync + fmt::Debug {
 /// HTTP client options
 pub struct Options {
     pub timeout_connect: Duration,
+    pub timeout_read: Duration,
     pub timeout: Duration,
     pub tcp_keepalive: Option<Duration>,
     pub http2_keepalive: Option<Duration>,
@@ -31,6 +32,7 @@ pub fn new(opts: Options, dns_resolver: impl Resolve + 'static) -> Result<reqwes
         .use_preconfigured_tls(opts.tls_config)
         .dns_resolver(Arc::new(dns_resolver))
         .connect_timeout(opts.timeout_connect)
+        .read_timeout(opts.timeout_read)
         .timeout(opts.timeout)
         .tcp_nodelay(true)
         .tcp_keepalive(opts.tcp_keepalive)
