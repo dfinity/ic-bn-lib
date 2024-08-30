@@ -12,8 +12,7 @@ use rustls::{
     crypto::aws_lc_rs,
     server::{ResolvesServerCert, StoresServerSessions},
     sign::CertifiedKey,
-    version::{TLS12, TLS13},
-    ServerConfig, TicketSwitcher,
+    ServerConfig, SupportedProtocolVersion, TicketSwitcher,
 };
 use std::{
     net::{Ipv4Addr, Ipv6Addr},
@@ -125,9 +124,10 @@ pub fn prepare_server_config(
     session_storage: Arc<dyn StoresServerSessions + Send + Sync>,
     additional_alpn: &[Vec<u8>],
     ticket_lifetime: Duration,
+    tls_versions: &[&'static SupportedProtocolVersion],
     registry: &Registry,
 ) -> ServerConfig {
-    let mut cfg = ServerConfig::builder_with_protocol_versions(&[&TLS13, &TLS12])
+    let mut cfg = ServerConfig::builder_with_protocol_versions(tls_versions)
         .with_no_client_auth()
         .with_cert_resolver(resolver);
 
