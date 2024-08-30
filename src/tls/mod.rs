@@ -2,11 +2,26 @@ pub mod acme;
 pub mod sessions;
 pub mod tickets;
 
+use std::sync::Arc;
+
 use anyhow::{anyhow, Context};
 use fqdn::{Fqdn, FQDN};
-use rustls::{crypto::aws_lc_rs, sign::CertifiedKey};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use prometheus::Registry;
+use rustls::{
+    compress::CompressionCache,
+    crypto::aws_lc_rs,
+    server::{ResolvesServerCert, StoresServerSessions},
+    sign::CertifiedKey,
+    version::{TLS12, TLS13},
+    ServerConfig, TicketSwitcher,
+};
+use std::{
+    net::{Ipv4Addr, Ipv6Addr},
+    time::Duration,
+};
 use x509_parser::prelude::{FromDer, GeneralName, ParsedExtension, X509Certificate};
+
+use crate::http::{ALPN_H1, ALPN_H2};
 
 /// Generic error for now
 /// TODO improve
@@ -103,6 +118,45 @@ pub fn pem_convert_to_rustls(key: &[u8], certs: &[u8]) -> Result<CertifiedKey, E
     let key = aws_lc_rs::sign::any_supported_type(&key).context("unable to parse private key")?;
 
     Ok(CertifiedKey::new(certs, key))
+}
+
+pub fn prepare_server_config(
+    resolver: Arc<dyn ResolvesServerCert>,
+    session_storage: Arc<dyn StoresServerSessions + Send + Sync>,
+    additional_alpn: &[Vec<u8>],
+    ticket_lifetime: Duration,
+    registry: &Registry,
+) -> ServerConfig {
+    let mut cfg = ServerConfig::builder_with_protocol_versions(&[&TLS13, &TLS12])
+        .with_no_client_auth()
+        .with_cert_resolver(resolver);
+
+    // Set custom session storage with to allow effective TLS session resumption
+    let session_storage = sessions::WithMetrics(session_storage, sessions::Metrics::new(registry));
+    cfg.session_storage = Arc::new(session_storage);
+
+    // Enable ticketer to encrypt/decrypt TLS tickets.
+    // TicketSwitcher rotates the inner ticketers every `ticket_lifetime`
+    // while keeping the previous one available for decryption of tickets
+    // issued earlier than `ticket_lifetime` ago.
+    let ticketer = tickets::WithMetrics(
+        TicketSwitcher::new(ticket_lifetime.as_secs() as u32, move || {
+            Ok(Box::new(tickets::Ticketer::new()))
+        })
+        .unwrap(),
+        tickets::Metrics::new(registry),
+    );
+    cfg.ticketer = Arc::new(ticketer);
+
+    // Enable certificate compression cache.
+    // See https://datatracker.ietf.org/doc/rfc8879/ for details
+    cfg.cert_compression_cache = Arc::new(CompressionCache::new(1024));
+
+    // Enable ALPN
+    cfg.alpn_protocols = vec![ALPN_H2.to_vec(), ALPN_H1.to_vec()];
+    cfg.alpn_protocols.extend_from_slice(additional_alpn);
+
+    cfg
 }
 
 #[cfg(test)]
