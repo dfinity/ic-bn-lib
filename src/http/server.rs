@@ -409,6 +409,7 @@ impl Conn {
 
         // Convert stream from Tokio to Hyper
         let stream = TokioIo::new(stream);
+        let max_requests_per_conn = self.options.max_requests_per_conn;
 
         // Convert router to Hyper service
         let service = hyper::service::service_fn(move |mut request: Request<Incoming>| {
@@ -420,15 +421,23 @@ impl Conn {
                 request.extensions_mut().insert(v.clone());
             }
 
-            // Check if we need to gracefully shutdown this connection
-            if let Some(v) = self.options.max_requests_per_conn {
-                if conn_count + 1 >= v {
-                    self.token.cancel();
-                }
-            }
-
             // Serve the request
-            self.router.clone().call(request)
+            let mut router = self.router.clone();
+            let token = self.token.clone();
+
+            async move {
+                // Get the result
+                let result = router.call(request).await;
+
+                // Check if we need to gracefully shutdown this connection
+                if let Some(v) = max_requests_per_conn {
+                    if conn_count + 1 >= v {
+                        token.cancel();
+                    }
+                }
+
+                result
+            }
         });
 
         // Serve the connection
