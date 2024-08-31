@@ -23,6 +23,7 @@ pub const X_IC_CANISTER_ID: HeaderName = HeaderName::from_static("x-ic-canister-
 pub const X_IC_COUNTRY_CODE: HeaderName = HeaderName::from_static("x-ic-country-code");
 pub const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 pub const X_REQUESTED_WITH: HeaderName = HeaderName::from_static("x-requested-with");
+pub const X_REAL_IP: http::HeaderName = http::HeaderName::from_static("x-real-ip");
 
 // Header values
 pub const CONTENT_TYPE_CBOR: HeaderValue = HeaderValue::from_static("application/cbor");
