@@ -1,7 +1,8 @@
 use std::{
+    default,
     fmt::Display,
     io,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
     os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::{
@@ -166,6 +167,19 @@ pub struct ConnInfo {
     pub close: CancellationToken,
 }
 
+impl Default for ConnInfo {
+    fn default() -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            accepted_at: Instant::now(),
+            remote_addr: Addr::default(),
+            traffic: Arc::new(Stats::new()),
+            req_count: AtomicU64::new(0),
+            close: CancellationToken::new(),
+        }
+    }
+}
+
 impl ConnInfo {
     pub fn req_count(&self) -> u64 {
         self.req_count.load(Ordering::SeqCst)
@@ -205,6 +219,15 @@ impl Listener {
 pub enum Addr {
     Tcp(SocketAddr),
     Unix(PathBuf),
+}
+
+impl Default for Addr {
+    fn default() -> Self {
+        Self::Tcp(SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::UNSPECIFIED,
+            666,
+        )))
+    }
 }
 
 impl Addr {
