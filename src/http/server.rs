@@ -2,6 +2,7 @@ use std::{
     fmt::Display,
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -494,14 +495,14 @@ impl Server {
         addr: Addr,
         router: Router,
         options: Options,
-        metrics: Metrics,
+        registry: &Registry,
         rustls_cfg: Option<rustls::ServerConfig>,
     ) -> Self {
         Self {
             addr,
             router,
             options,
-            metrics,
+            metrics: Metrics::new(registry),
             tracker: TaskTracker::new(),
             tls_acceptor: rustls_cfg.map(|x| TlsAcceptor::from(Arc::new(x))),
         }
@@ -636,9 +637,13 @@ pub fn listen_unix_backlog(path: PathBuf, backlog: u32) -> Result<UnixListener, 
         std::fs::remove_file(&path).context("unable to remove UNIX socket")?;
     }
 
-    socket.bind(path).context("unable to bind socket")?;
+    socket.bind(&path).context("unable to bind socket")?;
 
     let socket = socket.listen(backlog).context("unable to listen socket")?;
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))
+        .context("unable to set permissions on socket")?;
+
     Ok(socket)
 }
 
