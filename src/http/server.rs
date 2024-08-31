@@ -208,7 +208,7 @@ pub enum Addr {
 }
 
 impl Addr {
-    pub const fn family(&self) -> &str {
+    pub const fn family(&self) -> &'static str {
         match self {
             Self::Tcp(v) => {
                 if v.is_ipv4() {
