@@ -1,7 +1,11 @@
 [package]
 name = "ic-bn-lib"
+description = "Internet Computer Boundary Nodes shared modules"
 version = "0.1.0"
 edition = "2021"
+license-file = "LICENSE"
+repository = "https://github.com/dfinity/ic-bn-lib"
+readme = "README.md"
 
 [dependencies]
 ahash = "0.8"

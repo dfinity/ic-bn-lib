@@ -1,5 +1,4 @@
 use std::{
-    default,
     fmt::Display,
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
