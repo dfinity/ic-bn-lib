@@ -517,17 +517,27 @@ impl Server {
         addr: Addr,
         router: Router,
         options: Options,
-        registry: &Registry,
+        metrics: Metrics,
         rustls_cfg: Option<rustls::ServerConfig>,
     ) -> Self {
         Self {
             addr,
             router,
             options,
-            metrics: Metrics::new(registry),
+            metrics,
             tracker: TaskTracker::new(),
             tls_acceptor: rustls_cfg.map(|x| TlsAcceptor::from(Arc::new(x))),
         }
+    }
+
+    pub fn new_with_registry(
+        addr: Addr,
+        router: Router,
+        options: Options,
+        registry: &Registry,
+        rustls_cfg: Option<rustls::ServerConfig>,
+    ) -> Self {
+        Self::new(addr, router, options, Metrics::new(registry), rustls_cfg)
     }
 
     fn listen(&self) -> Result<Listener, Error> {
