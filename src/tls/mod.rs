@@ -10,7 +10,7 @@ use prometheus::Registry;
 use rustls::{
     compress::CompressionCache,
     crypto::aws_lc_rs,
-    server::{ResolvesServerCert, StoresServerSessions},
+    server::{ClientHello, ResolvesServerCert, StoresServerSessions},
     sign::CertifiedKey,
     ServerConfig, SupportedProtocolVersion, TicketSwitcher,
 };
@@ -21,6 +21,24 @@ use std::{
 use x509_parser::prelude::{FromDer, GeneralName, ParsedExtension, X509Certificate};
 
 use crate::http::{ALPN_H1, ALPN_H2};
+
+/// Rustls certificate resolver that always provides a single certificate
+#[derive(Clone, Debug)]
+pub struct StubResolver(Arc<CertifiedKey>);
+
+impl StubResolver {
+    pub fn new(cert: &[u8], key: &[u8]) -> Result<Self, Error> {
+        Ok(Self(Arc::new(
+            pem_convert_to_rustls(key, cert).context("unable to parse cert and/or key")?,
+        )))
+    }
+}
+
+impl ResolvesServerCert for StubResolver {
+    fn resolve(&self, _client_hello: ClientHello) -> Option<Arc<CertifiedKey>> {
+        Some(self.0.clone())
+    }
+}
 
 /// Generic error for now
 /// TODO improve
