@@ -80,8 +80,13 @@ impl Client for ReqwestClient {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ReqwestClientRoundRobin {
+    inner: Arc<ReqwestClientRoundRobinInner>,
+}
+
+#[derive(Debug)]
+struct ReqwestClientRoundRobinInner {
     cli: Vec<reqwest::Client>,
     next: AtomicUsize,
 }
@@ -91,11 +96,15 @@ impl ReqwestClientRoundRobin {
         opts: Options<R>,
         count: usize,
     ) -> Result<Self, Error> {
-        Ok(Self {
+        let inner = ReqwestClientRoundRobinInner {
             cli: (0..count)
                 .map(|_| new(opts.clone()))
                 .collect::<Result<Vec<_>, _>>()?,
             next: AtomicUsize::new(0),
+        };
+
+        Ok(Self {
+            inner: Arc::new(inner),
         })
     }
 }
@@ -103,8 +112,8 @@ impl ReqwestClientRoundRobin {
 #[async_trait]
 impl Client for ReqwestClientRoundRobin {
     async fn execute(&self, req: reqwest::Request) -> Result<reqwest::Response, reqwest::Error> {
-        let next = self.next.fetch_add(1, Ordering::SeqCst);
-        self.cli[next].execute(req).await
+        let next = self.inner.next.fetch_add(1, Ordering::SeqCst);
+        self.inner.cli[next].execute(req).await
     }
 }
 
