@@ -1,4 +1,11 @@
-use std::{fmt, sync::Arc, time::Duration};
+use std::{
+    fmt,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use anyhow::Context;
 use async_trait::async_trait;
@@ -15,8 +22,11 @@ pub trait Client: Send + Sync + fmt::Debug {
     async fn execute(&self, req: reqwest::Request) -> Result<reqwest::Response, reqwest::Error>;
 }
 
+pub trait CloneableDnsResolver: Resolve + Clone {}
+
 /// HTTP client options
-pub struct Options {
+#[derive(Clone)]
+pub struct Options<R: Resolve + Clone + 'static> {
     pub timeout_connect: Duration,
     pub timeout_read: Duration,
     pub timeout: Duration,
@@ -24,13 +34,12 @@ pub struct Options {
     pub http2_keepalive: Option<Duration>,
     pub http2_keepalive_timeout: Duration,
     pub user_agent: String,
-    pub tls_config: rustls::ClientConfig,
+    pub tls_config: Option<rustls::ClientConfig>,
+    pub dns_resolver: Option<R>,
 }
 
-pub fn new(opts: Options, dns_resolver: impl Resolve + 'static) -> Result<reqwest::Client, Error> {
-    let client = reqwest::Client::builder()
-        .use_preconfigured_tls(opts.tls_config)
-        .dns_resolver(Arc::new(dns_resolver))
+pub fn new<R: Resolve + Clone + 'static>(opts: Options<R>) -> Result<reqwest::Client, Error> {
+    let mut client = reqwest::Client::builder()
         .connect_timeout(opts.timeout_connect)
         .read_timeout(opts.timeout_read)
         .timeout(opts.timeout)
@@ -42,11 +51,17 @@ pub fn new(opts: Options, dns_resolver: impl Resolve + 'static) -> Result<reqwes
         .http2_adaptive_window(true)
         .user_agent(opts.user_agent)
         .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .build()
-        .context("unable to create reqwest client")?;
+        .no_proxy();
 
-    Ok(client)
+    if let Some(v) = opts.tls_config {
+        client = client.use_preconfigured_tls(v);
+    }
+
+    if let Some(v) = opts.dns_resolver {
+        client = client.dns_resolver(Arc::new(v));
+    }
+
+    Ok(client.build().context("unable to create reqwest client")?)
 }
 
 #[derive(Clone, Debug)]
@@ -62,6 +77,34 @@ impl ReqwestClient {
 impl Client for ReqwestClient {
     async fn execute(&self, req: reqwest::Request) -> Result<reqwest::Response, reqwest::Error> {
         self.0.execute(req).await
+    }
+}
+
+#[derive(Debug)]
+pub struct ReqwestClientRoundRobin {
+    cli: Vec<reqwest::Client>,
+    next: AtomicUsize,
+}
+
+impl ReqwestClientRoundRobin {
+    pub fn new<R: Resolve + Clone + 'static>(
+        opts: Options<R>,
+        count: usize,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            cli: (0..count)
+                .map(|_| new(opts.clone()))
+                .collect::<Result<Vec<_>, _>>()?,
+            next: AtomicUsize::new(0),
+        })
+    }
+}
+
+#[async_trait]
+impl Client for ReqwestClientRoundRobin {
+    async fn execute(&self, req: reqwest::Request) -> Result<reqwest::Response, reqwest::Error> {
+        let next = self.next.fetch_add(1, Ordering::SeqCst);
+        self.cli[next].execute(req).await
     }
 }
 
