@@ -112,7 +112,7 @@ impl ReqwestClientRoundRobin {
 #[async_trait]
 impl Client for ReqwestClientRoundRobin {
     async fn execute(&self, req: reqwest::Request) -> Result<reqwest::Response, reqwest::Error> {
-        let next = self.inner.next.fetch_add(1, Ordering::SeqCst);
+        let next = self.inner.next.fetch_add(1, Ordering::SeqCst) % self.inner.cli.len();
         self.inner.cli[next].execute(req).await
     }
 }
