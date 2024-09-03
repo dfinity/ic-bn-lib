@@ -212,6 +212,13 @@ impl Listener {
             }
         })
     }
+
+    pub fn local_addr(&self) -> Option<SocketAddr> {
+        match &self {
+            Self::Tcp(v) => v.local_addr().ok(),
+            Self::Unix(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -549,7 +556,14 @@ impl Server {
 
     pub async fn serve(&self, token: CancellationToken) -> Result<(), Error> {
         let listener = self.listen()?;
+        self.serve_with_listener(listener, token).await
+    }
 
+    pub async fn serve_with_listener(
+        &self,
+        listener: Listener,
+        token: CancellationToken,
+    ) -> Result<(), Error> {
         // Prepare Hyper connection builder
         // It automatically figures out whether to do HTTP1 or HTTP2
         let mut builder = Builder::new(TokioExecutor::new());
