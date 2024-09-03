@@ -195,6 +195,13 @@ pub enum Listener {
 }
 
 impl Listener {
+    pub fn new(addr: Addr, backlog: u32) -> Result<Self, Error> {
+        Ok(match addr {
+            Addr::Tcp(v) => Self::Tcp(listen_tcp_backlog(v, backlog)?),
+            Addr::Unix(v) => Self::Unix(listen_unix_backlog(v, backlog)?),
+        })
+    }
+
     async fn accept(&self) -> Result<(Box<dyn AsyncReadWrite>, Addr), io::Error> {
         Ok(match self {
             Self::Tcp(v) => {
@@ -547,15 +554,8 @@ impl Server {
         Self::new(addr, router, options, Metrics::new(registry), rustls_cfg)
     }
 
-    fn listen(&self) -> Result<Listener, Error> {
-        Ok(match &self.addr {
-            Addr::Tcp(v) => Listener::Tcp(listen_tcp_backlog(*v, self.options.backlog)?),
-            Addr::Unix(v) => Listener::Unix(listen_unix_backlog(v.clone(), self.options.backlog)?),
-        })
-    }
-
     pub async fn serve(&self, token: CancellationToken) -> Result<(), Error> {
-        let listener = self.listen()?;
+        let listener = Listener::new(self.addr.clone(), self.options.backlog)?;
         self.serve_with_listener(listener, token).await
     }
 
