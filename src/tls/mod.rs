@@ -9,7 +9,7 @@ use fqdn::{Fqdn, FQDN};
 use prometheus::Registry;
 use rustls::{
     compress::CompressionCache,
-    crypto::aws_lc_rs,
+    crypto::ring,
     server::{ClientHello, ResolvesServerCert, StoresServerSessions},
     sign::CertifiedKey,
     ServerConfig, SupportedProtocolVersion, TicketSwitcher,
@@ -132,7 +132,7 @@ pub fn pem_convert_to_rustls(key: &[u8], certs: &[u8]) -> Result<CertifiedKey, E
     }
 
     // Parse private key
-    let key = aws_lc_rs::sign::any_supported_type(&key).context("unable to parse private key")?;
+    let key = ring::sign::any_supported_type(&key).context("unable to parse private key")?;
 
     Ok(CertifiedKey::new(certs, key))
 }
