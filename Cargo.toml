@@ -18,7 +18,7 @@ base64 = "0.22"
 bytes = "1.6"
 chacha20poly1305 = "0.10"
 chrono = "0.4"
-cloudflare = { git = "https://github.com/cloudflare/cloudflare-rs.git", default-features = false, features = [
+cloudflare = { git = "https://github.com/cloudflare/cloudflare-rs.git", rev = "f14720e42184ee176a97676e85ef2d2d85bc3aae", default-features = false, features = [
     "rustls-tls",
 ] }
 derive-new = "0.6"
@@ -49,9 +49,6 @@ regex = "1.10"
 reqwest = { version = "0.12.7", default-features = false, features = [
     "http2",
     "rustls-tls",
-    "deflate",
-    "gzip",
-    "brotli",
     "hickory-dns",
     "json",
     "stream",
@@ -59,7 +56,6 @@ reqwest = { version = "0.12.7", default-features = false, features = [
 rustls = { version = "0.23.12", default-features = false, features = [
     "ring",
     "std",
-    "logging",
     "brotli",
 ] }
 rustls-acme = { version = "0.11", default-features = false, features = [
