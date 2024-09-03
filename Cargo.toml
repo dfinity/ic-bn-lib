@@ -36,12 +36,15 @@ http-body = "1.0"
 http-body-util = "0.1"
 hyper = "1.4"
 hyper-util = { version = "0.1", features = ["full"] }
-instant-acme = "0.7"
+instant-acme = { version = "0.7.1", default-features = false, features = [
+    "ring",
+    "hyper-rustls",
+] }
 mockall = "0.12"
 moka = { version = "0.12", features = ["sync", "future"] }
 prometheus = "0.13"
 rand = "0.8"
-rcgen = { version = "0.13", features = ["aws_lc_rs"] }
+rcgen = "0.13.1"
 regex = "1.10"
 reqwest = { version = "0.12.7", default-features = false, features = [
     "http2",
@@ -53,13 +56,16 @@ reqwest = { version = "0.12.7", default-features = false, features = [
     "json",
     "stream",
 ] }
-rustls = { version = "0.23.12", default_features = false, features = [
+rustls = { version = "0.23.12", default-features = false, features = [
     "ring",
     "std",
     "logging",
     "brotli",
 ] }
-rustls-acme = "0.11"
+rustls-acme = { version = "0.11", default-features = false, features = [
+    "tls12",
+    "ring",
+] }
 rustls-pemfile = "2"
 serde_json = "1.0"
 sha1 = "0.10"
@@ -69,7 +75,11 @@ sync_wrapper = "1.0"
 thiserror = "1.0"
 tokio = { version = "1.39", features = ["full"] }
 tokio-util = { version = "0.7", features = ["full"] }
-tokio-rustls = "0.26"
+tokio-rustls = { version = "0.26.0", default-features = false, features = [
+    "tls12",
+    "logging",
+    "ring",
+] }
 tower = "0.4"
 tower-service = "0.3"
 tracing = "0.1"
