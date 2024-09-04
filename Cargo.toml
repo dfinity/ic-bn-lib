@@ -17,7 +17,6 @@ backoff = { version = "0.4", features = ["tokio"] }
 base64 = "0.22"
 bytes = "1.6"
 chacha20poly1305 = "0.10"
-chrono = "0.4"
 cloudflare = { git = "https://github.com/cloudflare/cloudflare-rs.git", rev = "f14720e42184ee176a97676e85ef2d2d85bc3aae", default-features = false, features = [
     "rustls-tls",
 ] }
@@ -45,7 +44,6 @@ moka = { version = "0.12", features = ["sync", "future"] }
 prometheus = "0.13"
 rand = "0.8"
 rcgen = "0.13.1"
-regex = "1.10"
 reqwest = { version = "0.12.7", default-features = false, features = [
     "http2",
     "rustls-tls",
@@ -69,14 +67,14 @@ strum = { version = "0.26", features = ["derive"] }
 strum_macros = "0.26"
 sync_wrapper = "1.0"
 thiserror = "1.0"
-tokio = { version = "1.39", features = ["full"] }
+tokio = { version = "1.40", features = ["full"] }
 tokio-util = { version = "0.7", features = ["full"] }
 tokio-rustls = { version = "0.26.0", default-features = false, features = [
     "tls12",
     "logging",
     "ring",
 ] }
-tower = "0.4"
+tower = { version = "0.5", features = ["util"] }
 tower-service = "0.3"
 tracing = "0.1"
 url = "2.5"
