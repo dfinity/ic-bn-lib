@@ -4,7 +4,9 @@
 #![allow(clippy::declare_interior_mutable_const)]
 #![allow(clippy::borrow_interior_mutable_const)]
 
-use http::header::{HeaderName, HeaderValue};
+use http::header::{
+    HeaderMap, HeaderName, HeaderValue, CONNECTION, TE, TRANSFER_ENCODING, UPGRADE,
+};
 
 // Header names
 pub const X_IC_CACHE_STATUS: HeaderName = HeaderName::from_static("x-ic-cache-status");
@@ -33,3 +35,38 @@ pub const CONTENT_TYPE_HTML: HeaderValue = HeaderValue::from_static("text/html; 
 pub const HSTS_1YEAR: HeaderValue = HeaderValue::from_static("max-age=31536000; includeSubDomains");
 pub const X_CONTENT_TYPE_OPTIONS_NO_SNIFF: HeaderValue = HeaderValue::from_static("nosniff");
 pub const X_FRAME_OPTIONS_DENY: HeaderValue = HeaderValue::from_static("DENY");
+
+static CONNECTION_HEADERS: [HeaderName; 4] = [
+    HeaderName::from_static("keep-alive"),
+    HeaderName::from_static("proxy-connection"),
+    TRANSFER_ENCODING,
+    UPGRADE,
+];
+
+/// Function strips connection-related headers from an HTTP/1.1
+/// request so that it becomes a valid HTTP/2 requests
+pub fn strip_connection_headers(headers: &mut HeaderMap) {
+    for header in &CONNECTION_HEADERS {
+        headers.remove(header);
+    }
+
+    // TE is forbidden unless it's "trailers"
+    if headers
+        .get(TE)
+        .map_or(false, |te_header| te_header != "trailers")
+    {
+        headers.remove(TE);
+    }
+
+    if let Some(header) = headers.remove(CONNECTION) {
+        let header_contents = header.to_str().unwrap();
+
+        // A `Connection` header may have a comma-separated list of names of other headers that
+        // are meant for only this specific connection.
+        // Iterate these names and remove them as headers.
+        for name in header_contents.split(',') {
+            let name = name.trim();
+            headers.remove(name);
+        }
+    }
+}
