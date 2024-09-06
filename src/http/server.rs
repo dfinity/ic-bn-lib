@@ -259,7 +259,7 @@ impl Addr {
 
     pub const fn ip(&self) -> IpAddr {
         match self {
-            Self::Tcp(v) => v.ip(),
+            Self::Tcp(v) => v.ip().to_canonical(),
             Self::Unix(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         }
     }
