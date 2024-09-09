@@ -36,15 +36,16 @@ pub const HSTS_1YEAR: HeaderValue = HeaderValue::from_static("max-age=31536000; 
 pub const X_CONTENT_TYPE_OPTIONS_NO_SNIFF: HeaderValue = HeaderValue::from_static("nosniff");
 pub const X_FRAME_OPTIONS_DENY: HeaderValue = HeaderValue::from_static("DENY");
 
-static CONNECTION_HEADERS: [HeaderName; 4] = [
+static CONNECTION_HEADERS: [HeaderName; 5] = [
     HeaderName::from_static("keep-alive"),
     HeaderName::from_static("proxy-connection"),
+    HeaderName::from_static("http2-settings"),
     TRANSFER_ENCODING,
     UPGRADE,
 ];
 
-/// Function strips connection-related headers from an HTTP/1.1
-/// request so that it becomes a valid HTTP/2 requests
+/// Strip connection-related headers from an HTTP/1.1
+/// request so that it becomes a valid HTTP/2 request
 pub fn strip_connection_headers(headers: &mut HeaderMap) {
     for header in &CONNECTION_HEADERS {
         headers.remove(header);
