@@ -418,6 +418,7 @@ impl<K: KeyExtractor + 'static> Cache<K> {
 impl<K: KeyExtractor> Run for Cache<K> {
     async fn run(&self, token: CancellationToken) -> Result<(), anyhow::Error> {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
