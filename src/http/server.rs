@@ -247,7 +247,7 @@ impl Addr {
     pub const fn family(&self) -> &'static str {
         match self {
             Self::Tcp(v) => {
-                if v.is_ipv4() {
+                if v.ip().to_canonical().is_ipv4() {
                     "v4"
                 } else {
                     "v6"
