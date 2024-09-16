@@ -48,6 +48,7 @@ impl<T: AsyncRead + AsyncWrite + Send + Sync + Unpin> AsyncReadWrite for T {}
 
 #[derive(Clone)]
 pub struct Metrics {
+    conns: IntCounterVec,
     conns_open: IntGaugeVec,
     requests: IntCounterVec,
     bytes_sent: IntCounterVec,
@@ -61,6 +62,14 @@ impl Metrics {
         const LABELS: &[&str] = &["addr", "tls", "family", "forced_close", "recycled"];
 
         Self {
+            conns: register_int_counter_vec_with_registry!(
+                format!("conn_total"),
+                format!("Counts the number of connections"),
+                LABELS,
+                registry
+            )
+            .unwrap(),
+
             conns_open: register_int_gauge_vec_with_registry!(
                 format!("conn_open"),
                 format!("Number of currently open connections"),
@@ -350,6 +359,7 @@ impl Conn {
             "no",
         ];
 
+        self.metrics.conns.with_label_values(labels).inc();
         self.metrics
             .conns_open
             .with_label_values(&labels[0..3])

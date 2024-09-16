@@ -423,6 +423,7 @@ impl<K: KeyExtractor> Run for Cache<K> {
         loop {
             tokio::select! {
                 biased;
+
                 () = token.cancelled() => {
                     break;
                 }

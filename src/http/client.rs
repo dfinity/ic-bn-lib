@@ -2,15 +2,16 @@ use std::{
     fmt,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex, RwLock,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::Context;
 use async_trait::async_trait;
 use http::header::HeaderValue;
 use mockall::automock;
+use rand::{rngs::OsRng, seq::IteratorRandom};
 use reqwest::{dns::Resolve, Request, Response};
 
 use super::Error;
@@ -25,8 +26,8 @@ pub trait Client: Send + Sync + fmt::Debug {
 pub trait CloneableDnsResolver: Resolve + Clone {}
 
 /// HTTP client options
-#[derive(Clone)]
-pub struct Options<R: Resolve + Clone + 'static> {
+#[derive(Debug, Clone)]
+pub struct Options<R: Resolve + fmt::Debug + Clone + 'static> {
     pub timeout_connect: Duration,
     pub timeout_read: Duration,
     pub timeout: Duration,
@@ -41,7 +42,9 @@ pub struct Options<R: Resolve + Clone + 'static> {
     pub dns_resolver: Option<R>,
 }
 
-pub fn new<R: Resolve + Clone + 'static>(opts: Options<R>) -> Result<reqwest::Client, Error> {
+pub fn new<R: Resolve + fmt::Debug + Clone + 'static>(
+    opts: Options<R>,
+) -> Result<reqwest::Client, Error> {
     let mut client = reqwest::Client::builder()
         .connect_timeout(opts.timeout_connect)
         .read_timeout(opts.timeout_read)
@@ -76,7 +79,7 @@ pub fn new<R: Resolve + Clone + 'static>(opts: Options<R>) -> Result<reqwest::Cl
 pub struct ReqwestClient(reqwest::Client);
 
 impl ReqwestClient {
-    pub fn new<R: Resolve + Clone + 'static>(opts: Options<R>) -> Result<Self, Error> {
+    pub fn new<R: Resolve + fmt::Debug + Clone + 'static>(opts: Options<R>) -> Result<Self, Error> {
         Ok(Self(new(opts)?))
     }
 }
@@ -100,7 +103,7 @@ struct ReqwestClientRoundRobinInner {
 }
 
 impl ReqwestClientRoundRobin {
-    pub fn new<R: Resolve + Clone + 'static>(
+    pub fn new<R: Resolve + fmt::Debug + Clone + 'static>(
         opts: Options<R>,
         count: usize,
     ) -> Result<Self, Error> {
@@ -137,7 +140,7 @@ struct ReqwestClientLeastLoadedInner {
 }
 
 impl ReqwestClientLeastLoaded {
-    pub fn new<R: Resolve + Clone + 'static>(
+    pub fn new<R: Resolve + fmt::Debug + Clone + 'static>(
         opts: Options<R>,
         count: usize,
     ) -> Result<Self, Error> {
@@ -173,6 +176,106 @@ impl Client for ReqwestClientLeastLoaded {
     }
 }
 
+#[derive(Debug)]
+pub struct ReqwestClientDynamic {
+    generator: fn() -> Result<Arc<dyn Client>, Error>,
+    max_clients: usize,
+    max_outstanding: usize,
+    idle_timeout: Duration,
+    pool: Mutex<Vec<Arc<ReqwestClientDynamicInner>>>,
+}
+
+#[derive(Debug)]
+struct ReqwestClientDynamicInner {
+    cli: Arc<dyn Client>,
+    outstanding: AtomicUsize,
+    last_request: RwLock<Instant>,
+}
+
+impl ReqwestClientDynamicInner {
+    fn new(cli: Arc<dyn Client>) -> Self {
+        Self {
+            cli,
+            outstanding: AtomicUsize::new(0),
+            last_request: RwLock::new(Instant::now()),
+        }
+    }
+}
+
+impl ReqwestClientDynamic {
+    pub fn new(
+        generator: fn() -> Result<Arc<dyn Client>, Error>,
+        max_clients: usize,
+        max_outstanding: usize,
+        idle_timeout: Duration,
+    ) -> Result<Self, Error> {
+        let inner = Arc::new(ReqwestClientDynamicInner::new(generator()?));
+        let mut pool = Vec::with_capacity(max_clients);
+        pool.push(inner);
+
+        Ok(Self {
+            generator,
+            max_clients,
+            max_outstanding,
+            idle_timeout,
+            pool: Mutex::new(pool),
+        })
+    }
+
+    fn get_client(&self) -> Arc<ReqwestClientDynamicInner> {
+        let mut pool = self.pool.lock().unwrap();
+
+        // Drop unused clients while leaving one always available
+        // TODO find a better way?
+        let mut to_drop = Vec::with_capacity(self.max_clients - 1);
+        for (i, v) in pool.iter().enumerate() {
+            if i > 0
+                && v.outstanding.load(Ordering::SeqCst) == 0
+                && v.last_request.read().unwrap().elapsed() < self.idle_timeout
+            {
+                to_drop.push(i);
+            }
+        }
+        for i in to_drop.into_iter().rev() {
+            pool.remove(i);
+        }
+
+        pool.iter()
+            // First try to find an existing client with spare capacity
+            .find_map(|x| {
+                (x.outstanding.load(Ordering::SeqCst) < self.max_outstanding).then(|| x.clone())
+            })
+            // Otherwise see if we have spare space in the pool
+            .unwrap_or_else(|| {
+                // If not - just pick a random client
+                if pool.len() >= self.max_clients {
+                    pool.iter().choose(&mut OsRng).unwrap().clone()
+                } else {
+                    // Otherwise generate a new client and use it
+                    // The error is checked only in new() for now.
+                    let cli = (self.generator)().unwrap();
+                    let inner = Arc::new(ReqwestClientDynamicInner::new(cli));
+                    pool.push(inner.clone());
+                    inner
+                }
+            })
+    }
+}
+
+#[async_trait]
+impl Client for ReqwestClientDynamic {
+    async fn execute(&self, req: Request) -> Result<Response, reqwest::Error> {
+        let inner = self.get_client();
+
+        *inner.last_request.write().unwrap() = Instant::now();
+        inner.outstanding.fetch_add(1, Ordering::SeqCst);
+        let res = inner.cli.execute(req).await;
+        inner.outstanding.fetch_sub(1, Ordering::SeqCst);
+
+        res
+    }
+}
+
 pub fn basic_auth<U, P>(username: U, password: Option<P>) -> HeaderValue
 where
     U: std::fmt::Display,
@@ -194,4 +297,52 @@ where
     let mut header = HeaderValue::from_bytes(&buf).expect("base64 is always valid HeaderValue");
     header.set_sensitive(true);
     header
+}
+
+#[cfg(test)]
+mod test {
+    use futures::future::join_all;
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct TestClient;
+
+    #[async_trait]
+    impl Client for TestClient {
+        async fn execute(
+            &self,
+            _req: reqwest::Request,
+        ) -> Result<reqwest::Response, reqwest::Error> {
+            let resp = ::http::Response::new(vec![]);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok(resp.into())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_client() {
+        let cli = Arc::new(
+            ReqwestClientDynamic::new(|| Ok(Arc::new(TestClient)), 10, 10, Duration::from_secs(90))
+                .unwrap(),
+        );
+
+        let mut futs = vec![];
+        for _ in 0..200 {
+            let req =
+                reqwest::Request::new(reqwest::Method::GET, url::Url::parse("http://foo").unwrap());
+
+            let cli = cli.clone();
+            futs.push(async move { cli.execute(req).await });
+        }
+
+        join_all(futs).await;
+        let pool = cli.pool.lock().unwrap();
+
+        assert_eq!(pool.len(), 10);
+
+        for x in pool.iter() {
+            assert_eq!(x.outstanding.load(Ordering::SeqCst), 0);
+        }
+    }
 }
