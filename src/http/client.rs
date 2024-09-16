@@ -176,9 +176,11 @@ impl Client for ReqwestClientLeastLoaded {
     }
 }
 
+pub type ClientGenerator = fn() -> Result<Arc<dyn Client>, Error>;
+
 #[derive(Debug)]
 pub struct ReqwestClientDynamic {
-    generator: fn() -> Result<Arc<dyn Client>, Error>,
+    generator: ClientGenerator,
     max_clients: usize,
     max_outstanding: usize,
     idle_timeout: Duration,
@@ -204,7 +206,7 @@ impl ReqwestClientDynamicInner {
 
 impl ReqwestClientDynamic {
     pub fn new(
-        generator: fn() -> Result<Arc<dyn Client>, Error>,
+        generator: ClientGenerator,
         max_clients: usize,
         max_outstanding: usize,
         idle_timeout: Duration,
