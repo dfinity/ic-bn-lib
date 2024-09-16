@@ -176,12 +176,12 @@ impl Client for ReqwestClientLeastLoaded {
     }
 }
 
-pub trait ClientGenerator {
+pub trait ClientGenerator: Send + Sync + fmt::Debug {
     fn generate(&self) -> Result<Arc<dyn Client>, Error>;
 }
 
 #[derive(Debug)]
-pub struct ReqwestClientDynamic<G: ClientGenerator + Send + Sync + fmt::Debug> {
+pub struct ReqwestClientDynamic<G: ClientGenerator> {
     generator: G,
     max_clients: usize,
     max_outstanding: usize,
@@ -206,7 +206,7 @@ impl ReqwestClientDynamicInner {
     }
 }
 
-impl<G: ClientGenerator + Send + Sync + fmt::Debug> ReqwestClientDynamic<G> {
+impl<G: ClientGenerator> ReqwestClientDynamic<G> {
     pub fn new(
         generator: G,
         max_clients: usize,
@@ -267,7 +267,7 @@ impl<G: ClientGenerator + Send + Sync + fmt::Debug> ReqwestClientDynamic<G> {
 }
 
 #[async_trait]
-impl<G: ClientGenerator + Send + Sync + fmt::Debug> Client for ReqwestClientDynamic<G> {
+impl<G: ClientGenerator> Client for ReqwestClientDynamic<G> {
     async fn execute(&self, req: Request) -> Result<Response, reqwest::Error> {
         let inner = self.get_client();
 
