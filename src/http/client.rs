@@ -176,11 +176,13 @@ impl Client for ReqwestClientLeastLoaded {
     }
 }
 
-pub type ClientGenerator = fn() -> Result<Arc<dyn Client>, Error>;
+pub trait ClientGenerator {
+    fn generate(&self) -> Result<Arc<dyn Client>, Error>;
+}
 
 #[derive(Debug)]
-pub struct ReqwestClientDynamic {
-    generator: ClientGenerator,
+pub struct ReqwestClientDynamic<G: ClientGenerator + Send + Sync + fmt::Debug> {
+    generator: G,
     max_clients: usize,
     max_outstanding: usize,
     idle_timeout: Duration,
@@ -204,14 +206,14 @@ impl ReqwestClientDynamicInner {
     }
 }
 
-impl ReqwestClientDynamic {
+impl<G: ClientGenerator + Send + Sync + fmt::Debug> ReqwestClientDynamic<G> {
     pub fn new(
-        generator: ClientGenerator,
+        generator: G,
         max_clients: usize,
         max_outstanding: usize,
         idle_timeout: Duration,
     ) -> Result<Self, Error> {
-        let inner = Arc::new(ReqwestClientDynamicInner::new(generator()?));
+        let inner = Arc::new(ReqwestClientDynamicInner::new(generator.generate()?));
         let mut pool = Vec::with_capacity(max_clients);
         pool.push(inner);
 
@@ -255,7 +257,7 @@ impl ReqwestClientDynamic {
                 } else {
                     // Otherwise generate a new client and use it
                     // The error is checked only in new() for now.
-                    let cli = (self.generator)().unwrap();
+                    let cli = self.generator.generate().unwrap();
                     let inner = Arc::new(ReqwestClientDynamicInner::new(cli));
                     pool.push(inner.clone());
                     inner
@@ -265,7 +267,7 @@ impl ReqwestClientDynamic {
 }
 
 #[async_trait]
-impl Client for ReqwestClientDynamic {
+impl<G: ClientGenerator + Send + Sync + fmt::Debug> Client for ReqwestClientDynamic<G> {
     async fn execute(&self, req: Request) -> Result<Response, reqwest::Error> {
         let inner = self.get_client();
 
@@ -322,10 +324,18 @@ mod test {
         }
     }
 
+    #[derive(Debug)]
+    struct TestClientGenerator;
+    impl ClientGenerator for TestClientGenerator {
+        fn generate(&self) -> Result<Arc<dyn Client>, Error> {
+            Ok(Arc::new(TestClient))
+        }
+    }
+
     #[tokio::test]
     async fn test_dynamic_client() {
         let cli = Arc::new(
-            ReqwestClientDynamic::new(|| Ok(Arc::new(TestClient)), 10, 10, Duration::from_secs(90))
+            ReqwestClientDynamic::new(TestClientGenerator, 10, 10, Duration::from_secs(90))
                 .unwrap(),
         );
 
