@@ -2,7 +2,7 @@ use std::{
     fmt,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex, RwLock,
+        Arc, Mutex, MutexGuard, RwLock,
     },
     time::{Duration, Instant},
 };
@@ -226,23 +226,24 @@ impl<G: ClientGenerator> ReqwestClientDynamic<G> {
         })
     }
 
-    fn get_client(&self) -> Arc<ReqwestClientDynamicInner> {
-        let mut pool = self.pool.lock().unwrap();
-
-        // Drop unused clients while leaving one always available
-        // TODO find a better way?
-        let mut to_drop = Vec::with_capacity(self.max_clients - 1);
-        for (i, v) in pool.iter().enumerate() {
-            if i > 0
-                && v.outstanding.load(Ordering::SeqCst) == 0
-                && v.last_request.read().unwrap().elapsed() < self.idle_timeout
+    // Drop unused clients while leaving one always available
+    // TODO find a better way?
+    fn cleanup(&self, pool: &mut MutexGuard<'_, Vec<Arc<ReqwestClientDynamicInner>>>) {
+        let mut j = 1;
+        for i in 1..pool.len() {
+            if !(pool[i].outstanding.load(Ordering::SeqCst) == 0
+                && pool[i].last_request.read().unwrap().elapsed() > self.idle_timeout)
             {
-                to_drop.push(i);
+                pool.swap(i, j);
+                j += 1
             }
         }
-        for i in to_drop.into_iter().rev() {
-            pool.remove(i);
-        }
+        pool.truncate(j);
+    }
+
+    fn get_client(&self) -> Arc<ReqwestClientDynamicInner> {
+        let mut pool = self.pool.lock().unwrap();
+        self.cleanup(&mut pool);
 
         pool.iter()
             // First try to find an existing client with spare capacity
@@ -335,8 +336,7 @@ mod test {
     #[tokio::test]
     async fn test_dynamic_client() {
         let cli = Arc::new(
-            ReqwestClientDynamic::new(TestClientGenerator, 10, 10, Duration::from_secs(90))
-                .unwrap(),
+            ReqwestClientDynamic::new(TestClientGenerator, 10, 10, Duration::ZERO).unwrap(),
         );
 
         let mut futs = vec![];
@@ -349,12 +349,14 @@ mod test {
         }
 
         join_all(futs).await;
-        let pool = cli.pool.lock().unwrap();
-
+        let mut pool = cli.pool.lock().unwrap();
         assert_eq!(pool.len(), 10);
 
         for x in pool.iter() {
             assert_eq!(x.outstanding.load(Ordering::SeqCst), 0);
         }
+
+        cli.cleanup(&mut pool);
+        assert_eq!(pool.len(), 1);
     }
 }
