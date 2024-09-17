@@ -23,11 +23,13 @@ pub trait Client: Send + Sync + fmt::Debug {
     async fn execute(&self, req: Request) -> Result<Response, reqwest::Error>;
 }
 
-pub trait CloneableDnsResolver: Resolve + Clone {}
+pub trait ClientWithStats: Client + Stats {}
+
+pub trait CloneableDnsResolver: Resolve + Clone + fmt::Debug + 'static {}
 
 /// HTTP client options
 #[derive(Debug, Clone)]
-pub struct Options<R: Resolve + fmt::Debug + Clone + 'static> {
+pub struct Options<R: CloneableDnsResolver> {
     pub timeout_connect: Duration,
     pub timeout_read: Duration,
     pub timeout: Duration,
@@ -42,9 +44,7 @@ pub struct Options<R: Resolve + fmt::Debug + Clone + 'static> {
     pub dns_resolver: Option<R>,
 }
 
-pub fn new<R: Resolve + fmt::Debug + Clone + 'static>(
-    opts: Options<R>,
-) -> Result<reqwest::Client, Error> {
+pub fn new<R: CloneableDnsResolver>(opts: Options<R>) -> Result<reqwest::Client, Error> {
     let mut client = reqwest::Client::builder()
         .connect_timeout(opts.timeout_connect)
         .read_timeout(opts.timeout_read)
@@ -79,7 +79,7 @@ pub fn new<R: Resolve + fmt::Debug + Clone + 'static>(
 pub struct ReqwestClient(reqwest::Client);
 
 impl ReqwestClient {
-    pub fn new<R: Resolve + fmt::Debug + Clone + 'static>(opts: Options<R>) -> Result<Self, Error> {
+    pub fn new<R: CloneableDnsResolver>(opts: Options<R>) -> Result<Self, Error> {
         Ok(Self(new(opts)?))
     }
 }
@@ -103,10 +103,7 @@ struct ReqwestClientRoundRobinInner {
 }
 
 impl ReqwestClientRoundRobin {
-    pub fn new<R: Resolve + fmt::Debug + Clone + 'static>(
-        opts: Options<R>,
-        count: usize,
-    ) -> Result<Self, Error> {
+    pub fn new<R: CloneableDnsResolver>(opts: Options<R>, count: usize) -> Result<Self, Error> {
         let inner = ReqwestClientRoundRobinInner {
             cli: (0..count)
                 .map(|_| new(opts.clone()))
@@ -140,10 +137,7 @@ struct ReqwestClientLeastLoadedInner {
 }
 
 impl ReqwestClientLeastLoaded {
-    pub fn new<R: Resolve + fmt::Debug + Clone + 'static>(
-        opts: Options<R>,
-        count: usize,
-    ) -> Result<Self, Error> {
+    pub fn new<R: CloneableDnsResolver>(opts: Options<R>, count: usize) -> Result<Self, Error> {
         let inner = (0..count)
             .map(|_| -> Result<_, _> {
                 Ok::<_, Error>(ReqwestClientLeastLoadedInner {
@@ -178,6 +172,16 @@ impl Client for ReqwestClientLeastLoaded {
 
 pub trait ClientGenerator: Send + Sync + fmt::Debug {
     fn generate(&self) -> Result<Arc<dyn Client>, Error>;
+}
+
+#[derive(Debug, Clone)]
+pub struct ReqwestClientDynamicStats {
+    pub pool_size: usize,
+    pub outstanding: usize,
+}
+
+pub trait Stats {
+    fn stats(&self) -> ReqwestClientDynamicStats;
 }
 
 #[derive(Debug)]
@@ -226,8 +230,9 @@ impl<G: ClientGenerator> ReqwestClientDynamic<G> {
         })
     }
 
-    // Drop unused clients while leaving one always available
-    // TODO find a better way?
+    /// Drop unused clients while leaving one always available.
+    /// Algo mimics Vec::retain().
+    /// TODO find a better way?
     fn cleanup(&self, pool: &mut MutexGuard<'_, Vec<Arc<ReqwestClientDynamicInner>>>) {
         let mut j = 1;
         for i in 1..pool.len() {
@@ -264,6 +269,22 @@ impl<G: ClientGenerator> ReqwestClientDynamic<G> {
                     inner
                 }
             })
+    }
+}
+
+impl<G: ClientGenerator> Stats for ReqwestClientDynamic<G> {
+    fn stats(&self) -> ReqwestClientDynamicStats {
+        let pool = self.pool.lock().unwrap();
+
+        let outstanding: usize = pool
+            .iter()
+            .map(|x| x.outstanding.load(Ordering::SeqCst))
+            .sum();
+
+        ReqwestClientDynamicStats {
+            pool_size: pool.len(),
+            outstanding,
+        }
     }
 }
 

@@ -59,7 +59,7 @@ pub struct Metrics {
 
 impl Metrics {
     pub fn new(registry: &Registry) -> Self {
-        const LABELS: &[&str] = &["addr", "tls", "family", "forced_close", "recycled"];
+        const LABELS: &[&str] = &["addr", "family", "tls", "forced_close", "recycled"];
 
         Self {
             conns: register_int_counter_vec_with_registry!(
@@ -348,22 +348,12 @@ impl Conn {
         // Prepare metric labels
         let addr = self.addr.to_string();
         let labels = &mut [
-            addr.as_str(), // Listening addr
-            if self.tls_acceptor.is_some() {
-                "yes"
-            } else {
-                "no"
-            }, // Is TLS
-            self.remote_addr.family(),
-            "no",
-            "no",
+            addr.as_str(),             // Listening addr
+            self.remote_addr.family(), // Remote client address family
+            "no",                      // TLS version
+            "no",                      // Force-closed
+            "no",                      // Recycled
         ];
-
-        self.metrics.conns.with_label_values(labels).inc();
-        self.metrics
-            .conns_open
-            .with_label_values(&labels[0..3])
-            .inc();
 
         // Wrap with traffic counter
         let (stream, stats) = AsyncCounter::new(stream);
@@ -377,7 +367,7 @@ impl Conn {
             close: self.token_close.clone(),
         });
 
-        let result = self.handle_inner(stream, conn_info.clone()).await;
+        let result = self.handle_inner(stream, conn_info.clone(), labels).await;
 
         // Record connection metrics
         let (sent, rcvd) = (stats.sent(), stats.rcvd());
@@ -393,6 +383,7 @@ impl Conn {
             labels[4] = "yes";
         }
 
+        self.metrics.conns.with_label_values(labels).inc();
         self.metrics
             .conns_open
             .with_label_values(&labels[0..3])
@@ -428,6 +419,7 @@ impl Conn {
         &self,
         stream: impl AsyncReadWrite + 'static,
         conn_info: Arc<ConnInfo>,
+        labels: &mut [&str; 5],
     ) -> Result<(), Error> {
         // Perform TLS handshake if we're in TLS mode
         let (stream, tls_info): (Box<dyn AsyncReadWrite>, _) = if self.tls_acceptor.is_some() {
@@ -453,6 +445,15 @@ impl Conn {
         } else {
             (Box::new(stream), None)
         };
+
+        if let Some(v) = &tls_info {
+            labels[2] = v.protocol.as_str().unwrap();
+        }
+
+        self.metrics
+            .conns_open
+            .with_label_values(&labels[0..3])
+            .inc();
 
         // Convert stream from Tokio to Hyper
         let stream = TokioIo::new(stream);
