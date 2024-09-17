@@ -15,7 +15,7 @@ use hickory_resolver::{
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use strum_macros::EnumString;
 
-use super::Error;
+use super::{client::CloneableDnsResolver, Error};
 
 #[derive(Clone, Copy, Debug, EnumString)]
 #[strum(serialize_all = "snake_case")]
@@ -40,6 +40,7 @@ pub struct Options {
 
 #[derive(Debug, Clone)]
 pub struct Resolver(Arc<TokioAsyncResolver>);
+impl CloneableDnsResolver for Resolver {}
 
 // new() must be called in Tokio context
 impl Resolver {
