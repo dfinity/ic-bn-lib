@@ -39,8 +39,9 @@ use uuid::Uuid;
 use super::{AsyncCounter, Error, Stats, ALPN_ACME};
 use crate::tasks::Run;
 
-pub const CONN_DURATION_BUCKETS: &[f64] = &[1.0, 8.0, 32.0, 64.0, 256.0, 512.0, 1024.0];
-pub const CONN_REQUESTS: &[f64] = &[1.0, 4.0, 8.0, 16.0, 32.0, 64.0, 256.0];
+const HANDSHAKE_DURATION_BUCKETS: &[f64] = &[0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6];
+const CONN_DURATION_BUCKETS: &[f64] = &[1.0, 8.0, 32.0, 64.0, 256.0, 512.0, 1024.0];
+const CONN_REQUESTS: &[f64] = &[1.0, 4.0, 8.0, 16.0, 32.0, 64.0, 256.0];
 
 // Blanket async read+write trait for streams Box-ing
 trait AsyncReadWrite: AsyncRead + AsyncWrite + Send + Sync + Unpin {}
@@ -55,11 +56,19 @@ pub struct Metrics {
     bytes_rcvd: IntCounterVec,
     conn_duration: HistogramVec,
     requests_per_conn: HistogramVec,
+    conn_tls_handshake_duration: HistogramVec,
 }
 
 impl Metrics {
     pub fn new(registry: &Registry) -> Self {
-        const LABELS: &[&str] = &["addr", "family", "tls", "forced_close", "recycled"];
+        const LABELS: &[&str] = &[
+            "addr",
+            "family",
+            "tls_version",
+            "tls_cipher",
+            "forced_close",
+            "recycled",
+        ];
 
         Self {
             conns: register_int_counter_vec_with_registry!(
@@ -73,7 +82,7 @@ impl Metrics {
             conns_open: register_int_gauge_vec_with_registry!(
                 format!("conn_open"),
                 format!("Number of currently open connections"),
-                &LABELS[0..3],
+                &LABELS[0..4],
                 registry
             )
             .unwrap(),
@@ -116,6 +125,15 @@ impl Metrics {
                 format!("Records the number of requests per connection"),
                 LABELS,
                 CONN_REQUESTS.to_vec(),
+                registry
+            )
+            .unwrap(),
+
+            conn_tls_handshake_duration: register_histogram_vec_with_registry!(
+                format!("conn_tls_handshake_duration_sec"),
+                format!("Records the duration of the TLS handshake in seconds"),
+                &LABELS[0..4],
+                HANDSHAKE_DURATION_BUCKETS.to_vec(),
                 registry
             )
             .unwrap(),
@@ -351,6 +369,7 @@ impl Conn {
             addr.as_str(),             // Listening addr
             self.remote_addr.family(), // Remote client address family
             "no",                      // TLS version
+            "no",                      // TLS ciphersuite
             "no",                      // Force-closed
             "no",                      // Recycled
         ];
@@ -367,7 +386,49 @@ impl Conn {
             close: self.token_close.clone(),
         });
 
-        let result = self.handle_inner(stream, conn_info.clone(), labels).await;
+        // Perform TLS handshake if we're in TLS mode
+        let (stream, tls_info): (Box<dyn AsyncReadWrite>, _) = if self.tls_acceptor.is_some() {
+            let (mut stream, tls_info) = self.tls_handshake(stream).await?;
+
+            // Close the connection if agreed ALPN is ACME - the handshake is enough for challenge
+            if tls_info
+                .alpn
+                .as_ref()
+                .is_some_and(|x| x.as_bytes() == ALPN_ACME)
+            {
+                debug!("{}: ACME ALPN - closing connection", self);
+
+                stream
+                    .shutdown()
+                    .await
+                    .context("unable to shutdown stream")?;
+
+                return Ok(());
+            }
+
+            (Box::new(stream), Some(Arc::new(tls_info)))
+        } else {
+            (Box::new(stream), None)
+        };
+
+        // Record TLS metrics
+        if let Some(v) = &tls_info {
+            labels[2] = v.protocol.as_str().unwrap();
+            labels[3] = v.cipher.as_str().unwrap();
+
+            self.metrics
+                .conn_tls_handshake_duration
+                .with_label_values(&labels[0..4])
+                .observe(v.handshake_dur.as_secs_f64());
+        }
+
+        self.metrics
+            .conns_open
+            .with_label_values(&labels[0..4])
+            .inc();
+
+        // Handle the connection
+        let result = self.handle_inner(stream, conn_info.clone(), tls_info).await;
 
         // Record connection metrics
         let (sent, rcvd) = (stats.sent(), stats.rcvd());
@@ -376,17 +437,17 @@ impl Conn {
 
         // force-closed
         if self.token_close.is_cancelled() {
-            labels[3] = "yes";
+            labels[4] = "yes";
         }
         // recycled
         if self.token.is_cancelled() {
-            labels[4] = "yes";
+            labels[5] = "yes";
         }
 
         self.metrics.conns.with_label_values(labels).inc();
         self.metrics
             .conns_open
-            .with_label_values(&labels[0..3])
+            .with_label_values(&labels[0..4])
             .dec();
         self.metrics.requests.with_label_values(labels).inc_by(reqs);
         self.metrics
@@ -417,44 +478,10 @@ impl Conn {
 
     async fn handle_inner(
         &self,
-        stream: impl AsyncReadWrite + 'static,
+        stream: Box<dyn AsyncReadWrite>,
         conn_info: Arc<ConnInfo>,
-        labels: &mut [&str; 5],
+        tls_info: Option<Arc<TlsInfo>>,
     ) -> Result<(), Error> {
-        // Perform TLS handshake if we're in TLS mode
-        let (stream, tls_info): (Box<dyn AsyncReadWrite>, _) = if self.tls_acceptor.is_some() {
-            let (mut stream, tls_info) = self.tls_handshake(stream).await?;
-
-            // Close the connection if agreed ALPN is ACME - the handshake is enough for challenge
-            if tls_info
-                .alpn
-                .as_ref()
-                .is_some_and(|x| x.as_bytes() == ALPN_ACME)
-            {
-                debug!("{}: ACME ALPN - closing connection", self);
-
-                stream
-                    .shutdown()
-                    .await
-                    .context("unable to shutdown stream")?;
-
-                return Ok(());
-            }
-
-            (Box::new(stream), Some(Arc::new(tls_info)))
-        } else {
-            (Box::new(stream), None)
-        };
-
-        if let Some(v) = &tls_info {
-            labels[2] = v.protocol.as_str().unwrap();
-        }
-
-        self.metrics
-            .conns_open
-            .with_label_values(&labels[0..3])
-            .inc();
-
         // Convert stream from Tokio to Hyper
         let stream = TokioIo::new(stream);
         let max_requests_per_conn = self.options.max_requests_per_conn;
