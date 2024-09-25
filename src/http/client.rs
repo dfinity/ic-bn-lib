@@ -170,7 +170,7 @@ impl Client for ReqwestClientLeastLoaded {
     }
 }
 
-pub trait ClientGenerator: Send + Sync + fmt::Debug {
+pub trait GeneratesClients: Send + Sync + fmt::Debug {
     fn generate(&self) -> Result<Arc<dyn Client>, Error>;
 }
 
@@ -185,7 +185,7 @@ pub trait Stats {
 }
 
 #[derive(Debug)]
-pub struct ReqwestClientDynamic<G: ClientGenerator> {
+pub struct ReqwestClientDynamic<G: GeneratesClients> {
     generator: G,
     min_clients: usize,
     max_clients: usize,
@@ -211,7 +211,7 @@ impl ReqwestClientDynamicInner {
     }
 }
 
-impl<G: ClientGenerator> ReqwestClientDynamic<G> {
+impl<G: GeneratesClients> ReqwestClientDynamic<G> {
     pub fn new(
         generator: G,
         min_clients: usize,
@@ -278,7 +278,7 @@ impl<G: ClientGenerator> ReqwestClientDynamic<G> {
     }
 }
 
-impl<G: ClientGenerator> Stats for ReqwestClientDynamic<G> {
+impl<G: GeneratesClients> Stats for ReqwestClientDynamic<G> {
     fn stats(&self) -> ReqwestClientDynamicStats {
         let pool = self.pool.lock().unwrap();
 
@@ -295,7 +295,7 @@ impl<G: ClientGenerator> Stats for ReqwestClientDynamic<G> {
 }
 
 #[async_trait]
-impl<G: ClientGenerator> Client for ReqwestClientDynamic<G> {
+impl<G: GeneratesClients> Client for ReqwestClientDynamic<G> {
     async fn execute(&self, req: Request) -> Result<Response, reqwest::Error> {
         let inner = self.get_client();
 
@@ -354,7 +354,7 @@ mod test {
 
     #[derive(Debug)]
     struct TestClientGenerator;
-    impl ClientGenerator for TestClientGenerator {
+    impl GeneratesClients for TestClientGenerator {
         fn generate(&self) -> Result<Arc<dyn Client>, Error> {
             Ok(Arc::new(TestClient))
         }
