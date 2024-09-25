@@ -187,6 +187,7 @@ pub trait Stats {
 #[derive(Debug)]
 pub struct ReqwestClientDynamic<G: ClientGenerator> {
     generator: G,
+    min_clients: usize,
     max_clients: usize,
     max_outstanding: usize,
     idle_timeout: Duration,
@@ -213,16 +214,21 @@ impl ReqwestClientDynamicInner {
 impl<G: ClientGenerator> ReqwestClientDynamic<G> {
     pub fn new(
         generator: G,
+        min_clients: usize,
         max_clients: usize,
         max_outstanding: usize,
         idle_timeout: Duration,
     ) -> Result<Self, Error> {
-        let inner = Arc::new(ReqwestClientDynamicInner::new(generator.generate()?));
         let mut pool = Vec::with_capacity(max_clients);
-        pool.push(inner);
+
+        for _ in 0..min_clients {
+            let inner = Arc::new(ReqwestClientDynamicInner::new(generator.generate()?));
+            pool.push(inner);
+        }
 
         Ok(Self {
             generator,
+            min_clients,
             max_clients,
             max_outstanding,
             idle_timeout,
@@ -230,12 +236,12 @@ impl<G: ClientGenerator> ReqwestClientDynamic<G> {
         })
     }
 
-    /// Drop unused clients while leaving one always available.
+    /// Drop unused clients while leaving min_clients always available.
     /// Algo mimics Vec::retain().
     /// TODO find a better way?
     fn cleanup(&self, pool: &mut MutexGuard<'_, Vec<Arc<ReqwestClientDynamicInner>>>) {
-        let mut j = 1;
-        for i in 1..pool.len() {
+        let mut j = self.min_clients;
+        for i in self.min_clients..pool.len() {
             if !(pool[i].outstanding.load(Ordering::SeqCst) == 0
                 && pool[i].last_request.read().unwrap().elapsed() > self.idle_timeout)
             {
@@ -357,7 +363,7 @@ mod test {
     #[tokio::test]
     async fn test_dynamic_client() {
         let cli = Arc::new(
-            ReqwestClientDynamic::new(TestClientGenerator, 10, 10, Duration::ZERO).unwrap(),
+            ReqwestClientDynamic::new(TestClientGenerator, 1, 10, 10, Duration::ZERO).unwrap(),
         );
 
         let mut futs = vec![];
