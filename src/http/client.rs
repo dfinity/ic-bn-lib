@@ -198,6 +198,8 @@ pub struct ReqwestClientDynamic<G: GeneratesClients> {
     pool: Mutex<Vec<Arc<ReqwestClientDynamicInner>>>,
 }
 
+impl<G: GeneratesClients> ClientWithStats for ReqwestClientDynamic<G> {}
+
 #[derive(Debug)]
 struct ReqwestClientDynamicInner {
     cli: Arc<dyn Client>,
