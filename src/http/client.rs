@@ -174,14 +174,18 @@ pub trait GeneratesClients: Send + Sync + fmt::Debug {
     fn generate(&self) -> Result<Arc<dyn Client>, Error>;
 }
 
+pub trait GeneratesClientsWithStats: Send + Sync + fmt::Debug {
+    fn generate(&self) -> Result<Arc<dyn ClientWithStats>, Error>;
+}
+
 #[derive(Debug, Clone)]
-pub struct ReqwestClientDynamicStats {
+pub struct ClientStats {
     pub pool_size: usize,
     pub outstanding: usize,
 }
 
 pub trait Stats {
-    fn stats(&self) -> ReqwestClientDynamicStats;
+    fn stats(&self) -> ClientStats;
 }
 
 #[derive(Debug)]
@@ -279,7 +283,7 @@ impl<G: GeneratesClients> ReqwestClientDynamic<G> {
 }
 
 impl<G: GeneratesClients> Stats for ReqwestClientDynamic<G> {
-    fn stats(&self) -> ReqwestClientDynamicStats {
+    fn stats(&self) -> ClientStats {
         let pool = self.pool.lock().unwrap();
 
         let outstanding: usize = pool
@@ -287,7 +291,7 @@ impl<G: GeneratesClients> Stats for ReqwestClientDynamic<G> {
             .map(|x| x.outstanding.load(Ordering::SeqCst))
             .sum();
 
-        ReqwestClientDynamicStats {
+        ClientStats {
             pool_size: pool.len(),
             outstanding,
         }
