@@ -23,7 +23,9 @@ pub trait Client: Send + Sync + fmt::Debug {
     async fn execute(&self, req: Request) -> Result<Response, reqwest::Error>;
 }
 
-pub trait ClientWithStats: Client + Stats {}
+pub trait ClientWithStats: Client + Stats {
+    fn to_client(self: Arc<Self>) -> Arc<dyn Client>;
+}
 
 pub trait CloneableDnsResolver: Resolve + Clone + fmt::Debug + 'static {}
 
@@ -170,11 +172,11 @@ impl Client for ReqwestClientLeastLoaded {
     }
 }
 
-pub trait GeneratesClients: Send + Sync + fmt::Debug {
+pub trait GeneratesClients: Send + Sync + fmt::Debug + 'static {
     fn generate(&self) -> Result<Arc<dyn Client>, Error>;
 }
 
-pub trait GeneratesClientsWithStats: Send + Sync + fmt::Debug {
+pub trait GeneratesClientsWithStats: Send + Sync + fmt::Debug + 'static {
     fn generate(&self) -> Result<Arc<dyn ClientWithStats>, Error>;
 }
 
@@ -198,7 +200,11 @@ pub struct ReqwestClientDynamic<G: GeneratesClients> {
     pool: Mutex<Vec<Arc<ReqwestClientDynamicInner>>>,
 }
 
-impl<G: GeneratesClients> ClientWithStats for ReqwestClientDynamic<G> {}
+impl<G: GeneratesClients> ClientWithStats for ReqwestClientDynamic<G> {
+    fn to_client(self: Arc<Self>) -> Arc<dyn Client> {
+        self
+    }
+}
 
 #[derive(Debug)]
 struct ReqwestClientDynamicInner {
