@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use axum::{body::Body, extract::Request, response::Response};
 use url::Url;
 
@@ -9,7 +7,7 @@ use super::{body::SyncBodyDataStream, headers::strip_connection_headers, Client,
 pub async fn proxy(
     url: Url,
     request: Request,
-    http_client: &Arc<dyn Client>,
+    http_client: &impl Client,
 ) -> Result<Response, Error> {
     // Convert Axum request into Reqwest one
     let (mut parts, body) = request.into_parts();
