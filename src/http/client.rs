@@ -2,7 +2,7 @@ use std::{
     fmt,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex, MutexGuard, RwLock,
+        Arc, RwLock, RwLockWriteGuard,
     },
     time::{Duration, Instant},
 };
@@ -164,11 +164,12 @@ impl Client for ReqwestClientLeastLoaded {
             .min_by_key(|x| x.outstanding.load(Ordering::SeqCst))
             .unwrap();
 
-        cli.outstanding.fetch_add(1, Ordering::SeqCst);
-        let res = cli.cli.execute(req).await;
-        cli.outstanding.fetch_sub(1, Ordering::SeqCst);
+        scopeguard::defer! {
+            cli.outstanding.fetch_sub(1, Ordering::SeqCst);
+        }
 
-        res
+        cli.outstanding.fetch_add(1, Ordering::SeqCst);
+        cli.cli.execute(req).await
     }
 }
 
@@ -197,7 +198,7 @@ pub struct ReqwestClientDynamic<G: GeneratesClients> {
     max_clients: usize,
     max_outstanding: usize,
     idle_timeout: Duration,
-    pool: Mutex<Vec<Arc<ReqwestClientDynamicInner>>>,
+    pool: RwLock<Vec<Arc<ReqwestClientDynamicInner>>>,
 }
 
 impl<G: GeneratesClients> ClientWithStats for ReqwestClientDynamic<G> {
@@ -244,14 +245,14 @@ impl<G: GeneratesClients> ReqwestClientDynamic<G> {
             max_clients,
             max_outstanding,
             idle_timeout,
-            pool: Mutex::new(pool),
+            pool: RwLock::new(pool),
         })
     }
 
     /// Drop unused clients while leaving min_clients always available.
     /// Algo mimics Vec::retain().
     /// TODO find a better way?
-    fn cleanup(&self, pool: &mut MutexGuard<'_, Vec<Arc<ReqwestClientDynamicInner>>>) {
+    fn cleanup(&self, pool: &mut RwLockWriteGuard<'_, Vec<Arc<ReqwestClientDynamicInner>>>) {
         let mut j = self.min_clients;
         for i in self.min_clients..pool.len() {
             if !(pool[i].outstanding.load(Ordering::SeqCst) == 0
@@ -265,7 +266,7 @@ impl<G: GeneratesClients> ReqwestClientDynamic<G> {
     }
 
     fn get_client(&self) -> Arc<ReqwestClientDynamicInner> {
-        let mut pool = self.pool.lock().unwrap();
+        let mut pool = self.pool.write().unwrap();
         self.cleanup(&mut pool);
 
         pool.iter()
@@ -292,7 +293,7 @@ impl<G: GeneratesClients> ReqwestClientDynamic<G> {
 
 impl<G: GeneratesClients> Stats for ReqwestClientDynamic<G> {
     fn stats(&self) -> ClientStats {
-        let pool = self.pool.lock().unwrap();
+        let pool = self.pool.read().unwrap();
 
         let outstanding: usize = pool
             .iter()
@@ -310,13 +311,13 @@ impl<G: GeneratesClients> Stats for ReqwestClientDynamic<G> {
 impl<G: GeneratesClients> Client for ReqwestClientDynamic<G> {
     async fn execute(&self, req: Request) -> Result<Response, reqwest::Error> {
         let inner = self.get_client();
+        scopeguard::defer! {
+            inner.outstanding.fetch_sub(1, Ordering::SeqCst);
+        }
 
         *inner.last_request.write().unwrap() = Instant::now();
         inner.outstanding.fetch_add(1, Ordering::SeqCst);
-        let res = inner.cli.execute(req).await;
-        inner.outstanding.fetch_sub(1, Ordering::SeqCst);
-
-        res
+        inner.cli.execute(req).await
     }
 }
 
