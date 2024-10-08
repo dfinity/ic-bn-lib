@@ -5,6 +5,7 @@ pub mod dns;
 pub mod headers;
 pub mod proxy;
 pub mod server;
+pub mod shed;
 
 use std::{
     io,
