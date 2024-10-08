@@ -13,6 +13,7 @@ use http::header::HeaderValue;
 use mockall::automock;
 use rand::{rngs::OsRng, seq::IteratorRandom};
 use reqwest::{dns::Resolve, Request, Response};
+use scopeguard::defer;
 
 use super::Error;
 
@@ -164,7 +165,8 @@ impl Client for ReqwestClientLeastLoaded {
             .min_by_key(|x| x.outstanding.load(Ordering::SeqCst))
             .unwrap();
 
-        scopeguard::defer! {
+        // The future can be cancelled so we have to use defer to make sure the counter is decreased
+        defer! {
             cli.outstanding.fetch_sub(1, Ordering::SeqCst);
         }
 
@@ -311,7 +313,9 @@ impl<G: GeneratesClients> Stats for ReqwestClientDynamic<G> {
 impl<G: GeneratesClients> Client for ReqwestClientDynamic<G> {
     async fn execute(&self, req: Request) -> Result<Response, reqwest::Error> {
         let inner = self.get_client();
-        scopeguard::defer! {
+
+        // The future can be cancelled so we have to use defer to make sure the counter is decreased
+        defer! {
             inner.outstanding.fetch_sub(1, Ordering::SeqCst);
         }
 
@@ -389,7 +393,7 @@ mod test {
         }
 
         join_all(futs).await;
-        let mut pool = cli.pool.lock().unwrap();
+        let mut pool = cli.pool.write().unwrap();
         assert_eq!(pool.len(), 10);
 
         for x in pool.iter() {
