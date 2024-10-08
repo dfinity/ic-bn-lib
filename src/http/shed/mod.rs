@@ -13,8 +13,7 @@ use std::{
 use anyhow::{anyhow, Context as _};
 use async_trait::async_trait;
 use ewma::EWMA;
-use http::Request;
-use little_loadshedder::LoadShed;
+use little_loadshedder::{LoadShed, LoadShedResponse};
 use systemstat::{Platform, System};
 use tokio_util::sync::CancellationToken;
 use tower::{Layer, Service, ServiceExt};
@@ -31,11 +30,12 @@ pub trait GetsSystemInfo: Send + Sync + Clone {
 
 /// Trait to extract the shedding key and latency threshold from the given HTTP request
 pub trait TypeExtractor: Clone + Debug + Send + Sync + 'static {
-    /// The type of the key.
+    /// The type of the request.
     type Type: Clone + Debug + Send + Sync + Ord + 'static;
+    type Request: Send + Sync;
 
     /// Extraction method, will return [`Error`] response when the extraction failed
-    fn extract<T>(&self, req: &Request<T>) -> Result<Self::Type, Error>;
+    fn extract(&self, req: &Self::Request) -> Result<Self::Type, Error>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -287,8 +287,68 @@ impl<S: GetsSystemInfo, I: Send + Sync> Layer<I> for SystemLoadShedderLayer<S> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ShardedOptions<T: TypeExtractor> {
+    extractor: T,
+    ewma_alpha: f64,
+    latencies: Vec<(T::Type, Duration)>,
+}
+
 pub struct ShardedLittleLoadShedder<T: TypeExtractor, I> {
-    extract: T,
-    inner: I,
+    extractor: T,
     shards: BTreeMap<T::Type, LoadShed<I>>,
+}
+
+impl<T: TypeExtractor, I: Send + Sync + Clone> ShardedLittleLoadShedder<T, I> {
+    pub fn new(inner: I, opts: ShardedOptions<T>) -> Self {
+        let shards = BTreeMap::from_iter(
+            opts.latencies
+                .into_iter()
+                .map(|x| (x.0, LoadShed::new(inner.clone(), opts.ewma_alpha, x.1))),
+        );
+
+        Self {
+            extractor: opts.extractor,
+            shards,
+        }
+    }
+}
+
+// Implement tower service
+impl<T: TypeExtractor, I> Service<T::Request> for ShardedLittleLoadShedder<T, I>
+where
+    I: Service<T::Request> + Clone + Send + Sync + 'static,
+    I::Future: Send,
+{
+    type Response = LoadShedResponse<I::Response>;
+    type Error = I::Error;
+    type Future = BoxFuture<Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: T::Request) -> Self::Future {
+        let rt = self.extractor.extract(&req).unwrap();
+        let shard = self.shards.get(&rt).cloned().unwrap();
+
+        Box::pin(async move { shard.oneshot(req).await })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ShardedLittleLoadShedderLayer<T: TypeExtractor>(ShardedOptions<T>);
+
+impl<T: TypeExtractor> ShardedLittleLoadShedderLayer<T> {
+    pub const fn new(opts: ShardedOptions<T>) -> Self {
+        Self(opts)
+    }
+}
+
+impl<T: TypeExtractor, I: Send + Sync + Clone> Layer<I> for ShardedLittleLoadShedderLayer<T> {
+    type Service = ShardedLittleLoadShedder<T, I>;
+
+    fn layer(&self, inner: I) -> Self::Service {
+        ShardedLittleLoadShedder::new(inner, self.0.clone())
+    }
 }
