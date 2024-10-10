@@ -28,7 +28,7 @@ pub trait GetsSystemInfo: Send + Sync + Clone {
     fn load_avg(&self) -> Result<(f64, f64, f64), Error>;
 }
 
-/// Trait to extract the shedding key and latency threshold from the given HTTP request
+/// Trait to extract the shedding key from the given HTTP request
 pub trait TypeExtractor: Clone + Debug + Send + Sync + 'static {
     /// The type of the request.
     type Type: Clone + Debug + Send + Sync + Ord + 'static;
@@ -38,6 +38,7 @@ pub trait TypeExtractor: Clone + Debug + Send + Sync + 'static {
     fn extract(&self, req: &Self::Request) -> Result<Self::Type, Error>;
 }
 
+/// Reason for shedding
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ShedReason {
     CPU,
@@ -128,7 +129,7 @@ pub struct SystemOptions {
     pub loadavg_15: Option<f64>,
 }
 
-/// Load shedder that sheds requests when the system load is ovet the defined thresholds
+/// Load shedder that sheds requests when the system load is over the defined thresholds
 pub struct SystemLoadShedder<S: GetsSystemInfo, I> {
     sys_info: S,
     avg: RwLock<Averages>,
@@ -294,13 +295,16 @@ pub struct ShardedOptions<T: TypeExtractor> {
     latencies: Vec<(T::Type, Duration)>,
 }
 
+#[derive(Debug, Clone)]
 pub struct ShardedLittleLoadShedder<T: TypeExtractor, I> {
     extractor: T,
+    inner: I,
     shards: BTreeMap<T::Type, LoadShed<I>>,
 }
 
 impl<T: TypeExtractor, I: Send + Sync + Clone> ShardedLittleLoadShedder<T, I> {
     pub fn new(inner: I, opts: ShardedOptions<T>) -> Self {
+        // Generate the shedding shards, one per provided request type
         let shards = BTreeMap::from_iter(
             opts.latencies
                 .into_iter()
@@ -309,6 +313,7 @@ impl<T: TypeExtractor, I: Send + Sync + Clone> ShardedLittleLoadShedder<T, I> {
 
         Self {
             extractor: opts.extractor,
+            inner,
             shards,
         }
     }
@@ -320,7 +325,7 @@ where
     I: Service<T::Request> + Clone + Send + Sync + 'static,
     I::Future: Send,
 {
-    type Response = LoadShedResponse<I::Response>;
+    type Response = ShedResponse<I::Response>;
     type Error = I::Error;
     type Future = BoxFuture<Result<Self::Response, Self::Error>>;
 
@@ -329,10 +334,27 @@ where
     }
 
     fn call(&mut self, req: T::Request) -> Self::Future {
-        let rt = self.extractor.extract(&req).unwrap();
-        let shard = self.shards.get(&rt).cloned().unwrap();
+        // Try to extract the request type
+        let Ok(rt) = self.extractor.extract(&req) else {
+            // If we can't - just pass the request to the inner service
+            let inner = self.inner.clone();
+            return Box::pin(async move { Ok(ShedResponse::Inner(inner.oneshot(req).await?)) });
+        };
 
-        Box::pin(async move { shard.oneshot(req).await })
+        // Try to find if we have a shard for it
+        let Some(shard) = self.shards.get(&rt).cloned() else {
+            // If we don't have it - again just pass the request to the inner service
+            let inner = self.inner.clone();
+            return Box::pin(async move { Ok(ShedResponse::Inner(inner.oneshot(req).await?)) });
+        };
+
+        Box::pin(async move {
+            // Map response to our
+            shard.oneshot(req).await.map(|x| match x {
+                LoadShedResponse::Overload => ShedResponse::Overload(ShedReason::Latency),
+                LoadShedResponse::Inner(i) => ShedResponse::Inner(i),
+            })
+        })
     }
 }
 
@@ -350,5 +372,218 @@ impl<T: TypeExtractor, I: Send + Sync + Clone> Layer<I> for ShardedLittleLoadShe
 
     fn layer(&self, inner: I) -> Self::Service {
         ShardedLittleLoadShedder::new(inner, self.0.clone())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    };
+
+    use tokio_util::task::TaskTracker;
+
+    use super::*;
+
+    #[derive(Clone, Debug)]
+    struct StubSystemInfoVal {
+        cpu: f64,
+        memory: f64,
+        l1: f64,
+        l5: f64,
+        l15: f64,
+    }
+
+    #[derive(Clone, Debug)]
+    struct StubSystemInfo {
+        v: Arc<Mutex<StubSystemInfoVal>>,
+    }
+
+    #[async_trait]
+    impl GetsSystemInfo for StubSystemInfo {
+        async fn cpu_usage(&self) -> Result<f64, Error> {
+            Ok(self.v.lock().unwrap().cpu)
+        }
+
+        fn memory_usage(&self) -> Result<f64, Error> {
+            Ok(self.v.lock().unwrap().memory)
+        }
+
+        fn load_avg(&self) -> Result<(f64, f64, f64), Error> {
+            let v = self.v.lock().unwrap();
+            Ok((v.l1, v.l5, v.l15))
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct StubService;
+
+    impl Service<Duration> for StubService {
+        type Response = ();
+        type Error = Error;
+        type Future = BoxFuture<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: Duration) -> Self::Future {
+            let fut = async move {
+                tokio::time::sleep(req).await;
+                Ok(())
+            };
+
+            Box::pin(fut)
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct StubExtractor(u8);
+
+    impl TypeExtractor for StubExtractor {
+        type Request = Duration;
+        type Type = u8;
+
+        fn extract(&self, _req: &Self::Request) -> Result<Self::Type, Error> {
+            return Ok(self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_system_shedder() {
+        let inner = StubService;
+        let opts = SystemOptions {
+            ewma_alpha: 0.8,
+            cpu: Some(0.5),
+            memory: Some(0.5),
+            loadavg_1: Some(0.5),
+            loadavg_5: Some(0.5),
+            loadavg_15: Some(0.5),
+        };
+        let sys_info = StubSystemInfo {
+            v: Arc::new(Mutex::new(StubSystemInfoVal {
+                cpu: 0.0,
+                memory: 0.0,
+                l1: 0.0,
+                l5: 0.0,
+                l15: 0.0,
+            })),
+        };
+
+        let mut shedder = SystemLoadShedder::new(inner, opts, sys_info.clone());
+        let _ = shedder.measure().await;
+        let resp = shedder.call(Duration::ZERO).await.unwrap();
+        assert!(matches!(resp, ShedResponse::Inner(_)));
+
+        sys_info.v.lock().unwrap().cpu = 1.0;
+        let _ = shedder.measure().await;
+        let resp = shedder.call(Duration::ZERO).await.unwrap();
+        assert_eq!(resp, ShedResponse::Overload(ShedReason::CPU));
+        sys_info.v.lock().unwrap().cpu = 0.0;
+
+        sys_info.v.lock().unwrap().memory = 1.0;
+        let _ = shedder.measure().await;
+        let resp = shedder.call(Duration::ZERO).await.unwrap();
+        assert_eq!(resp, ShedResponse::Overload(ShedReason::Memory));
+        sys_info.v.lock().unwrap().memory = 0.0;
+
+        sys_info.v.lock().unwrap().l1 = 1.0;
+        let _ = shedder.measure().await;
+        let resp = shedder.call(Duration::ZERO).await.unwrap();
+        assert_eq!(resp, ShedResponse::Overload(ShedReason::LoadAvg));
+        sys_info.v.lock().unwrap().l1 = 0.0;
+
+        sys_info.v.lock().unwrap().l5 = 1.0;
+        let _ = shedder.measure().await;
+        let resp = shedder.call(Duration::ZERO).await.unwrap();
+        assert_eq!(resp, ShedResponse::Overload(ShedReason::LoadAvg));
+        sys_info.v.lock().unwrap().l5 = 0.0;
+
+        sys_info.v.lock().unwrap().l15 = 1.0;
+        let _ = shedder.measure().await;
+        let resp = shedder.call(Duration::ZERO).await.unwrap();
+        assert_eq!(resp, ShedResponse::Overload(ShedReason::LoadAvg));
+        sys_info.v.lock().unwrap().l15 = 0.0;
+
+        let _ = shedder.measure().await;
+        let resp = shedder.call(Duration::ZERO).await.unwrap();
+        assert!(matches!(resp, ShedResponse::Inner(_)));
+    }
+
+    #[tokio::test]
+    async fn test_sharded_shedder() {
+        let opts = ShardedOptions {
+            extractor: StubExtractor(0),
+            ewma_alpha: 0.9,
+            latencies: vec![(0, Duration::from_millis(1))],
+        };
+        let inner = StubService;
+
+        let mut shedder = ShardedLittleLoadShedder::new(inner, opts);
+
+        // Make sure sequential requests are not shedded no matter the latency
+        for _ in 0..10 {
+            let resp = shedder.call(Duration::from_millis(50)).await.unwrap();
+            assert_eq!(resp, ShedResponse::Inner(()));
+        }
+
+        // Now try a lot of concurrent requests with high latency
+        let shedded = Arc::new(AtomicUsize::new(0));
+        let tracker = TaskTracker::new();
+        for _ in 0..10 {
+            let shedder = shedder.clone();
+            let shedded = shedded.clone();
+
+            tracker.spawn(async move {
+                let resp = shedder.oneshot(Duration::from_millis(10)).await.unwrap();
+                if matches!(resp, ShedResponse::Overload(ShedReason::Latency)) {
+                    shedded.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+        }
+
+        tracker.close();
+        tracker.wait().await;
+        assert_eq!(shedded.load(Ordering::SeqCst), 8);
+
+        // Now try requests with low latency and limited concurrency
+        let shedded = Arc::new(AtomicUsize::new(0));
+        let tracker = TaskTracker::new();
+        let sem = Arc::new(tokio::sync::Semaphore::new(2));
+
+        for _ in 0..10 {
+            let shedder = shedder.clone();
+            let shedded = shedded.clone();
+            let sem = sem.clone();
+
+            tracker.spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+
+                let resp = shedder.oneshot(Duration::from_millis(1)).await.unwrap();
+                if matches!(resp, ShedResponse::Overload(ShedReason::Latency)) {
+                    shedded.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+        }
+
+        tracker.close();
+        tracker.wait().await;
+        assert_eq!(shedded.load(Ordering::SeqCst), 0);
+
+        // Finally it shouldn't shed
+        let resp = shedder.oneshot(Duration::from_millis(10)).await.unwrap();
+        assert_eq!(resp, ShedResponse::Inner(()));
+
+        // Check that non-existant type still works (extractor returns 1 but we configure only 0)
+        let opts = ShardedOptions {
+            extractor: StubExtractor(1),
+            ewma_alpha: 0.9,
+            latencies: vec![(0, Duration::from_millis(1))],
+        };
+        let inner = StubService;
+        let mut shedder = ShardedLittleLoadShedder::new(inner, opts);
+        let resp = shedder.call(Duration::from_millis(50)).await.unwrap();
+        assert_eq!(resp, ShedResponse::Inner(()));
     }
 }
