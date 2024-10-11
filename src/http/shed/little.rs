@@ -4,11 +4,10 @@
 //! latency, see the documentation on the [`LoadShed`] service for more detail.
 //!
 //! [Little's law]: https://en.wikipedia.org/wiki/Little%27s_law
-//! [metrics]: https://docs.rs/metrics/latest/metrics
 //!
 //! (c) https://github.com/Skepfyr/little-loadshedder
 
-#![warn(missing_debug_implementations, missing_docs)]
+#![warn(missing_debug_implementations)]
 #![allow(clippy::significant_drop_tightening)]
 #![allow(clippy::significant_drop_in_scrutinee)]
 #![forbid(unsafe_code)]
@@ -233,33 +232,6 @@ impl LoadShedConf {
     }
 }
 
-/// A [`Service`] that attempts to hold the average latency at a given target.
-///
-/// It does this by placing a queue in front of the service and rejecting
-/// requests when that queue is full (this means requests are either immediately
-/// rejected or will be processed by the inner service). It calculates the size
-/// of that queue using [Little's Law] which states that the average number of
-/// items in a system is equal to the average throughput multiplied by the
-/// average latency.
-///
-/// This service therefore measures the average latency and sets the queue size
-/// such that when the queue is full a request will on average take the target
-/// latency time to be responded to. Note that if the queue is not full the
-/// latency will be below the target.
-///
-/// This service also optimises the number concurrent requests to the service.
-/// This will usually be the same as the queue size, unless the target latency
-/// (and hence the queue) is very large, or the underlying service can cope with
-/// very few concurrent requests.
-///
-/// This service is reactive, if the underlying service degrades then the queues
-/// will shorten, if it improves they will lengthen. The queue lengths will be
-/// underestimates at startup and will only increase while the service is near
-/// its concurrency limit. Be wary of using the queue length as a measure of
-/// system capacity unless the queues have been at or above the concurrency for
-/// a while.
-///
-/// [Little's law]: https://en.wikipedia.org/wiki/Little%27s_law
 #[derive(Debug, Clone)]
 pub struct LoadShed<Inner> {
     conf: LoadShedConf,

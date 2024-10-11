@@ -29,13 +29,13 @@ pub trait GetsSystemInfo: Send + Sync + Clone {
     fn load_avg(&self) -> Result<(f64, f64, f64), Error>;
 }
 
-/// Trait to extract the shedding key from the given HTTP request
+/// Trait to extract the shedding key from the given request
 pub trait TypeExtractor: Clone + Debug + Send + Sync + 'static {
     /// The type of the request.
     type Type: Clone + Debug + Send + Sync + Ord + 'static;
     type Request: Send + Sync;
 
-    /// Extraction method, will return [`Error`] response when the extraction failed
+    /// Extraction method, should return None response when the extraction failed
     fn extract(&self, req: &Self::Request) -> Option<Self::Type>;
 }
 
