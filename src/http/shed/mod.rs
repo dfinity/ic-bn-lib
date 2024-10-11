@@ -1,4 +1,5 @@
 pub mod ewma;
+pub mod little;
 
 use std::{
     collections::BTreeMap,
@@ -13,7 +14,7 @@ use std::{
 use anyhow::{anyhow, Context as _};
 use async_trait::async_trait;
 use ewma::EWMA;
-use little_loadshedder::{LoadShed, LoadShedResponse};
+use little::{LoadShed, LoadShedResponse};
 use systemstat::{Platform, System};
 use tokio_util::sync::CancellationToken;
 use tower::{Layer, Service, ServiceExt};
@@ -35,7 +36,7 @@ pub trait TypeExtractor: Clone + Debug + Send + Sync + 'static {
     type Request: Send + Sync;
 
     /// Extraction method, will return [`Error`] response when the extraction failed
-    fn extract(&self, req: &Self::Request) -> Result<Self::Type, Error>;
+    fn extract(&self, req: &Self::Request) -> Option<Self::Type>;
 }
 
 /// Reason for shedding
@@ -290,9 +291,10 @@ impl<S: GetsSystemInfo, I: Send + Sync> Layer<I> for SystemLoadShedderLayer<S> {
 
 #[derive(Debug, Clone)]
 pub struct ShardedOptions<T: TypeExtractor> {
-    extractor: T,
-    ewma_alpha: f64,
-    latencies: Vec<(T::Type, Duration)>,
+    pub extractor: T,
+    pub ewma_alpha: f64,
+    pub passthrough_count: u64,
+    pub latencies: Vec<(T::Type, Duration)>,
 }
 
 #[derive(Debug, Clone)]
@@ -305,17 +307,24 @@ pub struct ShardedLittleLoadShedder<T: TypeExtractor, I> {
 impl<T: TypeExtractor, I: Send + Sync + Clone> ShardedLittleLoadShedder<T, I> {
     pub fn new(inner: I, opts: ShardedOptions<T>) -> Self {
         // Generate the shedding shards, one per provided request type
-        let shards = BTreeMap::from_iter(
-            opts.latencies
-                .into_iter()
-                .map(|x| (x.0, LoadShed::new(inner.clone(), opts.ewma_alpha, x.1))),
-        );
+        let shards = BTreeMap::from_iter(opts.latencies.into_iter().map(|x| {
+            (
+                x.0,
+                LoadShed::new(inner.clone(), opts.ewma_alpha, x.1, opts.passthrough_count),
+            )
+        }));
 
         Self {
             extractor: opts.extractor,
             inner,
             shards,
         }
+    }
+
+    // Tries to find a shard corresponding to the given request
+    fn get_shard(&self, req: &T::Request) -> Option<LoadShed<I>> {
+        let req_type = self.extractor.extract(req)?;
+        self.shards.get(&req_type).cloned()
     }
 }
 
@@ -334,16 +343,9 @@ where
     }
 
     fn call(&mut self, req: T::Request) -> Self::Future {
-        // Try to extract the request type
-        let Ok(rt) = self.extractor.extract(&req) else {
-            // If we can't - just pass the request to the inner service
-            let inner = self.inner.clone();
-            return Box::pin(async move { Ok(ShedResponse::Inner(inner.oneshot(req).await?)) });
-        };
-
-        // Try to find if we have a shard for it
-        let Some(shard) = self.shards.get(&rt).cloned() else {
-            // If we don't have it - again just pass the request to the inner service
+        // Try to find if we have a shard
+        let Some(shard) = self.get_shard(&req) else {
+            // If we don't - just pass the request to the inner service
             let inner = self.inner.clone();
             return Box::pin(async move { Ok(ShedResponse::Inner(inner.oneshot(req).await?)) });
         };
@@ -445,8 +447,8 @@ mod test {
         type Request = Duration;
         type Type = u8;
 
-        fn extract(&self, _req: &Self::Request) -> Result<Self::Type, Error> {
-            return Ok(self.0);
+        fn extract(&self, _req: &Self::Request) -> Option<Self::Type> {
+            return Some(self.0);
         }
     }
 
@@ -515,6 +517,7 @@ mod test {
     async fn test_sharded_shedder() {
         let opts = ShardedOptions {
             extractor: StubExtractor(0),
+            passthrough_count: 100,
             ewma_alpha: 0.9,
             latencies: vec![(0, Duration::from_millis(1))],
         };
@@ -524,11 +527,32 @@ mod test {
 
         // Make sure sequential requests are not shedded no matter the latency
         for _ in 0..10 {
-            let resp = shedder.call(Duration::from_millis(50)).await.unwrap();
+            let resp = shedder.call(Duration::from_millis(10)).await.unwrap();
             assert_eq!(resp, ShedResponse::Inner(()));
         }
 
-        // Now try a lot of concurrent requests with high latency
+        // Now try 90 of concurrent requests with high latency
+        // They shouldn't be shedded due to passthrough_requests
+        let shedded = Arc::new(AtomicUsize::new(0));
+        let tracker = TaskTracker::new();
+        for _ in 0..90 {
+            let shedder = shedder.clone();
+            let shedded = shedded.clone();
+
+            tracker.spawn(async move {
+                let resp = shedder.oneshot(Duration::from_millis(10)).await.unwrap();
+                if matches!(resp, ShedResponse::Overload(ShedReason::Latency)) {
+                    shedded.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+        }
+
+        tracker.close();
+        tracker.wait().await;
+        assert_eq!(shedded.load(Ordering::SeqCst), 0);
+
+        // Now try 10 of concurrent requests with high latency
+        // 8 of them should be shedded
         let shedded = Arc::new(AtomicUsize::new(0));
         let tracker = TaskTracker::new();
         for _ in 0..10 {
@@ -579,6 +603,7 @@ mod test {
         let opts = ShardedOptions {
             extractor: StubExtractor(1),
             ewma_alpha: 0.9,
+            passthrough_count: 0,
             latencies: vec![(0, Duration::from_millis(1))],
         };
         let inner = StubService;

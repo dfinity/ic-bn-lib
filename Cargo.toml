@@ -39,7 +39,6 @@ instant-acme = { version = "0.7.1", default-features = false, features = [
     "ring",
     "hyper-rustls",
 ] }
-little-loadshedder = "0.2.0"
 mockall = "0.12"
 moka = { version = "0.12", features = ["sync", "future"] }
 prometheus = "0.13"
