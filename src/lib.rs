@@ -3,6 +3,7 @@
 pub mod http;
 pub mod tasks;
 pub mod tls;
+pub mod vector;
 
 /// Generic error
 #[derive(thiserror::Error, Debug)]
