@@ -74,13 +74,14 @@ strum_macros = "0.26"
 sync_wrapper = "1.0"
 systemstat = "0.2.3"
 thiserror = "1.0"
-tokio = { version = "1.40", features = ["full"] }
+tokio = { version = "1.41", features = ["full"] }
 tokio-util = { version = "0.7", features = ["full"] }
 tokio-rustls = { version = "0.26.0", default-features = false, features = [
     "tls12",
     "logging",
     "ring",
 ] }
+tokio-io-timeout = "1.2"
 tower = { version = "0.5", features = ["util"] }
 tower-service = "0.3"
 tracing = "0.1"

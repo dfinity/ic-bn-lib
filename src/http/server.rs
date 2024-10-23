@@ -5,7 +5,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -14,6 +14,7 @@ use std::{
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use axum::{extract::Request, Router};
+use http::Response;
 use hyper::body::Incoming;
 use hyper_util::{
     rt::{TokioExecutor, TokioIo, TokioTimer},
@@ -27,21 +28,25 @@ use rustls::{server::ServerConnection, CipherSuite, ProtocolVersion};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpSocket, UnixListener, UnixSocket},
-    select,
-    time::sleep,
+    pin, select,
+    sync::mpsc::channel,
+    time::{sleep, timeout},
 };
+use tokio_io_timeout::TimeoutStream;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tower_service::Service;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use super::{AsyncCounter, Error, Stats, ALPN_ACME};
+use super::{body::NotifyingBody, AsyncCounter, Error, Stats, ALPN_ACME};
 use crate::tasks::Run;
 
 const HANDSHAKE_DURATION_BUCKETS: &[f64] = &[0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6];
 const CONN_DURATION_BUCKETS: &[f64] = &[1.0, 8.0, 32.0, 64.0, 256.0, 512.0, 1024.0];
 const CONN_REQUESTS: &[f64] = &[1.0, 4.0, 8.0, 16.0, 32.0, 64.0, 256.0];
+
+const YEAR: Duration = Duration::from_secs(86400 * 365);
 
 // Blanket async read+write trait for streams Box-ing
 trait AsyncReadWrite: AsyncRead + AsyncWrite + Send + Sync + Unpin {}
@@ -144,6 +149,10 @@ impl Metrics {
 #[derive(Clone, Copy)]
 pub struct Options {
     pub backlog: u32,
+    pub tls_handshake_timeout: Duration,
+    pub read_timeout: Option<Duration>,
+    pub write_timeout: Option<Duration>,
+    pub idle_timeout: Duration,
     pub http1_header_read_timeout: Duration,
     pub http2_max_streams: u32,
     pub http2_keepalive_interval: Duration,
@@ -310,16 +319,17 @@ struct Conn {
     remote_addr: Addr,
     router: Router,
     builder: Builder<TokioExecutor>,
-    token: CancellationToken,
-    token_close: CancellationToken,
+    token_graceful: CancellationToken,
+    token_forceful: CancellationToken,
     options: Options,
     metrics: Metrics,
+    requests: AtomicU32,
     tls_acceptor: Option<TlsAcceptor>,
 }
 
 impl Display for Conn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Server {}: {}", self.addr, self.remote_addr,)
+        write!(f, "Server {}: {}", self.addr, self.remote_addr)
     }
 }
 
@@ -335,10 +345,10 @@ impl Conn {
         let stream = self
             .tls_acceptor
             .as_ref()
-            .unwrap()
+            .unwrap() // Caller makes sure it's Some()
             .accept(stream)
             .await
-            .context("unable to accept TLS")?;
+            .context("TLS accept failed")?;
         let duration = start.elapsed();
 
         let conn = stream.get_ref().1;
@@ -361,7 +371,7 @@ impl Conn {
     async fn handle(&self, stream: Box<dyn AsyncReadWrite>) -> Result<(), Error> {
         let accepted_at = Instant::now();
 
-        debug!("{}: got a new connection", self);
+        debug!("{self}: got a new connection");
 
         // Prepare metric labels
         let addr = self.addr.to_string();
@@ -383,25 +393,31 @@ impl Conn {
             remote_addr: self.remote_addr.clone(),
             traffic: stats.clone(),
             req_count: AtomicU64::new(0),
-            close: self.token_close.clone(),
+            close: self.token_forceful.clone(),
         });
 
         // Perform TLS handshake if we're in TLS mode
         let (stream, tls_info): (Box<dyn AsyncReadWrite>, _) = if self.tls_acceptor.is_some() {
-            let (mut stream, tls_info) = self.tls_handshake(stream).await?;
+            let (mut stream, tls_info) = timeout(
+                self.options.tls_handshake_timeout,
+                self.tls_handshake(stream),
+            )
+            .await
+            .context("TLS handshake timed out")?
+            .context("TLS handshake failed")?;
 
-            // Close the connection if agreed ALPN is ACME - the handshake is enough for challenge
+            // Close the connection if agreed ALPN is ACME - the handshake is enough for the challenge
             if tls_info
                 .alpn
                 .as_ref()
                 .is_some_and(|x| x.as_bytes() == ALPN_ACME)
             {
-                debug!("{}: ACME ALPN - closing connection", self);
+                debug!("{self}: ACME ALPN - closing connection");
 
-                stream
-                    .shutdown()
+                timeout(Duration::from_secs(5), stream.shutdown())
                     .await
-                    .context("unable to shutdown stream")?;
+                    .context("socket shutdown timed out")?
+                    .context("socket shutdown failed")?;
 
                 return Ok(());
             }
@@ -436,11 +452,11 @@ impl Conn {
         let reqs = conn_info.req_count.load(Ordering::SeqCst);
 
         // force-closed
-        if self.token_close.is_cancelled() {
+        if self.token_forceful.is_cancelled() {
             labels[4] = "yes";
         }
         // recycled
-        if self.token.is_cancelled() {
+        if self.token_graceful.is_cancelled() {
             labels[5] = "yes";
         }
 
@@ -469,8 +485,8 @@ impl Conn {
 
         debug!(
             "{self}: connection closed (rcvd: {rcvd}, sent: {sent}, reqs: {reqs}, duration: {dur}, graceful: {}, forced close: {})",
-            self.token.is_cancelled(),
-            self.token_close.is_cancelled(),
+            self.token_graceful.is_cancelled(),
+            self.token_forceful.is_cancelled(),
         );
 
         result
@@ -482,13 +498,27 @@ impl Conn {
         conn_info: Arc<ConnInfo>,
         tls_info: Option<Arc<TlsInfo>>,
     ) -> Result<(), Error> {
+        // Create a timer for idle connection tracking
+        let mut idle_timer = Box::pin(sleep(self.options.idle_timeout));
+
+        // Create channels to notify about request start/stop.
+        // Use bounded but big enough so that they're always larger than our concurrency.
+        let (start_tx, mut start_rx) = channel(65536);
+        let (end_tx, mut end_rx) = channel(65536);
+
+        // Apply timeouts on read/write calls
+        let mut stream = TimeoutStream::new(stream);
+        stream.set_read_timeout(self.options.read_timeout);
+        stream.set_write_timeout(self.options.write_timeout);
+
         // Convert stream from Tokio to Hyper
         let stream = TokioIo::new(stream);
-        let max_requests_per_conn = self.options.max_requests_per_conn;
 
         // Convert router to Hyper service
+        let max_requests_per_conn = self.options.max_requests_per_conn;
         let service = hyper::service::service_fn(move |mut request: Request<Incoming>| {
-            let conn_count = conn_info.req_count.fetch_add(1, Ordering::SeqCst);
+            // Notify that we have started processing the request
+            let _ = start_tx.try_send(());
 
             // Inject connection information
             request.extensions_mut().insert(conn_info.clone());
@@ -496,17 +526,26 @@ impl Conn {
                 request.extensions_mut().insert(v.clone());
             }
 
-            // Serve the request
+            // Clone the stuff needed in the async block
             let mut router = self.router.clone();
-            let token = self.token.clone();
+            let token = self.token_graceful.clone();
+            let conn_info = conn_info.clone();
+            let end_tx = end_tx.clone();
 
+            // Return the future
             async move {
-                // Get the result
-                let result = router.call(request).await;
+                // Execute the request
+                let result = router.call(request).await.map(|x| {
+                    // Wrap the response body into a notifying one
+                    let (parts, body) = x.into_parts();
+                    let body = NotifyingBody::new(body, end_tx);
+                    Response::from_parts(parts, body)
+                });
 
                 // Check if we need to gracefully shutdown this connection
                 if let Some(v) = max_requests_per_conn {
-                    if conn_count + 1 >= v {
+                    let req_count = conn_info.req_count.fetch_add(1, Ordering::SeqCst);
+                    if req_count + 1 >= v {
                         token.cancel();
                     }
                 }
@@ -516,38 +555,75 @@ impl Conn {
         });
 
         // Serve the connection
-        let conn = self.builder.serve_connection(stream, service);
-        // Using mutable future reference requires pinning, otherwise .await consumes it
-        tokio::pin!(conn);
+        let conn = self.builder.serve_connection(Box::pin(stream), service);
+        // Using mutable future reference requires pinning
+        pin!(conn);
 
-        select! {
-            biased; // Poll top-down
+        loop {
+            select! {
+                biased; // Poll top-down
 
-            // Immediately close the connection if was requested
-            () = self.token_close.cancelled() => {
-                return Ok(());
-            }
+                // Immediately close the connection if was requested
+                () = self.token_forceful.cancelled() => {
+                    break;
+                }
 
-            () = self.token.cancelled() => {
                 // Start graceful shutdown of the connection
-                // For H2: sends GOAWAY frames to the client
-                // For H1: disables keepalives
-                conn.as_mut().graceful_shutdown();
+                () = self.token_graceful.cancelled() => {
+                    // For H2: sends GOAWAY frames to the client
+                    // For H1: disables keepalives
+                    conn.as_mut().graceful_shutdown();
 
-                // Wait for the grace period to finish or connection to complete.
-                // Connection must still be polled for the shutdown to proceed.
-                select! {
-                    biased;
-                    () = sleep(self.options.grace_period) => return Ok(()),
-                    _ = conn.as_mut() => {},
-                }
+                    // Wait for the grace period to finish or connection to complete.
+                    // Connection must still be polled for the shutdown to proceed.
+                    // We don't really care for the result.
+                    let _ = timeout(self.options.grace_period, conn.as_mut()).await;
+                    break;
+                },
+
+                // Get start of request notification
+                Some(()) = start_rx.recv() => {
+                    debug!("{self}: New request, stopping timer");
+
+                    self.requests.fetch_add(1, Ordering::SeqCst);
+                    // Effectively disable the timer by setting it to 1 year into the future.
+                    // TODO improve?
+                    idle_timer.as_mut().reset(tokio::time::Instant::now() + YEAR);
+                },
+
+                // Get end of request notification
+                Some(()) = end_rx.recv() => {
+                    let reqs = self.requests.fetch_sub(1, Ordering::SeqCst) - 1;
+                    debug!("{self}: Requests now: {reqs}");
+
+                    // Check if the number of outstanding requests is now zero
+                    if reqs == 0 {
+                        debug!("{self}: No outstanding requests, starting timer");
+                        // Enable the idle timer
+                        idle_timer.as_mut().reset(tokio::time::Instant::now() + self.options.idle_timeout);
+                    }
+                },
+
+                // See if the idle timeout has kicked in
+                () = idle_timer.as_mut() => {
+                    debug!("{self}: Idle timeout triggered, closing");
+
+                    // Signal that we're closing
+                    conn.as_mut().graceful_shutdown();
+                    // Give client some time to shut down
+                    let _ = timeout(Duration::from_secs(3), conn.as_mut()).await;
+                    break;
+                },
+
+                // Drive the connection by polling it
+                v = conn.as_mut() => {
+                    if let Err(e) = v {
+                        return Err(anyhow!("unable to serve connection: {e:#}").into());
+                    }
+
+                    break;
+                },
             }
-
-            v = conn.as_mut() => {
-                if let Err(e) = v {
-                    return Err(anyhow!("unable to serve connection: {e:#}").into());
-                }
-            },
         }
 
         Ok(())
@@ -561,6 +637,7 @@ pub struct Server {
     tracker: TaskTracker,
     options: Options,
     metrics: Metrics,
+    builder: Builder<TokioExecutor>,
     tls_acceptor: Option<TlsAcceptor>,
 }
 
@@ -572,12 +649,28 @@ impl Server {
         metrics: Metrics,
         rustls_cfg: Option<rustls::ServerConfig>,
     ) -> Self {
+        // Prepare Hyper connection builder
+        // It automatically figures out whether to do HTTP1 or HTTP2
+        let mut builder = Builder::new(TokioExecutor::new());
+        builder
+            .http1()
+            .timer(TokioTimer::new()) // Needed for the keepalives below
+            .header_read_timeout(Some(options.http1_header_read_timeout))
+            .keep_alive(true)
+            .http2()
+            .adaptive_window(true)
+            .max_concurrent_streams(Some(options.http2_max_streams))
+            .timer(TokioTimer::new()) // Needed for the keepalives below
+            .keep_alive_interval(Some(options.http2_keepalive_interval))
+            .keep_alive_timeout(options.http2_keepalive_timeout);
+
         Self {
             addr,
             router,
             options,
             metrics,
             tracker: TaskTracker::new(),
+            builder,
             tls_acceptor: rustls_cfg.map(|x| TlsAcceptor::from(Arc::new(x))),
         }
     }
@@ -597,26 +690,46 @@ impl Server {
         self.serve_with_listener(listener, token).await
     }
 
+    fn spawn_connection(
+        &self,
+        stream: Box<dyn AsyncReadWrite>,
+        remote_addr: Addr,
+        token: CancellationToken,
+    ) {
+        // Create a new connection
+        // Router & TlsAcceptor are both Arc<> inside so it's cheap to clone
+        // Builder is a bit more complex, but cloning is better than to create it again
+        let conn = Conn {
+            addr: self.addr.clone(),
+            remote_addr: remote_addr.clone(),
+            router: self.router.clone(),
+            builder: self.builder.clone(),
+            token_graceful: token,
+            token_forceful: CancellationToken::new(),
+            options: self.options,
+            metrics: self.metrics.clone(), // All metrics have Arc inside
+            requests: AtomicU32::new(0),
+            tls_acceptor: self.tls_acceptor.clone(),
+        };
+
+        // Spawn a task to handle connection & track it
+        self.tracker.spawn(async move {
+            if let Err(e) = conn.handle(stream).await {
+                info!(
+                    "Server {}: {}: failed to handle connection: {e:#}",
+                    conn.addr, remote_addr
+                );
+            }
+
+            debug!("Server {}: {}: connection finished", conn.addr, remote_addr);
+        });
+    }
+
     pub async fn serve_with_listener(
         &self,
         listener: Listener,
         token: CancellationToken,
     ) -> Result<(), Error> {
-        // Prepare Hyper connection builder
-        // It automatically figures out whether to do HTTP1 or HTTP2
-        let mut builder = Builder::new(TokioExecutor::new());
-        builder
-            .http1()
-            .timer(TokioTimer::new())
-            .header_read_timeout(Some(self.options.http1_header_read_timeout))
-            .keep_alive(true)
-            .http2()
-            .adaptive_window(true)
-            .max_concurrent_streams(Some(self.options.http2_max_streams))
-            .timer(TokioTimer::new()) // Needed for the keepalives below
-            .keep_alive_interval(Some(self.options.http2_keepalive_interval))
-            .keep_alive_timeout(self.options.http2_keepalive_timeout);
-
         warn!(
             "Server {}: running (TLS: {})",
             self.addr,
@@ -664,32 +777,7 @@ impl Server {
                         }
                     };
 
-                    // Create a new connection
-                    // Router & TlsAcceptor are both Arc<> inside so it's cheap to clone
-                    // Builder is a bit more complex, but cloning is better than to create it again
-                    let conn = Conn {
-                        addr: self.addr.clone(),
-                        remote_addr: remote_addr.clone(),
-                        router: self.router.clone(),
-                        builder: builder.clone(),
-                        token: token.child_token(),
-                        token_close: CancellationToken::new(),
-                        options: self.options,
-                        metrics: self.metrics.clone(), // All metrics have Arc inside
-                        tls_acceptor: self.tls_acceptor.clone(),
-                    };
-
-                    // Spawn a task to handle connection & track it
-                    self.tracker.spawn(async move {
-                        if let Err(e) = conn.handle(stream).await {
-                            info!("Server {}: {}: failed to handle connection: {e:#}", conn.addr, remote_addr);
-                        }
-
-                        debug!(
-                            "Server {}: {}: connection finished",
-                            conn.addr, remote_addr
-                        );
-                    });
+                    self.spawn_connection(stream, remote_addr, token.child_token());
                 }
             }
         }
