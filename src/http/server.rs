@@ -314,6 +314,12 @@ impl Display for Addr {
     }
 }
 
+#[derive(Clone)]
+enum RequestState {
+    Start,
+    End,
+}
+
 struct Conn {
     addr: Addr,
     remote_addr: Addr,
@@ -501,10 +507,9 @@ impl Conn {
         // Create a timer for idle connection tracking
         let mut idle_timer = Box::pin(sleep(self.options.idle_timeout));
 
-        // Create channels to notify about request start/stop.
-        // Use bounded but big enough so that they're always larger than our concurrency.
-        let (start_tx, mut start_rx) = channel(65536);
-        let (end_tx, mut end_rx) = channel(65536);
+        // Create channel to notify about request start/stop.
+        // Use bounded but big enough so that it's larger than our concurrency.
+        let (state_tx, mut state_rx) = channel(65536);
 
         // Apply timeouts on read/write calls
         let mut stream = TimeoutStream::new(stream);
@@ -518,7 +523,7 @@ impl Conn {
         let max_requests_per_conn = self.options.max_requests_per_conn;
         let service = hyper::service::service_fn(move |mut request: Request<Incoming>| {
             // Notify that we have started processing the request
-            let _ = start_tx.try_send(());
+            let _ = state_tx.try_send(RequestState::Start);
 
             // Inject connection information
             request.extensions_mut().insert(conn_info.clone());
@@ -530,7 +535,7 @@ impl Conn {
             let mut router = self.router.clone();
             let token = self.token_graceful.clone();
             let conn_info = conn_info.clone();
-            let end_tx = end_tx.clone();
+            let state_tx = state_tx.clone();
 
             // Return the future
             async move {
@@ -538,7 +543,7 @@ impl Conn {
                 let result = router.call(request).await.map(|x| {
                     // Wrap the response body into a notifying one
                     let (parts, body) = x.into_parts();
-                    let body = NotifyingBody::new(body, end_tx);
+                    let body = NotifyingBody::new(body, state_tx, RequestState::End);
                     Response::from_parts(parts, body)
                 });
 
@@ -581,26 +586,29 @@ impl Conn {
                     break;
                 },
 
-                // Get start of request notification
-                Some(()) = start_rx.recv() => {
-                    debug!("{self}: New request, stopping timer");
+                // Get request state change notifications
+                Some(v) = state_rx.recv() => {
+                    match v {
+                        RequestState::Start => {
+                            let reqs = self.requests.fetch_add(1, Ordering::SeqCst) + 1;
+                            debug!("{self}: Request started, stopping idle timer (now: {reqs})");
 
-                    self.requests.fetch_add(1, Ordering::SeqCst);
-                    // Effectively disable the timer by setting it to 1 year into the future.
-                    // TODO improve?
-                    idle_timer.as_mut().reset(tokio::time::Instant::now() + YEAR);
-                },
+                            // Effectively disable the timer by setting it to 1 year into the future.
+                            // TODO improve?
+                            idle_timer.as_mut().reset(tokio::time::Instant::now() + YEAR);
+                        },
 
-                // Get end of request notification
-                Some(()) = end_rx.recv() => {
-                    let reqs = self.requests.fetch_sub(1, Ordering::SeqCst) - 1;
-                    debug!("{self}: Requests now: {reqs}");
+                        RequestState::End => {
+                            let reqs = self.requests.fetch_sub(1, Ordering::SeqCst) - 1;
+                            debug!("{self}: Request finished (now: {reqs})");
 
-                    // Check if the number of outstanding requests is now zero
-                    if reqs == 0 {
-                        debug!("{self}: No outstanding requests, starting timer");
-                        // Enable the idle timer
-                        idle_timer.as_mut().reset(tokio::time::Instant::now() + self.options.idle_timeout);
+                            // Check if the number of outstanding requests is now zero
+                            if reqs == 0 {
+                                debug!("{self}: No outstanding requests, starting timer");
+                                // Enable the idle timer
+                                idle_timer.as_mut().reset(tokio::time::Instant::now() + self.options.idle_timeout);
+                            }
+                        }
                     }
                 },
 
@@ -610,7 +618,7 @@ impl Conn {
 
                     // Signal that we're closing
                     conn.as_mut().graceful_shutdown();
-                    // Give client some time to shut down
+                    // Give the client some time to shut down
                     let _ = timeout(Duration::from_secs(3), conn.as_mut()).await;
                     break;
                 },

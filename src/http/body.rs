@@ -83,14 +83,15 @@ impl Stream for SyncBodyDataStream {
     }
 }
 
-// Body that notifies that it's done streaming over a provided channel
-pub struct NotifyingBody<D, E> {
+// Body that notifies that it has finished by sending a value over the provided channel
+pub struct NotifyingBody<D, E, S: Clone + Unpin> {
     inner: Pin<Box<dyn HttpBody<Data = D, Error = E> + Send + 'static>>,
-    tx: mpsc::Sender<()>,
+    tx: mpsc::Sender<S>,
+    sig: S,
 }
 
-impl<D, E> NotifyingBody<D, E> {
-    pub fn new<B>(inner: B, tx: mpsc::Sender<()>) -> Self
+impl<D, E, S: Clone + Unpin> NotifyingBody<D, E, S> {
+    pub fn new<B>(inner: B, tx: mpsc::Sender<S>, sig: S) -> Self
     where
         B: HttpBody<Data = D, Error = E> + Send + 'static,
         D: Buf,
@@ -98,11 +99,12 @@ impl<D, E> NotifyingBody<D, E> {
         Self {
             inner: Box::pin(inner),
             tx,
+            sig,
         }
     }
 }
 
-impl<D, E> HttpBody for NotifyingBody<D, E>
+impl<D, E, S: Clone + Unpin> HttpBody for NotifyingBody<D, E, S>
 where
     D: Buf,
     E: std::string::ToString,
@@ -116,7 +118,7 @@ where
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let poll = ready!(pin!(&mut self.inner).poll_frame(cx));
         if poll.is_none() {
-            let _ = self.tx.try_send(());
+            let _ = self.tx.try_send(self.sig.clone());
         }
 
         Poll::Ready(poll)
@@ -129,7 +131,7 @@ where
     fn is_end_stream(&self) -> bool {
         let end = self.inner.is_end_stream();
         if end {
-            let _ = self.tx.try_send(());
+            let _ = self.tx.try_send(self.sig.clone());
         }
 
         end
@@ -287,14 +289,15 @@ mod test {
         let stream = tokio_util::io::ReaderStream::new(&data[..]);
         let body = axum::body::Body::from_stream(stream);
 
+        let sig = 357;
         let (tx, mut rx) = mpsc::channel(10);
-        let body = NotifyingBody::new(body, tx);
+        let body = NotifyingBody::new(body, tx, sig);
 
         // Check that the body streams the same data back
         let body = body.collect().await.unwrap().to_bytes().to_vec();
         assert_eq!(body, data);
 
         // Make sure we're notified
-        rx.recv().await.unwrap()
+        assert_eq!(sig, rx.recv().await.unwrap());
     }
 }
