@@ -1,5 +1,6 @@
 use std::{
     pin::{pin, Pin},
+    sync::atomic::{AtomicBool, Ordering},
     task::{Context, Poll},
     time::Duration,
 };
@@ -83,11 +84,13 @@ impl Stream for SyncBodyDataStream {
     }
 }
 
-// Body that notifies that it has finished by sending a value over the provided channel
+/// Body that notifies that it has finished by sending a value over the provided channel.
+/// Use AtomicBool flag to make sure we notify only once.
 pub struct NotifyingBody<D, E, S: Clone + Unpin> {
     inner: Pin<Box<dyn HttpBody<Data = D, Error = E> + Send + 'static>>,
     tx: mpsc::Sender<S>,
     sig: S,
+    sent: AtomicBool,
 }
 
 impl<D, E, S: Clone + Unpin> NotifyingBody<D, E, S> {
@@ -100,6 +103,17 @@ impl<D, E, S: Clone + Unpin> NotifyingBody<D, E, S> {
             inner: Box::pin(inner),
             tx,
             sig,
+            sent: AtomicBool::new(false),
+        }
+    }
+
+    fn notify(&self) {
+        if self
+            .sent
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            == Ok(false)
+        {
+            let _ = self.tx.try_send(self.sig.clone()).is_ok();
         }
     }
 }
@@ -118,7 +132,7 @@ where
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let poll = ready!(pin!(&mut self.inner).poll_frame(cx));
         if poll.is_none() {
-            let _ = self.tx.try_send(self.sig.clone());
+            self.notify();
         }
 
         Poll::Ready(poll)
@@ -131,7 +145,7 @@ where
     fn is_end_stream(&self) -> bool {
         let end = self.inner.is_end_stream();
         if end {
-            let _ = self.tx.try_send(self.sig.clone());
+            self.notify();
         }
 
         end
