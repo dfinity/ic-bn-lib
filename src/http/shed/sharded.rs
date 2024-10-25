@@ -246,7 +246,7 @@ mod test {
         let resp = shedder.oneshot(Duration::from_millis(10)).await.unwrap();
         assert_eq!(resp, ShedResponse::Inner(()));
 
-        // Check that non-existant type still works (extractor returns 1 but we configure only 0)
+        // Check that non-existent type still works (extractor returns 1 but we configure only 0)
         let opts = ShardedOptions {
             extractor: StubExtractor(1),
             ewma_alpha: 0.9,
