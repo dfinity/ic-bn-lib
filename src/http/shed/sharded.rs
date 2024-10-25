@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     fmt::Debug,
+    sync::Arc,
     task::{Context, Poll},
     time::Duration,
 };
@@ -16,7 +17,7 @@ use super::{
 pub trait TypeExtractor: Clone + Debug + Send + Sync + 'static {
     /// The type of the request.
     type Type: Clone + Debug + Send + Sync + Ord + 'static;
-    type Request: Send + Sync;
+    type Request: Send;
 
     /// Extraction method, should return None response when the extraction failed
     fn extract(&self, req: &Self::Request) -> Option<Self::Type>;
@@ -37,18 +38,18 @@ pub struct ShardedOptions<T: TypeExtractor> {
 pub struct ShardedLittleLoadShedder<T: TypeExtractor, I> {
     extractor: T,
     inner: I,
-    shards: BTreeMap<T::Type, LoadShed<I>>,
+    shards: Arc<BTreeMap<T::Type, LoadShed<I>>>,
 }
 
 impl<T: TypeExtractor, I: Send + Sync + Clone> ShardedLittleLoadShedder<T, I> {
     pub fn new(inner: I, opts: ShardedOptions<T>) -> Self {
         // Generate the shedding shards, one per provided request type
-        let shards = BTreeMap::from_iter(opts.latencies.into_iter().map(|x| {
+        let shards = Arc::new(BTreeMap::from_iter(opts.latencies.into_iter().map(|x| {
             (
                 x.0,
                 LoadShed::new(inner.clone(), opts.ewma_alpha, x.1, opts.passthrough_count),
             )
-        }));
+        })));
 
         Self {
             extractor: opts.extractor,

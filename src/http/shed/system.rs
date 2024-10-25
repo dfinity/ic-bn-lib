@@ -1,6 +1,6 @@
 use std::{
     fmt::Debug,
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, RwLockWriteGuard},
     task::{Context, Poll},
     time::Duration,
 };
@@ -8,15 +8,14 @@ use std::{
 use anyhow::{anyhow, Context as _};
 use async_trait::async_trait;
 use systemstat::{Platform, System};
-use tokio_util::sync::CancellationToken;
 use tower::{Layer, Service, ServiceExt};
-use tracing::{error, warn};
+use tracing::{debug, error};
 
 use super::{ewma::EWMA, BoxFuture, ShedReason, ShedResponse};
-use crate::{tasks::Run, Error};
+use crate::Error;
 
 #[async_trait]
-pub trait GetsSystemInfo: Send + Sync + Clone {
+pub trait GetsSystemInfo: Send + Sync + Clone + 'static {
     async fn cpu_usage(&self) -> Result<f64, Error>;
     fn memory_usage(&self) -> Result<f64, Error>;
     fn load_avg(&self) -> Result<(f64, f64, f64), Error>;
@@ -44,7 +43,7 @@ impl GetsSystemInfo for SystemInfo {
             .0
             .cpu_load_aggregate()
             .context("unable to measure CPU load")?;
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_millis(900)).await;
         let cpu = cpu.done().context("unable to measure CPU load")?;
 
         Ok(1.0 - cpu.idle as f64)
@@ -69,94 +68,67 @@ impl GetsSystemInfo for SystemInfo {
     }
 }
 
-struct Averages {
+#[derive(Debug)]
+struct StateInner {
     cpu: EWMA,
     memory: EWMA,
     load_avg: (EWMA, EWMA, EWMA),
+    shed_reason: Option<ShedReason>,
 }
 
-impl Averages {
+impl StateInner {
     fn new(alpha: f64) -> Self {
         Self {
             cpu: EWMA::new(alpha),
             memory: EWMA::new(alpha),
             load_avg: (EWMA::new(alpha), EWMA::new(alpha), EWMA::new(alpha)),
+            shed_reason: None,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct SystemOptions {
-    pub ewma_alpha: f64,
-    pub cpu: Option<f64>,
-    pub memory: Option<f64>,
-    pub loadavg_1: Option<f64>,
-    pub loadavg_5: Option<f64>,
-    pub loadavg_15: Option<f64>,
-}
-
-impl SystemOptions {
-    fn check(self) -> Result<Self, Error> {
-        if self.ewma_alpha < 0.0 || self.ewma_alpha > 1.0 {
-            return Err(anyhow!("EWMA alpha should be in [0.0, 1.0] range").into());
-        }
-
-        if self.cpu.is_none()
-            && self.memory.is_none()
-            && self.loadavg_1.is_none()
-            && self.loadavg_5.is_none()
-            && self.loadavg_15.is_none()
-        {
-            return Err(anyhow!("at least one load-shedding threshold must be enabled").into());
-        }
-
-        Ok(self)
-    }
-}
-
-/// Load shedder that sheds requests when the system load is over the defined thresholds
-pub struct SystemLoadShedder<S: GetsSystemInfo, I> {
-    sys_info: S,
-    avg: RwLock<Averages>,
+#[derive(Debug)]
+pub struct State<S: GetsSystemInfo> {
     opts: SystemOptions,
-    inner: I,
+    sys_info: S,
+    inner: RwLock<StateInner>,
 }
 
-impl<S: GetsSystemInfo, I: Send + Sync> SystemLoadShedder<S, I> {
-    pub fn new(inner: I, opts: SystemOptions, sys_info: S) -> Result<Self, Error> {
-        let opts = opts.check()?;
-
-        Ok(Self {
-            sys_info,
-            avg: RwLock::new(Averages::new(opts.ewma_alpha)),
+impl<S: GetsSystemInfo> State<S> {
+    pub fn new(alpha: f64, opts: SystemOptions, sys_info: S) -> Self {
+        Self {
             opts,
-            inner,
-        })
+            sys_info,
+            inner: RwLock::new(StateInner::new(alpha)),
+        }
     }
 
+    // Perform system info measurement
     async fn measure(&self) -> Result<(), Error> {
         let cpu = self.sys_info.cpu_usage().await?;
         let mem = self.sys_info.memory_usage()?;
         let (l1, l5, l15) = self.sys_info.load_avg()?;
 
-        let mut avg = self.avg.write().unwrap();
-        avg.cpu.add(cpu);
-        avg.memory.add(mem);
-        avg.load_avg.0.add(l1);
-        avg.load_avg.1.add(l5);
-        avg.load_avg.2.add(l15);
-        drop(avg); // clippy
+        let mut inner = self.inner.write().unwrap();
+        inner.cpu.add(cpu);
+        inner.memory.add(mem);
+        inner.load_avg.0.add(l1);
+        inner.load_avg.1.add(l5);
+        inner.load_avg.2.add(l15);
 
+        // Check if we're overloaded
+        inner.shed_reason = self.evaluate(&inner);
+        debug!("System load: CPU {cpu}, MEM {mem}, LAVG1: {l1}, LAVG5: {l5}, LAVG15: {l15}, Overload: {:?}", inner.shed_reason);
+
+        drop(inner); // clippy
         Ok(())
     }
 
-    fn evaluate(&self) -> Option<ShedReason> {
-        let avg = self.avg.read().unwrap();
-
+    fn evaluate(&self, state: &RwLockWriteGuard<'_, StateInner>) -> Option<ShedReason> {
         if self
             .opts
             .cpu
-            .map(|x| avg.cpu.get().unwrap_or(0.0) > x)
+            .map(|x| state.cpu.get().unwrap_or(0.0) > x)
             .unwrap_or(false)
         {
             return Some(ShedReason::CPU);
@@ -165,7 +137,7 @@ impl<S: GetsSystemInfo, I: Send + Sync> SystemLoadShedder<S, I> {
         if self
             .opts
             .memory
-            .map(|x| avg.memory.get().unwrap_or(0.0) > x)
+            .map(|x| state.memory.get().unwrap_or(0.0) > x)
             .unwrap_or(false)
         {
             return Some(ShedReason::Memory);
@@ -174,7 +146,7 @@ impl<S: GetsSystemInfo, I: Send + Sync> SystemLoadShedder<S, I> {
         if self
             .opts
             .loadavg_1
-            .map(|x| avg.load_avg.0.get().unwrap_or(0.0) > x)
+            .map(|x| state.load_avg.0.get().unwrap_or(0.0) > x)
             .unwrap_or(false)
         {
             return Some(ShedReason::LoadAvg);
@@ -183,7 +155,7 @@ impl<S: GetsSystemInfo, I: Send + Sync> SystemLoadShedder<S, I> {
         if self
             .opts
             .loadavg_5
-            .map(|x| avg.load_avg.1.get().unwrap_or(0.0) > x)
+            .map(|x| state.load_avg.1.get().unwrap_or(0.0) > x)
             .unwrap_or(false)
         {
             return Some(ShedReason::LoadAvg);
@@ -192,7 +164,7 @@ impl<S: GetsSystemInfo, I: Send + Sync> SystemLoadShedder<S, I> {
         if self
             .opts
             .loadavg_15
-            .map(|x| avg.load_avg.2.get().unwrap_or(0.0) > x)
+            .map(|x| state.load_avg.2.get().unwrap_or(0.0) > x)
             .unwrap_or(false)
         {
             return Some(ShedReason::LoadAvg);
@@ -200,30 +172,46 @@ impl<S: GetsSystemInfo, I: Send + Sync> SystemLoadShedder<S, I> {
 
         None
     }
-}
 
-#[async_trait]
-impl<S: GetsSystemInfo, I: Send + Sync> Run for SystemLoadShedder<S, I> {
-    async fn run(&self, token: CancellationToken) -> Result<(), anyhow::Error> {
-        let mut interval = tokio::time::interval(Duration::from_secs(2));
+    fn is_overloaded(&self) -> Option<ShedReason> {
+        self.inner.read().unwrap().shed_reason
+    }
+
+    // Periodically run the measurements
+    async fn run(&self) {
+        // CPU usage measurement takes 900ms so we run every second
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
-            tokio::select! {
-                biased;
+            interval.tick().await;
 
-                () = token.cancelled() => {
-                    warn!("SystemLoadShedder: exiting");
-                    return Ok(());
-                }
-
-                _ = interval.tick() => {
-                    if let Err(e) = self.measure().await {
-                        error!("SystemLoadShedder: error: {e:#}");
-                    }
-                },
+            if let Err(e) = self.measure().await {
+                error!("SystemLoadShedder: error: {e:#}");
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SystemOptions {
+    pub cpu: Option<f64>,
+    pub memory: Option<f64>,
+    pub loadavg_1: Option<f64>,
+    pub loadavg_5: Option<f64>,
+    pub loadavg_15: Option<f64>,
+}
+
+/// Load shedder that sheds requests when the system load is over the defined thresholds
+#[derive(Debug, Clone)]
+pub struct SystemLoadShedder<S: GetsSystemInfo, I> {
+    state: Arc<State<S>>,
+    inner: I,
+}
+
+impl<S: GetsSystemInfo, I> SystemLoadShedder<S, I> {
+    pub const fn new(inner: I, state: Arc<State<S>>) -> Self {
+        Self { state, inner }
     }
 }
 
@@ -244,7 +232,8 @@ where
 
     fn call(&mut self, req: R) -> Self::Future {
         // Check if we need to shed the load
-        if let Some(v) = self.evaluate() {
+        let shed_reason = self.state.is_overloaded();
+        if let Some(v) = shed_reason {
             return Box::pin(async move { Ok(ShedResponse::Overload(v)) });
         }
 
@@ -257,20 +246,26 @@ where
 }
 
 #[derive(Debug, Clone)]
-pub struct SystemLoadShedderLayer<S: GetsSystemInfo>(SystemOptions, S);
+pub struct SystemLoadShedderLayer<S: GetsSystemInfo>(Arc<State<S>>);
 
 impl<S: GetsSystemInfo> SystemLoadShedderLayer<S> {
-    pub fn new(opts: SystemOptions, sys_info: S) -> Result<Self, Error> {
-        Ok(Self(opts.check()?, sys_info))
+    pub fn new(ewma_alpha: f64, opts: SystemOptions, sys_info: S) -> Self {
+        // Create a state that will be shared among all the shedder instances
+        let state = Arc::new(State::new(ewma_alpha, opts, sys_info));
+
+        // Spawn the background task to perform the system measurements
+        let state_bg = state.clone();
+        tokio::spawn(async move { state_bg.run().await });
+
+        Self(state)
     }
 }
 
-impl<S: GetsSystemInfo, I: Send + Sync> Layer<I> for SystemLoadShedderLayer<S> {
+impl<S: GetsSystemInfo, I: Clone + Send + Sync + 'static> Layer<I> for SystemLoadShedderLayer<S> {
     type Service = SystemLoadShedder<S, I>;
 
     fn layer(&self, inner: I) -> Self::Service {
-        // Error is checked in new() so unwrap is safe
-        SystemLoadShedder::new(inner, self.0, self.1.clone()).unwrap()
+        SystemLoadShedder::new(inner, self.0.clone())
     }
 }
 
@@ -334,40 +329,8 @@ mod test {
 
     #[tokio::test]
     async fn test_system_shedder() {
-        // Check incorrect options
-        let opts = SystemOptions {
-            ewma_alpha: 0.5,
-            cpu: None,
-            memory: None,
-            loadavg_1: None,
-            loadavg_5: None,
-            loadavg_15: None,
-        };
-        assert!(opts.check().is_err());
-
-        let opts = SystemOptions {
-            ewma_alpha: -0.1,
-            cpu: Some(0.5),
-            memory: None,
-            loadavg_1: None,
-            loadavg_5: None,
-            loadavg_15: None,
-        };
-        assert!(opts.check().is_err());
-
-        let opts = SystemOptions {
-            ewma_alpha: 1.1,
-            cpu: Some(0.5),
-            memory: None,
-            loadavg_1: None,
-            loadavg_5: None,
-            loadavg_15: None,
-        };
-        assert!(opts.check().is_err());
-
         let inner = StubService;
         let opts = SystemOptions {
-            ewma_alpha: 0.8,
             cpu: Some(0.5),
             memory: Some(0.5),
             loadavg_1: Some(0.5),
@@ -384,42 +347,43 @@ mod test {
             })),
         };
 
-        let mut shedder = SystemLoadShedder::new(inner, opts, sys_info.clone()).unwrap();
-        let _ = shedder.measure().await;
+        let state = Arc::new(State::new(0.8, opts, sys_info.clone()));
+        let mut shedder = SystemLoadShedder::new(inner, state.clone());
+        let _ = state.measure().await;
         let resp = shedder.call(Duration::ZERO).await.unwrap();
         assert!(matches!(resp, ShedResponse::Inner(_)));
 
         sys_info.v.lock().unwrap().cpu = 1.0;
-        let _ = shedder.measure().await;
+        let _ = state.measure().await;
         let resp = shedder.call(Duration::ZERO).await.unwrap();
         assert_eq!(resp, ShedResponse::Overload(ShedReason::CPU));
         sys_info.v.lock().unwrap().cpu = 0.0;
 
         sys_info.v.lock().unwrap().memory = 1.0;
-        let _ = shedder.measure().await;
+        let _ = state.measure().await;
         let resp = shedder.call(Duration::ZERO).await.unwrap();
         assert_eq!(resp, ShedResponse::Overload(ShedReason::Memory));
         sys_info.v.lock().unwrap().memory = 0.0;
 
         sys_info.v.lock().unwrap().l1 = 1.0;
-        let _ = shedder.measure().await;
+        let _ = state.measure().await;
         let resp = shedder.call(Duration::ZERO).await.unwrap();
         assert_eq!(resp, ShedResponse::Overload(ShedReason::LoadAvg));
         sys_info.v.lock().unwrap().l1 = 0.0;
 
         sys_info.v.lock().unwrap().l5 = 1.0;
-        let _ = shedder.measure().await;
+        let _ = state.measure().await;
         let resp = shedder.call(Duration::ZERO).await.unwrap();
         assert_eq!(resp, ShedResponse::Overload(ShedReason::LoadAvg));
         sys_info.v.lock().unwrap().l5 = 0.0;
 
         sys_info.v.lock().unwrap().l15 = 1.0;
-        let _ = shedder.measure().await;
+        let _ = state.measure().await;
         let resp = shedder.call(Duration::ZERO).await.unwrap();
         assert_eq!(resp, ShedResponse::Overload(ShedReason::LoadAvg));
         sys_info.v.lock().unwrap().l15 = 0.0;
 
-        let _ = shedder.measure().await;
+        let _ = state.measure().await;
         let resp = shedder.call(Duration::ZERO).await.unwrap();
         assert!(matches!(resp, ShedResponse::Inner(_)));
     }

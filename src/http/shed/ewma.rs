@@ -1,5 +1,6 @@
 /// Implementation of Exponential Weighted Moving Average.
 /// https://en.wikipedia.org/wiki/Exponential_smoothing#Basic_(simple)_exponential_smoothing
+#[derive(Debug)]
 pub struct EWMA {
     alpha: f64,
     new: bool,
@@ -39,6 +40,7 @@ impl EWMA {
 
 /// Implementation of Double Exponential Weighted Moving Average.
 /// https://en.wikipedia.org/wiki/Exponential_smoothing#Double_exponential_smoothing_(Holt_linear)
+#[derive(Debug)]
 pub struct DEWMA {
     alpha: f64,
     beta: f64,
