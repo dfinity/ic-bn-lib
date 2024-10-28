@@ -25,8 +25,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 use tower::{Layer, Service, ServiceExt};
 
 /// Load Shed service's current state of the world
-#[derive(Debug, Clone)]
-struct LoadShedConf {
+#[derive(Debug)]
+pub struct LoadShedConf {
     /// The number of initial requests to pass without shedding
     passthrough_count: u64,
     /// The target average latency in seconds.
@@ -40,9 +40,9 @@ struct LoadShedConf {
     /// Semaphore controlling concurrency to the inner service.
     available_concurrency: Arc<Semaphore>,
     /// Stats about the latency that change with each completed request.
-    stats: Arc<Mutex<ConfStats>>,
+    stats: Mutex<ConfStats>,
     /// Number of requests that were served
-    requests: Arc<AtomicU64>,
+    requests: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -78,14 +78,14 @@ struct ConfStats {
 // queue capacity = concurrency * ((target latency / average latency of service) - 1)
 
 impl LoadShedConf {
-    fn new(ewma_param: f64, target: f64, passthrough_count: u64) -> Self {
+    pub fn new(ewma_param: f64, target: f64, passthrough_count: u64) -> Self {
         Self {
             passthrough_count,
             target,
             ewma_param,
             available_concurrency: Arc::new(Semaphore::new(1)),
             available_queue: Arc::new(Semaphore::new(1)),
-            stats: Arc::new(Mutex::new(ConfStats {
+            stats: Mutex::new(ConfStats {
                 average_latency: target,
                 average_latency_at_capacity: target,
                 queue_capacity: 1,
@@ -93,8 +93,8 @@ impl LoadShedConf {
                 previous_concurrency: 0,
                 last_changed: Instant::now(),
                 previous_throughput: 0.0,
-            })),
-            requests: Arc::new(AtomicU64::new(0)),
+            }),
+            requests: AtomicU64::new(0),
         }
     }
 
@@ -137,7 +137,7 @@ impl LoadShedConf {
 
         // Finally get our queue permit, if this fails then the queue is full
         // and we need to bail out.
-        let queue_permit = match self.available_queue.clone().try_acquire_owned() {
+        let _queue_permit = match self.available_queue.clone().try_acquire_owned() {
             Ok(queue_permit) => queue_permit,
             Err(TryAcquireError::NoPermits) => return None,
             Err(TryAcquireError::Closed) => panic!("queue semaphore closed?"),
@@ -151,8 +151,6 @@ impl LoadShedConf {
             .await
             .unwrap();
 
-        // Now we've got the permit required to send the request we can leave the queue.
-        drop(queue_permit);
         Some(concurrency_permit)
     }
 
@@ -234,7 +232,7 @@ impl LoadShedConf {
 
 #[derive(Debug, Clone)]
 pub struct LoadShed<Inner> {
-    conf: LoadShedConf,
+    conf: Arc<LoadShedConf>,
     inner: Inner,
 }
 
@@ -242,11 +240,8 @@ impl<Inner> LoadShed<Inner> {
     /// Wrap a service with this middleware, using the given target average
     /// latency and computing the current average latency using an exponentially
     /// weighted moving average with the given parameter.
-    pub fn new(inner: Inner, ewma_param: f64, target: Duration, passthrough_count: u64) -> Self {
-        Self {
-            inner,
-            conf: LoadShedConf::new(ewma_param, target.as_secs_f64(), passthrough_count),
-        }
+    pub const fn new(inner: Inner, conf: Arc<LoadShedConf>) -> Self {
+        Self { inner, conf }
     }
 
     /// The current average latency of requests through the inner service,
@@ -333,22 +328,20 @@ where
 ///
 /// See [`LoadShed`] for details of the load shedding algorithm.
 #[derive(Debug, Clone)]
-pub struct LoadShedLayer {
-    ewma_param: f64,
-    passthrough_count: u64,
-    target: Duration,
-}
+pub struct LoadShedLayer(Arc<LoadShedConf>);
 
 impl LoadShedLayer {
     /// Create a new layer with the given target average latency and
     /// computing the current average latency using an exponentially weighted
     /// moving average with the given parameter.
-    pub const fn new(ewma_param: f64, target: Duration, passthrough_count: u64) -> Self {
-        Self {
+    pub fn new(ewma_param: f64, target: Duration, passthrough_count: u64) -> Self {
+        let conf = Arc::new(LoadShedConf::new(
             ewma_param,
-            target,
+            target.as_secs_f64(),
             passthrough_count,
-        }
+        ));
+
+        Self(conf)
     }
 }
 
@@ -356,6 +349,94 @@ impl<Inner> Layer<Inner> for LoadShedLayer {
     type Service = LoadShed<Inner>;
 
     fn layer(&self, inner: Inner) -> Self::Service {
-        LoadShed::new(inner, self.ewma_param, self.target, self.passthrough_count)
+        LoadShed::new(inner, self.0.clone())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    use tokio_util::task::TaskTracker;
+
+    use super::*;
+    use crate::Error;
+
+    #[derive(Debug, Clone)]
+    struct StubService;
+
+    impl Service<Duration> for StubService {
+        type Response = ();
+        type Error = Error;
+        type Future = BoxFuture<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: Duration) -> Self::Future {
+            let fut = async move {
+                tokio::time::sleep(req).await;
+                Ok(())
+            };
+
+            Box::pin(fut)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_little_loadshedder() {
+        let layer = LoadShedLayer::new(0.9, Duration::from_millis(1), 100);
+        let inner = StubService;
+        let mut shedder = layer.layer(inner);
+
+        // Now try 100 of concurrent requests with high latency
+        // They shouldn't be shedded due to passthrough_requests
+        let shedded = Arc::new(AtomicUsize::new(0));
+        let tracker = TaskTracker::new();
+        for _ in 0..100 {
+            let shedder = shedder.clone();
+            let shedded = shedded.clone();
+
+            tracker.spawn(async move {
+                let resp = shedder.oneshot(Duration::from_millis(10)).await.unwrap();
+                if matches!(resp, LoadShedResponse::Overload) {
+                    shedded.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+        }
+
+        tracker.close();
+        tracker.wait().await;
+        assert_eq!(shedded.load(Ordering::SeqCst), 0);
+
+        // Make sure sequential requests are not shedded no matter the latency
+        for _ in 0..10 {
+            let resp = shedder.call(Duration::from_millis(10)).await.unwrap();
+            assert_eq!(resp, LoadShedResponse::Inner(()));
+        }
+
+        // Now try 10 of concurrent requests with high latency
+        // 8 of them should be shedded
+        let shedded = Arc::new(AtomicUsize::new(0));
+        let tracker = TaskTracker::new();
+        for _ in 0..10 {
+            let shedder = shedder.clone();
+            let shedded = shedded.clone();
+
+            tracker.spawn(async move {
+                let resp = shedder.oneshot(Duration::from_millis(10)).await.unwrap();
+                if matches!(resp, LoadShedResponse::Overload) {
+                    shedded.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+        }
+
+        tracker.close();
+        tracker.wait().await;
+        assert_eq!(shedded.load(Ordering::SeqCst), 8);
     }
 }

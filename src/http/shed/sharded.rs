@@ -9,7 +9,7 @@ use std::{
 use tower::{Layer, Service, ServiceExt};
 
 use super::{
-    little::{LoadShed, LoadShedResponse},
+    little::{LoadShedLayer, LoadShedResponse},
     BoxFuture, ShedReason, ShedResponse,
 };
 
@@ -38,28 +38,24 @@ pub struct ShardedOptions<T: TypeExtractor> {
 pub struct ShardedLittleLoadShedder<T: TypeExtractor, I> {
     extractor: T,
     inner: I,
-    shards: Arc<BTreeMap<T::Type, LoadShed<I>>>,
+    shards: Arc<BTreeMap<T::Type, LoadShedLayer>>,
 }
 
 impl<T: TypeExtractor, I: Send + Sync + Clone> ShardedLittleLoadShedder<T, I> {
-    pub fn new(inner: I, opts: ShardedOptions<T>) -> Self {
-        // Generate the shedding shards, one per provided request type
-        let shards = Arc::new(BTreeMap::from_iter(opts.latencies.into_iter().map(|x| {
-            (
-                x.0,
-                LoadShed::new(inner.clone(), opts.ewma_alpha, x.1, opts.passthrough_count),
-            )
-        })));
-
+    pub const fn new(
+        inner: I,
+        extractor: T,
+        shards: Arc<BTreeMap<T::Type, LoadShedLayer>>,
+    ) -> Self {
         Self {
-            extractor: opts.extractor,
+            extractor,
             inner,
             shards,
         }
     }
 
     // Tries to find a shard corresponding to the given request
-    fn get_shard(&self, req: &T::Request) -> Option<LoadShed<I>> {
+    fn get_shard(&self, req: &T::Request) -> Option<LoadShedLayer> {
         let req_type = self.extractor.extract(req)?;
         self.shards.get(&req_type).cloned()
     }
@@ -87,9 +83,14 @@ where
             return Box::pin(async move { Ok(ShedResponse::Inner(inner.oneshot(req).await?)) });
         };
 
+        // Construct the service using a layer shard.
+        // This should be very lightweight.
+        let svc = shard.layer(self.inner.clone());
+
+        // Execute the request
         Box::pin(async move {
             // Map response to our
-            shard.oneshot(req).await.map(|x| match x {
+            svc.oneshot(req).await.map(|x| match x {
                 LoadShedResponse::Overload => ShedResponse::Overload(ShedReason::Latency),
                 LoadShedResponse::Inner(i) => ShedResponse::Inner(i),
             })
@@ -98,11 +99,22 @@ where
 }
 
 #[derive(Debug, Clone)]
-pub struct ShardedLittleLoadShedderLayer<T: TypeExtractor>(ShardedOptions<T>);
+pub struct ShardedLittleLoadShedderLayer<T: TypeExtractor>(
+    ShardedOptions<T>,
+    Arc<BTreeMap<T::Type, LoadShedLayer>>,
+);
 
 impl<T: TypeExtractor> ShardedLittleLoadShedderLayer<T> {
-    pub const fn new(opts: ShardedOptions<T>) -> Self {
-        Self(opts)
+    pub fn new(opts: ShardedOptions<T>) -> Self {
+        // Generate the shedding shards, one per provided request type
+        let shards = Arc::new(BTreeMap::from_iter(opts.latencies.iter().map(|x| {
+            (
+                x.0.clone(),
+                LoadShedLayer::new(opts.ewma_alpha, x.1, opts.passthrough_count),
+            )
+        })));
+
+        Self(opts, shards)
     }
 }
 
@@ -110,7 +122,7 @@ impl<T: TypeExtractor, I: Send + Sync + Clone> Layer<I> for ShardedLittleLoadShe
     type Service = ShardedLittleLoadShedder<T, I>;
 
     fn layer(&self, inner: I) -> Self::Service {
-        ShardedLittleLoadShedder::new(inner, self.0.clone())
+        ShardedLittleLoadShedder::new(inner, self.0.extractor.clone(), self.1.clone())
     }
 }
 
@@ -170,19 +182,14 @@ mod test {
         };
         let inner = StubService;
 
-        let mut shedder = ShardedLittleLoadShedder::new(inner, opts);
+        let layer = ShardedLittleLoadShedderLayer::new(opts);
+        let mut shedder = layer.layer(inner);
 
-        // Make sure sequential requests are not shedded no matter the latency
-        for _ in 0..10 {
-            let resp = shedder.call(Duration::from_millis(10)).await.unwrap();
-            assert_eq!(resp, ShedResponse::Inner(()));
-        }
-
-        // Now try 90 of concurrent requests with high latency
+        // Now try 100 of concurrent requests with high latency
         // They shouldn't be shedded due to passthrough_requests
         let shedded = Arc::new(AtomicUsize::new(0));
         let tracker = TaskTracker::new();
-        for _ in 0..90 {
+        for _ in 0..100 {
             let shedder = shedder.clone();
             let shedded = shedded.clone();
 
@@ -197,6 +204,12 @@ mod test {
         tracker.close();
         tracker.wait().await;
         assert_eq!(shedded.load(Ordering::SeqCst), 0);
+
+        // Make sure sequential requests are not shedded no matter the latency
+        for _ in 0..10 {
+            let resp = shedder.call(Duration::from_millis(10)).await.unwrap();
+            assert_eq!(resp, ShedResponse::Inner(()));
+        }
 
         // Now try 10 of concurrent requests with high latency
         // 8 of them should be shedded
@@ -254,7 +267,8 @@ mod test {
             latencies: vec![TypeLatency(0, Duration::from_millis(1))],
         };
         let inner = StubService;
-        let mut shedder = ShardedLittleLoadShedder::new(inner, opts);
+        let layer = ShardedLittleLoadShedderLayer::new(opts);
+        let mut shedder = layer.layer(inner);
         let resp = shedder.call(Duration::from_millis(50)).await.unwrap();
         assert_eq!(resp, ShedResponse::Inner(()));
     }
