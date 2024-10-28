@@ -3,6 +3,7 @@
 pub mod http;
 pub mod tasks;
 pub mod tls;
+pub mod types;
 pub mod vector;
 
 /// Generic error

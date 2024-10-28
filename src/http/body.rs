@@ -1,5 +1,6 @@
 use std::{
     pin::{pin, Pin},
+    sync::atomic::{AtomicBool, Ordering},
     task::{Context, Poll},
     time::Duration,
 };
@@ -7,10 +8,14 @@ use std::{
 use axum::body::Body;
 use bytes::{Buf, Bytes};
 use futures::Stream;
+use futures_util::ready;
 use http_body::{Body as HttpBody, Frame, SizeHint};
 use http_body_util::{BodyExt, LengthLimitError, Limited};
 use sync_wrapper::SyncWrapper;
-use tokio::sync::oneshot::{self, Receiver, Sender};
+use tokio::sync::{
+    mpsc,
+    oneshot::{self, Receiver, Sender},
+};
 
 use super::{calc_headers_size, Error};
 
@@ -79,6 +84,74 @@ impl Stream for SyncBodyDataStream {
     }
 }
 
+/// Body that notifies that it has finished by sending a value over the provided channel.
+/// Use AtomicBool flag to make sure we notify only once.
+pub struct NotifyingBody<D, E, S: Clone + Unpin> {
+    inner: Pin<Box<dyn HttpBody<Data = D, Error = E> + Send + 'static>>,
+    tx: mpsc::Sender<S>,
+    sig: S,
+    sent: AtomicBool,
+}
+
+impl<D, E, S: Clone + Unpin> NotifyingBody<D, E, S> {
+    pub fn new<B>(inner: B, tx: mpsc::Sender<S>, sig: S) -> Self
+    where
+        B: HttpBody<Data = D, Error = E> + Send + 'static,
+        D: Buf,
+    {
+        Self {
+            inner: Box::pin(inner),
+            tx,
+            sig,
+            sent: AtomicBool::new(false),
+        }
+    }
+
+    fn notify(&self) {
+        if self
+            .sent
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            == Ok(false)
+        {
+            let _ = self.tx.try_send(self.sig.clone()).is_ok();
+        }
+    }
+}
+
+impl<D, E, S: Clone + Unpin> HttpBody for NotifyingBody<D, E, S>
+where
+    D: Buf,
+    E: std::string::ToString,
+{
+    type Data = D;
+    type Error = E;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let poll = ready!(pin!(&mut self.inner).poll_frame(cx));
+        if poll.is_none() {
+            self.notify();
+        }
+
+        Poll::Ready(poll)
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+
+    fn is_end_stream(&self) -> bool {
+        let end = self.inner.is_end_stream();
+        if end {
+            self.notify();
+        }
+
+        end
+    }
+}
+
 // Body that counts the bytes streamed
 pub struct CountingBody<D, E> {
     inner: Pin<Box<dyn HttpBody<Data = D, Error = E> + Send + 'static>>,
@@ -131,11 +204,11 @@ where
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        let poll = pin!(&mut self.inner).poll_frame(cx);
+        let poll = ready!(pin!(&mut self.inner).poll_frame(cx));
 
         match &poll {
             // There is still some data available
-            Poll::Ready(Some(v)) => match v {
+            Some(v) => match v {
                 Ok(buf) => {
                     // Normal data frame
                     if buf.is_data() {
@@ -160,17 +233,14 @@ where
             },
 
             // Nothing left
-            Poll::Ready(None) => {
+            None => {
                 // Make borrow checker happy
                 let x = self.bytes_sent;
                 self.finish(Ok(x));
             }
-
-            // Do nothing
-            Poll::Pending => {}
         }
 
-        poll
+        Poll::Ready(poll)
     }
 
     fn size_hint(&self) -> SizeHint {
@@ -184,7 +254,7 @@ mod test {
     use http_body_util::BodyExt;
 
     #[tokio::test]
-    async fn test_body_stream() {
+    async fn test_counting_body_stream() {
         let data = b"foobarblahblahfoobarblahblahfoobarblahblahfoobarblahblahfoobarbl\
         ahblahfoobarblahblahfoobarblahblahfoobarblahblahfoobarblahblahfoobarblahblahfoobarblahbla\
         hfoobarblahblahfoobarblahblahfoobarblahblahfoobarblahblahfoobarblahblahfoobarblahblahfoob\
@@ -206,7 +276,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_body_full() {
+    async fn test_counting_body_full() {
         let data = vec![0; 512];
         let buf = bytes::Bytes::from_iter(data.clone());
         let body = http_body_util::Full::new(buf);
@@ -220,5 +290,28 @@ mod test {
         // Check that the counting body got right number
         let size = rx.await.unwrap().unwrap();
         assert_eq!(size, data.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn test_notifying_body() {
+        let data = b"foobarblahblahfoobarblahblahfoobarblahblahfoobarblahblahfoobarbl\
+        ahblahfoobarblahblahfoobarblahblahfoobarblahblahfoobarblahblahfoobarblahblahfoobarblahbla\
+        hfoobarblahblahfoobarblahblahfoobarblahblahfoobarblahblahfoobarblahblahfoobarblahblahfoob\
+        arblahblahfoobarblahblahfoobarblahblahfoobarblahblahfoobarblahblahfoobarblahblahfoobarbla\
+        blahfoobarblahblah";
+
+        let stream = tokio_util::io::ReaderStream::new(&data[..]);
+        let body = axum::body::Body::from_stream(stream);
+
+        let sig = 357;
+        let (tx, mut rx) = mpsc::channel(10);
+        let body = NotifyingBody::new(body, tx, sig);
+
+        // Check that the body streams the same data back
+        let body = body.collect().await.unwrap().to_bytes().to_vec();
+        assert_eq!(body, data);
+
+        // Make sure we're notified
+        assert_eq!(sig, rx.recv().await.unwrap());
     }
 }
