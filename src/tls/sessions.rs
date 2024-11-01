@@ -1,9 +1,13 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use ahash::RandomState;
 use moka::sync::Cache;
-use prometheus::{register_int_counter_vec_with_registry, IntCounterVec, Registry};
+use prometheus::{
+    register_int_counter_vec_with_registry, register_int_gauge_with_registry, IntCounterVec,
+    IntGauge, Registry,
+};
 use rustls::server::StoresServerSessions;
+use tokio::time::interval;
 use zeroize::ZeroizeOnDrop;
 
 type Key = Vec<u8>;
@@ -18,51 +22,56 @@ fn weigher(k: &Key, v: &Val) -> u32 {
     (k.len() + v.0.len()) as u32
 }
 
-pub struct Stats {
-    pub entries: u64,
-    pub size: u64,
-}
-
 /// Stores TLS sessions for TLSv1.2 only.
 /// `SipHash` is replaced with ~10x faster aHash.
 /// see <https://github.com/tkaitchuck/aHash/blob/master/compare/readme.md>
 #[derive(Debug)]
 pub struct Storage {
     cache: Cache<Key, Val, RandomState>,
+    metrics: Metrics,
 }
 
 impl Storage {
-    pub fn new(capacity: u64, tti: Duration) -> Self {
+    pub fn new(capacity: u64, tti: Duration, registry: &Registry) -> Self {
         let cache = Cache::builder()
             .max_capacity(capacity)
             .time_to_idle(tti)
             .weigher(weigher)
             .build_with_hasher(RandomState::default());
 
-        Self { cache }
+        let metrics = Metrics::new(registry);
+        Self { cache, metrics }
     }
 
-    pub fn stats(&self) -> Stats {
-        self.cache.run_pending_tasks();
-        Stats {
-            entries: self.cache.entry_count(),
-            size: self.cache.weighted_size(),
+    pub async fn metrics_runner(&self) {
+        let mut interval = interval(Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            interval.tick().await;
+            self.metrics.size.set(self.cache.weighted_size() as i64);
+            self.metrics.count.set(self.cache.entry_count() as i64);
         }
     }
 }
 
 impl StoresServerSessions for Storage {
     fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-        self.cache.get(key).map(|x| x.0.clone())
+        let v = self.cache.get(key).map(|x| x.0.clone());
+        self.metrics.record("get", v.is_some());
+        v
     }
 
     fn put(&self, key: Vec<u8>, value: Vec<u8>) -> bool {
         self.cache.insert(key, Val(value));
+        self.metrics.record("put", true);
         true
     }
 
     fn take(&self, key: &[u8]) -> Option<Vec<u8>> {
-        self.cache.remove(key).map(|x| x.0.clone())
+        let v = self.cache.remove(key).map(|x| x.0.clone());
+        self.metrics.record("take", v.is_some());
+        v
     }
 
     fn can_cache(&self) -> bool {
@@ -72,12 +81,28 @@ impl StoresServerSessions for Storage {
 
 #[derive(Debug)]
 pub struct Metrics {
+    count: IntGauge,
+    size: IntGauge,
     processed: IntCounterVec,
 }
 
 impl Metrics {
     pub fn new(registry: &Registry) -> Self {
         Self {
+            count: register_int_gauge_with_registry!(
+                format!("tls_session_cache_count"),
+                format!("Number of TLS sessions in the cache"),
+                registry
+            )
+            .unwrap(),
+
+            size: register_int_gauge_with_registry!(
+                format!("tls_session_cache_size"),
+                format!("Size of TLS sessions in the cache"),
+                registry
+            )
+            .unwrap(),
+
             processed: register_int_counter_vec_with_registry!(
                 format!("tls_sessions"),
                 format!("Number of TLS sessions that were processed"),
@@ -87,41 +112,11 @@ impl Metrics {
             .unwrap(),
         }
     }
-}
 
-#[derive(Debug)]
-pub struct WithMetrics(pub Arc<dyn StoresServerSessions + Send + Sync>, pub Metrics);
-
-impl WithMetrics {
     fn record(&self, action: &str, ok: bool) {
-        self.1
-            .processed
+        self.processed
             .with_label_values(&[action, if ok { "yes" } else { "no" }])
             .inc();
-    }
-}
-
-impl StoresServerSessions for WithMetrics {
-    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-        let v = self.0.get(key);
-        self.record("get", v.is_some());
-        v
-    }
-
-    fn put(&self, key: Vec<u8>, value: Vec<u8>) -> bool {
-        let v = self.0.put(key, value);
-        self.record("put", v);
-        v
-    }
-
-    fn take(&self, key: &[u8]) -> Option<Vec<u8>> {
-        let v = self.0.take(key);
-        self.record("take", v.is_some());
-        v
-    }
-
-    fn can_cache(&self) -> bool {
-        self.0.can_cache()
     }
 }
 
@@ -131,7 +126,7 @@ mod test {
 
     #[test]
     fn test_storage() {
-        let c = Storage::new(10000, Duration::from_secs(3600));
+        let c = Storage::new(10000, Duration::from_secs(3600), &Registry::new());
 
         let key1 = "a".repeat(2500).as_bytes().to_vec();
         let key2 = "b".repeat(2500).as_bytes().to_vec();

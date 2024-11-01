@@ -27,7 +27,7 @@ where
     }
 }
 
-#[derive(Debug, Clone, Args)]
+#[derive(Args, Clone, Debug, PartialEq)]
 pub struct ShedSystem {
     /// EWMA alpha coefficient in [0.0, 1.0] range.
     /// It represents the weight of the more recent measurements relative to the older ones.
@@ -67,7 +67,7 @@ impl From<ShedSystem> for SystemOptions {
     }
 }
 
-#[derive(Debug, Clone, Args)]
+#[derive(Args, Clone, Debug, PartialEq)]
 pub struct ShedSharded<T: FromStr + Clone + Send + Sync + 'static>
 where
     T::Err: std::error::Error + Send + Sync + 'static,
