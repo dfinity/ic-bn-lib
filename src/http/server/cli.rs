@@ -24,7 +24,7 @@ pub struct HttpServer {
     pub http_server_read_timeout: Duration,
 
     /// Timeout for network write calls.
-    /// If the write call take longer than that - the connection is closed.
+    /// If the write call takes longer than that - the connection is closed.
     #[clap(env, long, default_value = "30s", value_parser = parse_duration)]
     pub http_server_write_timeout: Duration,
 
