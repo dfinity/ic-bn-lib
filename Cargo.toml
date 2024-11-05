@@ -8,88 +8,88 @@ repository = "https://github.com/dfinity/ic-bn-lib"
 readme = "README.md"
 
 [dependencies]
-ahash = "0.8"
-anyhow = "1.0"
-arc-swap = "1"
-async-trait = "0.1.81"
-axum = "0.7"
-backoff = { version = "0.4", features = ["tokio"] }
-base64 = "0.22"
-bytes = "1.6"
-clap = { version = "4.5", features = ["derive", "string", "env"] }
-clap_derive = "4.5"
-chacha20poly1305 = "0.10"
+ahash = "0.8.11"
+anyhow = "1.0.92"
+arc-swap = "1.7.1"
+async-trait = "0.1.83"
+axum = "0.7.7"
+backoff = { version = "0.4.0", features = ["tokio"] }
+base64 = "0.22.1"
+bytes = "1.8.0"
+clap = { version = "4.5.20", features = ["derive", "string", "env"] }
+clap_derive = "4.5.18"
+chacha20poly1305 = "0.10.1"
 cloudflare = { git = "https://github.com/cloudflare/cloudflare-rs.git", rev = "f14720e42184ee176a97676e85ef2d2d85bc3aae", default-features = false, features = [
     "rustls-tls",
 ] }
-derive-new = "0.6"
-fqdn = "0.3"
-futures = "0.3"
-futures-util = "0.3"
-hickory-proto = "0.24"
-hickory-resolver = { version = "0.24", features = [
+derive-new = "0.7.0"
+fqdn = "0.4.1"
+futures = "0.3.31"
+futures-util = "0.3.31"
+hickory-proto = "0.24.1"
+hickory-resolver = { version = "0.24.1", features = [
     "dns-over-https-rustls",
     "webpki-roots",
     "dnssec-ring",
 ] }
-http = "1.1"
-http-body = "1.0"
-http-body-util = "0.1"
-humantime = "2.1"
-hyper = "1.5"
-hyper-util = { version = "0.1", features = ["full"] }
-instant-acme = { version = "0.7.1", default-features = false, features = [
+http = "1.1.0"
+http-body = "1.0.1"
+http-body-util = "0.1.2"
+humantime = "2.1.0"
+hyper = "1.5.0"
+hyper-util = { version = "0.1.10", features = ["full"] }
+instant-acme = { version = "0.7.2", default-features = false, features = [
     "ring",
     "hyper-rustls",
 ] }
-mockall = "0.12"
-moka = { version = "0.12", features = ["sync", "future"] }
-parse-size = { version = "1.0", features = ["std"] }
-prometheus = "0.13"
-prost = "0.13"
-prost-types = "0.13"
-rand = "0.8"
+mockall = "0.13.0"
+moka = { version = "0.12.8", features = ["sync", "future"] }
+parse-size = { version = "1.1.0", features = ["std"] }
+prometheus = "0.13.4"
+prost = "0.13.3"
+prost-types = "0.13.3"
+rand = "0.8.5"
 rcgen = "0.13.1"
-reqwest = { version = "0.12.7", default-features = false, features = [
+reqwest = { version = "0.12.9", default-features = false, features = [
     "http2",
     "rustls-tls",
     "hickory-dns",
     "json",
     "stream",
 ] }
-rustls = { version = "0.23.12", default-features = false, features = [
+rustls = { version = "0.23.16", default-features = false, features = [
     "ring",
     "std",
     "brotli",
 ] }
-rustls-acme = { version = "0.11", default-features = false, features = [
+rustls-acme = { version = "0.11.1", default-features = false, features = [
     "tls12",
     "ring",
 ] }
-rustls-pemfile = "2"
-rustls-platform-verifier = "0.3.4"
+rustls-pemfile = "2.2.0"
+rustls-platform-verifier = "0.4.0"
 scopeguard = "1.2.0"
 serde = "1.0.214"
-serde_json = "1.0"
-sha1 = "0.10"
-strum = { version = "0.26", features = ["derive"] }
-strum_macros = "0.26"
-sync_wrapper = "1.0"
+serde_json = "1.0.132"
+sha1 = "0.10.6"
+strum = { version = "0.26.3", features = ["derive"] }
+strum_macros = "0.26.4"
+sync_wrapper = "1.0.1"
 systemstat = "0.2.3"
-thiserror = "1.0"
-tokio = { version = "1.41", features = ["full"] }
-tokio-util = { version = "0.7", features = ["full"] }
+thiserror = "1.0.68"
+tokio = { version = "1.41.0", features = ["full"] }
+tokio-util = { version = "0.7.12", features = ["full"] }
 tokio-rustls = { version = "0.26.0", default-features = false, features = [
     "tls12",
     "logging",
     "ring",
 ] }
-tokio-io-timeout = "1.2"
-tower = { version = "0.5", features = ["util"] }
-tower-service = "0.3"
-tracing = "0.1"
-url = "2.5"
-uuid = { version = "1.10", features = ["v7"] }
+tokio-io-timeout = "1.2.0"
+tower = { version = "0.5.1", features = ["util"] }
+tower-service = "0.3.3"
+tracing = "0.1.40"
+url = "2.5.3"
+uuid = { version = "1.10.0", features = ["v7"] }
 vrl = { version = "0.19.0", default-features = false, features = ["value"] }
-x509-parser = "0.16"
-zeroize = { version = "1.8", features = ["derive"] }
+x509-parser = "0.16.0"
+zeroize = { version = "1.8.1", features = ["derive"] }
