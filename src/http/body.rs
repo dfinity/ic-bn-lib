@@ -73,7 +73,7 @@ impl Stream for SyncBodyDataStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
             let mut pinned = pin!(self.inner.get_mut());
-            match futures_util::ready!(pinned.as_mut().poll_frame(cx)?) {
+            match ready!(pinned.as_mut().poll_frame(cx)?) {
                 Some(frame) => match frame.into_data() {
                     Ok(data) => return Poll::Ready(Some(Ok(data))),
                     Err(_frame) => {}
@@ -121,7 +121,7 @@ impl<D, E, S: Clone + Unpin> NotifyingBody<D, E, S> {
 impl<D, E, S: Clone + Unpin> HttpBody for NotifyingBody<D, E, S>
 where
     D: Buf,
-    E: std::string::ToString,
+    E: ToString,
 {
     type Data = D;
     type Error = E;
@@ -195,7 +195,7 @@ impl<D, E> CountingBody<D, E> {
 impl<D, E> HttpBody for CountingBody<D, E>
 where
     D: Buf,
-    E: std::string::ToString,
+    E: ToString,
 {
     type Data = D;
     type Error = E;
@@ -262,7 +262,7 @@ mod test {
         blahfoobarblahblah";
 
         let stream = tokio_util::io::ReaderStream::new(&data[..]);
-        let body = axum::body::Body::from_stream(stream);
+        let body = Body::from_stream(stream);
 
         let (body, rx) = CountingBody::new(body);
 
@@ -278,7 +278,7 @@ mod test {
     #[tokio::test]
     async fn test_counting_body_full() {
         let data = vec![0; 512];
-        let buf = bytes::Bytes::from_iter(data.clone());
+        let buf = Bytes::from_iter(data.clone());
         let body = http_body_util::Full::new(buf);
 
         let (body, rx) = CountingBody::new(body);
@@ -301,7 +301,7 @@ mod test {
         blahfoobarblahblah";
 
         let stream = tokio_util::io::ReaderStream::new(&data[..]);
-        let body = axum::body::Body::from_stream(stream);
+        let body = Body::from_stream(stream);
 
         let sig = 357;
         let (tx, mut rx) = mpsc::channel(10);

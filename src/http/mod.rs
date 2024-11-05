@@ -140,7 +140,7 @@ impl<T: AsyncRead + AsyncWrite + Send + Sync + Unpin> AsyncWrite for AsyncCounte
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
+    ) -> Poll<io::Result<usize>> {
         let poll = pin!(&mut self.inner).poll_write(cx, buf);
         if let Poll::Ready(Ok(v)) = &poll {
             self.stats.sent.fetch_add(*v as u64, Ordering::SeqCst);

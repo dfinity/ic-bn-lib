@@ -164,11 +164,11 @@ mod test {
     struct StubExtractor(u8);
 
     impl TypeExtractor for StubExtractor {
-        type Request = Duration;
         type Type = u8;
+        type Request = Duration;
 
         fn extract(&self, _req: &Self::Request) -> Option<Self::Type> {
-            return Some(self.0);
+            Some(self.0)
         }
     }
 

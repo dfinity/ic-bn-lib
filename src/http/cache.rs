@@ -421,7 +421,7 @@ impl<K: KeyExtractor> Run for Cache<K> {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
-            tokio::select! {
+            select! {
                 biased;
 
                 () = token.cancelled() => {
@@ -871,7 +871,7 @@ mod tests {
             }
         }
 
-        assert!(refresh == 0);
+        assert_eq!(refresh, 0);
 
         // Check mid-expiration with high beta
         let now2 = now + Duration::from_secs(30);
