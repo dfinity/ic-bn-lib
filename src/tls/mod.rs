@@ -158,7 +158,7 @@ pub fn prepare_server_config(
         .with_no_client_auth()
         .with_cert_resolver(resolver);
 
-    // Create custom session storage with to allow effective TLS session resumption
+    // Create custom session storage to allow effective TLS session resumption
     let session_storage = Arc::new(sessions::Storage::new(
         opts.sessions_count,
         opts.sessions_tti,
