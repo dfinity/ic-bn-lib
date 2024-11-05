@@ -201,15 +201,13 @@ pub fn prepare_client_config(tls_versions: &[&'static SupportedProtocolVersion])
     // new_with_extra_roots() method isn't available on MacOS, see
     // https://github.com/rustls/rustls-platform-verifier/issues/58
     #[cfg(not(target_os = "macos"))]
-    let verifier = Arc::new(Verifier::new_with_extra_roots(
-        webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    ));
+    let verifier = Verifier::new_with_extra_roots(webpki_roots::TLS_SERVER_ROOTS.to_vec()).unwrap();
     #[cfg(target_os = "macos")]
-    let verifier = Arc::new(Verifier::new());
+    let verifier = Verifier::new();
 
     let mut cfg = ClientConfig::builder_with_protocol_versions(tls_versions)
         .dangerous() // Nothing really dangerous here
-        .with_custom_certificate_verifier(verifier)
+        .with_custom_certificate_verifier(Arc::new(verifier))
         .with_no_client_auth();
 
     // Session resumption
