@@ -12,3 +12,11 @@ pub enum Error {
     #[error(transparent)]
     Generic(#[from] anyhow::Error),
 }
+
+pub fn parse_size(s: &str) -> Result<u64, parse_size::Error> {
+    parse_size::Config::new().with_binary().parse_size(s)
+}
+
+pub fn parse_size_usize(s: &str) -> Result<usize, parse_size::Error> {
+    parse_size(s).map(|x| x as usize)
+}

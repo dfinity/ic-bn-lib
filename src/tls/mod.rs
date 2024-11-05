@@ -8,12 +8,14 @@ use anyhow::{anyhow, Context};
 use fqdn::{Fqdn, FQDN};
 use prometheus::Registry;
 use rustls::{
+    client::{ClientSessionMemoryCache, Resumption},
     compress::CompressionCache,
     crypto::ring,
-    server::{ClientHello, ResolvesServerCert, StoresServerSessions},
+    server::{ClientHello, ResolvesServerCert},
     sign::CertifiedKey,
-    ServerConfig, SupportedProtocolVersion, TicketSwitcher,
+    ClientConfig, ServerConfig, SupportedProtocolVersion, TicketSwitcher,
 };
+use rustls_platform_verifier::Verifier;
 use std::{
     net::{Ipv4Addr, Ipv6Addr},
     time::Duration,
@@ -137,28 +139,42 @@ pub fn pem_convert_to_rustls(key: &[u8], certs: &[u8]) -> Result<CertifiedKey, E
     Ok(CertifiedKey::new(certs, key))
 }
 
+pub struct Options {
+    pub additional_alpn: Vec<Vec<u8>>,
+    pub sessions_count: u64,
+    pub sessions_tti: Duration,
+    pub ticket_lifetime: Duration,
+    pub tls_versions: Vec<&'static SupportedProtocolVersion>,
+}
+
+/// Creates Rustls server config
+/// Must be run in Tokio environment since it spawns a task to record metrics
 pub fn prepare_server_config(
+    opts: Options,
     resolver: Arc<dyn ResolvesServerCert>,
-    session_storage: Arc<dyn StoresServerSessions + Send + Sync>,
-    additional_alpn: &[Vec<u8>],
-    ticket_lifetime: Duration,
-    tls_versions: &[&'static SupportedProtocolVersion],
     registry: &Registry,
 ) -> ServerConfig {
-    let mut cfg = ServerConfig::builder_with_protocol_versions(tls_versions)
+    let mut cfg = ServerConfig::builder_with_protocol_versions(&opts.tls_versions)
         .with_no_client_auth()
         .with_cert_resolver(resolver);
 
-    // Set custom session storage with to allow effective TLS session resumption
-    let session_storage = sessions::WithMetrics(session_storage, sessions::Metrics::new(registry));
-    cfg.session_storage = Arc::new(session_storage);
+    // Create custom session storage to allow effective TLS session resumption
+    let session_storage = Arc::new(sessions::Storage::new(
+        opts.sessions_count,
+        opts.sessions_tti,
+        registry,
+    ));
+    let session_storage_metrics = session_storage.clone();
+    // Spawn metrics runner
+    tokio::spawn(async move { session_storage_metrics.metrics_runner().await });
+    cfg.session_storage = session_storage;
 
     // Enable ticketer to encrypt/decrypt TLS tickets.
     // TicketSwitcher rotates the inner ticketers every `ticket_lifetime`
     // while keeping the previous one available for decryption of tickets
     // issued earlier than `ticket_lifetime` ago.
     let ticketer = tickets::WithMetrics(
-        TicketSwitcher::new(ticket_lifetime.as_secs() as u32, move || {
+        TicketSwitcher::new(opts.ticket_lifetime.as_secs() as u32, move || {
             Ok(Box::new(tickets::Ticketer::new()))
         })
         .unwrap(),
@@ -168,11 +184,33 @@ pub fn prepare_server_config(
 
     // Enable certificate compression cache.
     // See https://datatracker.ietf.org/doc/rfc8879/ for details
-    cfg.cert_compression_cache = Arc::new(CompressionCache::new(1024));
+    cfg.cert_compression_cache = Arc::new(CompressionCache::new(8192));
 
     // Enable ALPN
     cfg.alpn_protocols = vec![ALPN_H2.to_vec(), ALPN_H1.to_vec()];
-    cfg.alpn_protocols.extend_from_slice(additional_alpn);
+    cfg.alpn_protocols.extend_from_slice(&opts.additional_alpn);
+
+    cfg
+}
+
+pub fn prepare_client_config(tls_versions: &[&'static SupportedProtocolVersion]) -> ClientConfig {
+    // Use a custom certificate verifier from rustls project that is more secure.
+    // It also checks OCSP revocation, though OCSP support for Linux platform for now seems be no-op.
+    // https://github.com/rustls/rustls-platform-verifier/issues/99
+
+    let verifier =
+        Verifier::new_with_extra_roots(webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().cloned())
+            .unwrap();
+
+    let mut cfg = ClientConfig::builder_with_protocol_versions(tls_versions)
+        .dangerous() // Nothing really dangerous here
+        .with_custom_certificate_verifier(Arc::new(verifier))
+        .with_no_client_auth();
+
+    // Session resumption
+    let store = ClientSessionMemoryCache::new(2048);
+    cfg.resumption = Resumption::store(Arc::new(store));
+    cfg.alpn_protocols = vec![ALPN_H2.to_vec(), ALPN_H1.to_vec()];
 
     cfg
 }

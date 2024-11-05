@@ -35,9 +35,11 @@ impl Metrics {
 
 /// Encrypts & decrypts tickets for TLS 1.3 session resumption.
 /// Must be used with `rustls::ticketer::TicketSwitcher` to facilitate key rotation.
+///
 /// We're using `XChaCha20Poly1305` authenicated encryption (AEAD).
 /// `ZeroizeOnDrop` is derived below to make sure the encryption keys are wiped from
 /// memory when the Ticketer is dropped.
+///
 /// See <https://docs.rs/zeroize/latest/zeroize/#what-guarantees-does-this-crate-provide>
 #[derive(ZeroizeOnDrop)]
 pub struct Ticketer {

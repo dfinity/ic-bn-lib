@@ -1,3 +1,5 @@
+pub mod cli;
+
 use std::{
     fmt,
     sync::{
@@ -327,8 +329,8 @@ impl<G: GeneratesClients> Client for ReqwestClientDynamic<G> {
 
 pub fn basic_auth<U, P>(username: U, password: Option<P>) -> HeaderValue
 where
-    U: std::fmt::Display,
-    P: std::fmt::Display,
+    U: fmt::Display,
+    P: fmt::Display,
 {
     use base64::prelude::BASE64_STANDARD;
     use base64::write::EncoderWriter;
@@ -361,9 +363,9 @@ mod test {
     impl Client for TestClient {
         async fn execute(
             &self,
-            _req: reqwest::Request,
-        ) -> Result<reqwest::Response, reqwest::Error> {
-            let resp = ::http::Response::new(vec![]);
+            _req: Request,
+        ) -> Result<Response, reqwest::Error> {
+            let resp = http::Response::new(vec![]);
             tokio::time::sleep(Duration::from_millis(100)).await;
             Ok(resp.into())
         }
@@ -386,7 +388,7 @@ mod test {
         let mut futs = vec![];
         for _ in 0..200 {
             let req =
-                reqwest::Request::new(reqwest::Method::GET, url::Url::parse("http://foo").unwrap());
+                Request::new(reqwest::Method::GET, url::Url::parse("http://foo").unwrap());
 
             let cli = cli.clone();
             futs.push(async move { cli.execute(req).await });
