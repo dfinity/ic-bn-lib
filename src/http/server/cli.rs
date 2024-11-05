@@ -18,13 +18,13 @@ pub struct HttpServer {
     pub http_server_max_requests_per_conn: u64,
 
     /// Timeout for network read calls.
-    /// If the read call take longer than that - the connection is closed.
+    /// If the read call takes longer than that - the connection is closed.
     /// This effectively closes idle HTTP/1.1 connections.
     #[clap(env, long, default_value = "30s", value_parser = parse_duration)]
     pub http_server_read_timeout: Duration,
 
     /// Timeout for network write calls.
-    /// If the write call take longer than that - the connection is closed.
+    /// If the write call takes longer than that - the connection is closed.
     #[clap(env, long, default_value = "30s", value_parser = parse_duration)]
     pub http_server_write_timeout: Duration,
 
