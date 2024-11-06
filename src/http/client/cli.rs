@@ -8,7 +8,7 @@ use super::CloneableDnsResolver;
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
 pub struct HttpClient {
     /// Timeout for HTTP connection phase
-    #[clap(env, long, default_value = "5s", value_parser = parse_duration)]
+    #[clap(env, long, default_value = "3s", value_parser = parse_duration)]
     pub http_client_timeout_connect: Duration,
 
     /// Timeout for a single read request
