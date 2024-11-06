@@ -42,7 +42,7 @@ instant-acme = { version = "0.7.2", default-features = false, features = [
     "ring",
     "hyper-rustls",
 ] }
-mockall = "0.13.0"
+mockall = "0.12.1"
 moka = { version = "0.12.8", features = ["sync", "future"] }
 parse-size = { version = "1.1.0", features = ["std"] }
 prometheus = "0.13.4"
