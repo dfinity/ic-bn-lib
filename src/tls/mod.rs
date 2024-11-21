@@ -13,7 +13,7 @@ use rustls::{
     crypto::ring,
     server::{ClientHello, ResolvesServerCert},
     sign::CertifiedKey,
-    ClientConfig, ServerConfig, SupportedProtocolVersion, TicketSwitcher,
+    ClientConfig, ServerConfig, SupportedProtocolVersion, TicketRotator,
 };
 use rustls_platform_verifier::Verifier;
 use std::{
@@ -174,7 +174,7 @@ pub fn prepare_server_config(
     // while keeping the previous one available for decryption of tickets
     // issued earlier than `ticket_lifetime` ago.
     let ticketer = tickets::WithMetrics(
-        TicketSwitcher::new(opts.ticket_lifetime.as_secs() as u32, move || {
+        TicketRotator::new(opts.ticket_lifetime.as_secs() as u32, move || {
             Ok(Box::new(tickets::Ticketer::new()))
         })
         .unwrap(),
