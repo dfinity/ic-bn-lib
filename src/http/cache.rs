@@ -10,10 +10,8 @@ use ahash::RandomState;
 use async_trait::async_trait;
 use axum::{body::Body, extract::Request, middleware::Next, response::Response};
 use bytes::Bytes;
-use http::{
-    header::{CONTENT_LENGTH, RANGE},
-    Method,
-};
+use http::{header::RANGE, Method};
+use http_body::Body as _;
 use moka::sync::{Cache as MokaCache, CacheBuilder as MokaCacheBuilder};
 use prometheus::{
     register_counter_vec_with_registry, register_histogram_vec_with_registry,
@@ -359,10 +357,10 @@ impl<K: KeyExtractor + 'static> Cache<K> {
         }
 
         // Extract content length from the response header if there's one
-        let content_length = extract_content_length(&response)?;
+        let body_size = response.body().size_hint().exact().map(|x| x as usize);
 
         // Do not cache responses that have no known size (probably streaming etc)
-        let Some(body_size) = content_length else {
+        let Some(body_size) = body_size else {
             return Ok(ResponseType::Streamed(
                 response,
                 CacheBypassReason::SizeUnknown,
@@ -441,19 +439,6 @@ impl<K: KeyExtractor> Run for Cache<K> {
     }
 }
 
-/// Try to get & parse content-length header
-fn extract_content_length(resp: &Response) -> Result<Option<usize>, Error> {
-    match resp.headers().get(CONTENT_LENGTH) {
-        Some(v) => Ok(Some(
-            v.to_str()
-                .map_err(|_| Error::ParseContentLength)?
-                .parse::<usize>()
-                .map_err(|_| Error::ParseContentLength)?,
-        )),
-        None => Ok(None),
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct KeyExtractorUriRange;
 
@@ -496,7 +481,7 @@ mod tests {
         routing::{get, post},
         Router,
     };
-    use http::{HeaderValue, StatusCode};
+    use http::StatusCode;
     use sha1::Digest;
     use tower::{Service, ServiceExt};
 
@@ -530,46 +515,20 @@ mod tests {
         result.extensions().get::<CacheStatus>().cloned()
     }
 
-    async fn handler_bypassing_cache(_request: Request<Body>) -> impl IntoResponse {
-        // Without content-length header, caching middleware should issue CacheStatus::Bypass
-        "test_call".into_response()
-    }
-
-    async fn handler_cache_hit(_request: Request<Body>) -> impl IntoResponse {
-        let mut response = Response::new(Body::from(b"test_body".to_vec()));
-        response
-            .headers_mut()
-            .insert(CONTENT_LENGTH, HeaderValue::from_str("10").unwrap());
-        response
+    async fn handler(_request: Request<Body>) -> impl IntoResponse {
+        "test_body"
     }
 
     async fn handler_proxy_cache_lock(request: Request<Body>) -> impl IntoResponse {
         if request.uri().path().contains("slow_response") {
             sleep(2 * PROXY_LOCK_TIMEOUT).await;
         }
-        let mut response = Response::new(Body::from(b"test_body".to_vec()));
-        response
-            .headers_mut()
-            .insert(CONTENT_LENGTH, HeaderValue::from_str("10").unwrap());
-        response
+
+        "test_body"
     }
 
-    async fn handler_malformed_content_length_header(_request: Request<Body>) -> impl IntoResponse {
-        let mut response = Response::new(Body::from(b"foo".to_vec()));
-        response
-            .headers_mut()
-            .insert(CONTENT_LENGTH, HeaderValue::from_str("not an int").unwrap());
-        response
-    }
-
-    async fn handler_content_length_header_too_big(_request: Request<Body>) -> impl IntoResponse {
-        let mut response = Response::new(Body::from(b"foo".to_vec()));
-        let body_size = MAX_ITEM_SIZE + 1;
-        response.headers_mut().insert(
-            CONTENT_LENGTH,
-            HeaderValue::from_str(body_size.to_string().as_str()).unwrap(),
-        );
-        response
+    async fn handler_too_big(_request: Request<Body>) -> impl IntoResponse {
+        "a".repeat(MAX_ITEM_SIZE + 1)
     }
 
     async fn middleware(
@@ -614,16 +573,9 @@ mod tests {
         let cache = Arc::new(Cache::new(opts, KeyExtractorTest, &Registry::default()).unwrap());
 
         let mut app = Router::new()
-            .route("/", post(handler_bypassing_cache))
-            .route("/", get(handler_bypassing_cache))
-            .route(
-                "/malformed_content_length_header",
-                get(handler_malformed_content_length_header),
-            )
-            .route(
-                "/content_length_header_too_big",
-                get(handler_content_length_header_too_big),
-            )
+            .route("/", post(handler))
+            .route("/", get(handler))
+            .route("/too_big", get(handler_too_big))
             .layer(from_fn_with_state(Arc::clone(&cache), middleware));
 
         // Test only GET requests are cached.
@@ -650,19 +602,8 @@ mod tests {
         );
         assert_eq!(cache.len(), 0);
 
-        // Test malformed Content-Length
-        let req = Request::get("/malformed_content_length_header")
-            .body(Body::from("foobar"))
-            .unwrap();
-        let result = app.call(req).await.unwrap();
-        assert!(result.extensions().get::<CacheStatus>().is_none());
-        assert_eq!(result.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(cache.len(), 0);
-
-        // Test Content-Length too big
-        let req = Request::get("/content_length_header_too_big")
-            .body(Body::from("foobar"))
-            .unwrap();
+        // Test body too big
+        let req = Request::get("/too_big").body(Body::from("foobar")).unwrap();
         let result = app.call(req).await.unwrap();
         let cache_status = result.extensions().get::<CacheStatus>().cloned().unwrap();
         assert_eq!(
@@ -690,7 +631,7 @@ mod tests {
         let cache = Arc::new(Cache::new(opts, KeyExtractorTest, &Registry::default()).unwrap());
 
         let mut app = Router::new()
-            .route("/:key", get(handler_cache_hit))
+            .route("/:key", get(handler))
             .layer(from_fn_with_state(Arc::clone(&cache), middleware));
 
         // First request doesn't hit the cache, but is stored in the cache
