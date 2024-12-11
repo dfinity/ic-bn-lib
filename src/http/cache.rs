@@ -414,27 +414,10 @@ impl<K: KeyExtractor + 'static> Cache<K> {
 
 #[async_trait]
 impl<K: KeyExtractor> Run for Cache<K> {
-    async fn run(&self, token: CancellationToken) -> Result<(), anyhow::Error> {
-        let mut interval = tokio::time::interval(Duration::from_secs(5));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        loop {
-            select! {
-                biased;
-
-                () = token.cancelled() => {
-                    break;
-                }
-
-                // Periodically update metrics
-                _ = interval.tick() => {
-                    self.store.run_pending_tasks();
-                    self.metrics.memory.set(self.store.weighted_size() as i64);
-                    self.metrics.entries.set(self.store.entry_count() as i64);
-                }
-            }
-        }
-
+    async fn run(&self, _: CancellationToken) -> Result<(), anyhow::Error> {
+        self.store.run_pending_tasks();
+        self.metrics.memory.set(self.store.weighted_size() as i64);
+        self.metrics.entries.set(self.store.entry_count() as i64);
         Ok(())
     }
 }

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Error;
 use async_trait::async_trait;
@@ -6,7 +6,7 @@ use derive_new::new;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{error, warn};
 
-// Long running task that can be cancelled by a token
+// A task that can be cancelled by a token
 #[async_trait]
 pub trait Run: Send + Sync {
     async fn run(&self, token: CancellationToken) -> Result<(), Error>;
@@ -14,6 +14,40 @@ pub trait Run: Send + Sync {
 
 #[derive(Clone)]
 struct Task(String, Arc<dyn Run>);
+
+/// Runs given task periodically
+struct IntervalRunner(Duration, Task);
+
+#[async_trait]
+impl Run for IntervalRunner {
+    async fn run(&self, token: CancellationToken) -> Result<(), anyhow::Error> {
+        warn!(
+            "Task '{}': running with interval {}s",
+            self.1 .0,
+            self.0.as_secs()
+        );
+
+        let mut interval = tokio::time::interval(self.0);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                biased;
+
+                () = token.cancelled() => {
+                    warn!("Task '{}': stopped", self.1.0);
+                    return Ok(());
+                },
+
+                _ = interval.tick() => {
+                    if let Err(e) = self.1.1.run(token.child_token()).await {
+                        warn!("Task '{}': {e:#}", self.1.0);
+                    }
+                }
+            }
+        }
+    }
+}
 
 // Starts & tracks Tasks that implement Run
 #[derive(new)]
@@ -27,8 +61,16 @@ pub struct TaskManager {
 }
 
 impl TaskManager {
+    /// Runs a given task once
     pub fn add(&mut self, name: &str, task: Arc<dyn Run>) {
         self.tasks.push(Task(name.into(), task));
+    }
+
+    /// Runs the given task with a given interval.
+    /// Errors are printed and ignored.
+    pub fn add_interval(&mut self, name: &str, task: Arc<dyn Run>, interval: Duration) {
+        let runner = IntervalRunner(interval, Task(name.into(), task));
+        self.tasks.push(Task(name.into(), Arc::new(runner)));
     }
 
     pub fn start(&self) {

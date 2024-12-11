@@ -14,9 +14,8 @@ use rustls::{
     sign::CertifiedKey,
 };
 use strum_macros::{Display, EnumString};
-use tokio::select;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 use crate::{
     http::dns::Resolves,
@@ -159,25 +158,7 @@ impl ResolvesServerCert for AcmeDns {
 
 #[async_trait]
 impl Run for AcmeDns {
-    async fn run(&self, token: CancellationToken) -> Result<(), Error> {
-        let mut interval = tokio::time::interval(Duration::from_secs(600));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        loop {
-            select! {
-                biased;
-
-                () = token.cancelled() => {
-                    warn!("ACME-DNS: exiting");
-                    return Ok(());
-                }
-
-                _ = interval.tick() => {
-                    if let Err(e) = self.refresh().await {
-                        error!("ACME-DNS: unable to refresh: {e:#}");
-                    }
-                },
-            }
-        }
+    async fn run(&self, _: CancellationToken) -> Result<(), Error> {
+        self.refresh().await.context("unable to refresh")
     }
 }

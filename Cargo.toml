@@ -15,7 +15,7 @@ async-trait = "0.1.83"
 axum = "0.7.9"
 backoff = { version = "0.4.0", features = ["tokio"] }
 base64 = "0.22.1"
-bytes = "1.8.0"
+bytes = "1.9.0"
 clap = { version = "4.5.20", features = ["derive", "string", "env"] }
 clap_derive = "4.5.18"
 chacha20poly1305 = "0.10.1"
@@ -32,7 +32,7 @@ hickory-resolver = { version = "0.24.1", features = [
     "webpki-roots",
     "dnssec-ring",
 ] }
-http = "1.1.0"
+http = "1.2.0"
 http-body = "1.0.1"
 http-body-util = "0.1.2"
 humantime = "2.1.0"
@@ -42,7 +42,6 @@ instant-acme = { version = "0.7.2", default-features = false, features = [
     "ring",
     "hyper-rustls",
 ] }
-mockall = "0.13.0"
 moka = { version = "0.12.8", features = ["sync", "future"] }
 parse-size = { version = "1.1.0", features = ["std"] }
 prometheus = "0.13.4"
@@ -77,7 +76,7 @@ strum_macros = "0.26.4"
 sync_wrapper = "1.0.1"
 systemstat = "0.2.3"
 thiserror = "2.0.3"
-tokio = { version = "1.41.0", features = ["full"] }
+tokio = { version = "1.42.0", features = ["full"] }
 tokio-util = { version = "0.7.12", features = ["full"] }
 tokio-rustls = { version = "0.26.0", default-features = false, features = [
     "tls12",
@@ -89,8 +88,11 @@ tower = { version = "0.5.1", features = ["util"] }
 tower-service = "0.3.3"
 tracing = "0.1.40"
 url = "2.5.3"
-uuid = { version = "1.10.0", features = ["v7"] }
-vrl = { version = "0.19.0", default-features = false, features = ["value"] }
+uuid = { version = "1.11.0", features = ["v7"] }
+vrl = { version = "0.20.1", default-features = false, features = ["value"] }
 webpki-root-certs = "0.26.6"
 x509-parser = "0.16.0"
 zeroize = { version = "1.8.1", features = ["derive"] }
+
+[dev-dependencies]
+mockall = "0.13.0"
