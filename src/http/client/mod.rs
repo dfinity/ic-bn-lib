@@ -12,7 +12,6 @@ use std::{
 use anyhow::Context;
 use async_trait::async_trait;
 use http::header::HeaderValue;
-use mockall::automock;
 use rand::{rngs::OsRng, seq::IteratorRandom};
 use reqwest::{dns::Resolve, Request, Response};
 use scopeguard::defer;
@@ -20,7 +19,7 @@ use scopeguard::defer;
 use super::Error;
 
 /// Generic HTTP client trait
-#[automock]
+#[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait Client: Send + Sync + fmt::Debug {
     async fn execute(&self, req: Request) -> Result<Response, reqwest::Error>;
@@ -361,10 +360,7 @@ mod test {
 
     #[async_trait]
     impl Client for TestClient {
-        async fn execute(
-            &self,
-            _req: Request,
-        ) -> Result<Response, reqwest::Error> {
+        async fn execute(&self, _req: Request) -> Result<Response, reqwest::Error> {
             let resp = http::Response::new(vec![]);
             tokio::time::sleep(Duration::from_millis(100)).await;
             Ok(resp.into())
@@ -387,8 +383,7 @@ mod test {
 
         let mut futs = vec![];
         for _ in 0..200 {
-            let req =
-                Request::new(reqwest::Method::GET, url::Url::parse("http://foo").unwrap());
+            let req = Request::new(reqwest::Method::GET, url::Url::parse("http://foo").unwrap());
 
             let cli = cli.clone();
             futs.push(async move { cli.execute(req).await });
