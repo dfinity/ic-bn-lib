@@ -1,17 +1,16 @@
 use std::{
     pin::{pin, Pin},
     sync::atomic::{AtomicBool, Ordering},
+    sync::Mutex,
     task::{Context, Poll},
     time::Duration,
 };
 
 use axum::body::Body;
 use bytes::{Buf, Bytes};
-use futures::Stream;
 use futures_util::ready;
 use http_body::{Body as HttpBody, Frame, SizeHint};
 use http_body_util::{BodyExt, LengthLimitError, Limited};
-use sync_wrapper::SyncWrapper;
 use tokio::sync::{
     mpsc,
     oneshot::{self, Receiver, Sender},
@@ -52,35 +51,83 @@ where
 
 pub type BodyResult = Result<u64, String>;
 
-/// Wrapper for Axum body that makes it `Sync` to be usable with Request.
-/// TODO find a better way?
-pub struct SyncBodyDataStream {
-    inner: SyncWrapper<Body>,
+/// Wrapper that makes the provided body Sync
+#[derive(Debug)]
+pub struct SyncBody {
+    inner: Mutex<Pin<Box<Body>>>,
 }
 
-impl SyncBodyDataStream {
-    pub const fn new(body: Body) -> Self {
+impl SyncBody {
+    pub fn new(inner: Body) -> Self {
         Self {
-            inner: SyncWrapper::new(body),
+            inner: Mutex::new(Box::pin(inner)),
         }
     }
 }
 
-impl Stream for SyncBodyDataStream {
-    type Item = Result<Bytes, axum::Error>;
+impl http_body::Body for SyncBody {
+    type Data = Bytes;
+    type Error = axum::Error;
 
     #[inline]
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            let mut pinned = pin!(self.inner.get_mut());
-            match ready!(pinned.as_mut().poll_frame(cx)?) {
-                Some(frame) => match frame.into_data() {
-                    Ok(data) => return Poll::Ready(Some(Ok(data))),
-                    Err(_frame) => {}
-                },
-                None => return Poll::Ready(None),
-            }
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        self.inner.lock().unwrap().as_mut().poll_frame(cx)
+    }
+
+    #[inline]
+    fn is_end_stream(&self) -> bool {
+        self.inner.lock().unwrap().as_ref().is_end_stream()
+    }
+
+    #[inline]
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.lock().unwrap().as_ref().size_hint()
+    }
+}
+
+/// Wrapper that overrides the size hint of the inner body
+#[derive(Debug)]
+pub struct HintBody {
+    inner: http_body_util::combinators::UnsyncBoxBody<Bytes, axum::Error>,
+    hint: SizeHint,
+}
+
+impl HintBody {
+    pub fn new<B>(body: B, size: Option<u64>) -> Self
+    where
+        B: http_body::Body<Data = Bytes> + Send + 'static,
+        B::Error: Into<axum::BoxError>,
+    {
+        Self {
+            inner: body.map_err(axum::Error::new).boxed_unsync(),
+            hint: size.map(SizeHint::with_exact).unwrap_or_default(),
         }
+    }
+}
+
+impl http_body::Body for HintBody {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    #[inline]
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        Pin::new(&mut self.inner).poll_frame(cx)
+    }
+
+    #[inline]
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    #[inline]
+    fn size_hint(&self) -> SizeHint {
+        self.hint.clone()
     }
 }
 
