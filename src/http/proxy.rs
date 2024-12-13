@@ -31,9 +31,11 @@ pub async fn proxy(
     let response = http_client.execute(request).await?;
 
     // Convert Reqwest response into Axum one
+    // Save the body size if one is available
     let content_length = response.content_length();
     let response: http::Response<_> = response.into();
     let (parts, body) = response.into_parts();
+    // Use HintBody to override the unknown body size to the correct one
     let body = HintBody::new(body, content_length);
 
     Ok(Response::from_parts(parts, Body::new(body)))
