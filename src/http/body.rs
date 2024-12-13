@@ -8,11 +8,9 @@ use std::{
 
 use axum::body::Body;
 use bytes::{Buf, Bytes};
-use futures::Stream;
 use futures_util::ready;
 use http_body::{Body as HttpBody, Frame, SizeHint};
 use http_body_util::{BodyExt, LengthLimitError, Limited};
-use sync_wrapper::SyncWrapper;
 use tokio::sync::{
     mpsc,
     oneshot::{self, Receiver, Sender},
@@ -130,38 +128,6 @@ impl http_body::Body for HintBody {
     #[inline]
     fn size_hint(&self) -> SizeHint {
         self.hint.clone()
-    }
-}
-
-/// Wrapper for Axum body that makes it `Sync` to be usable with Request.
-/// TODO find a better way?
-pub struct SyncBodyDataStream {
-    inner: SyncWrapper<Body>,
-}
-
-impl SyncBodyDataStream {
-    pub const fn new(body: Body) -> Self {
-        Self {
-            inner: SyncWrapper::new(body),
-        }
-    }
-}
-
-impl Stream for SyncBodyDataStream {
-    type Item = Result<Bytes, axum::Error>;
-
-    #[inline]
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            let mut pinned = pin!(self.inner.get_mut());
-            match ready!(pinned.as_mut().poll_frame(cx)?) {
-                Some(frame) => match frame.into_data() {
-                    Ok(data) => return Poll::Ready(Some(Ok(data))),
-                    Err(_frame) => {}
-                },
-                None => return Poll::Ready(None),
-            }
-        }
     }
 }
 
