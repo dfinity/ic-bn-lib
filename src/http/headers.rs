@@ -54,7 +54,7 @@ pub fn strip_connection_headers(headers: &mut HeaderMap) {
     // TE is forbidden unless it's "trailers"
     if headers
         .get(TE)
-        .map_or(false, |te_header| te_header != "trailers")
+        .is_some_and(|te_header| te_header != "trailers")
     {
         headers.remove(TE);
     }
