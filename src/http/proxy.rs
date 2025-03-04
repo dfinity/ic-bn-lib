@@ -3,11 +3,7 @@ use std::sync::Arc;
 use axum::{body::Body, extract::Request, response::Response};
 use url::Url;
 
-use super::{
-    body::{HintBody, SyncBody},
-    headers::strip_connection_headers,
-    Client, Error,
-};
+use super::{body::SyncBody, headers::strip_connection_headers, Client, Error};
 
 /// Proxies provided Axum request to a given URL using Client trait object and returns Axum response
 pub async fn proxy(
@@ -32,11 +28,8 @@ pub async fn proxy(
 
     // Convert Reqwest response into Axum one
     // Save the body size if one is available
-    let content_length = response.content_length();
     let response: http::Response<_> = response.into();
     let (parts, body) = response.into_parts();
-    // Use HintBody to override the unknown body size to the correct one
-    let body = HintBody::new(body, content_length);
 
     Ok(Response::from_parts(parts, Body::new(body)))
 }

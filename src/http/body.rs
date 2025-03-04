@@ -88,49 +88,6 @@ impl http_body::Body for SyncBody {
     }
 }
 
-/// Wrapper that overrides the size hint of the inner body
-#[derive(Debug)]
-pub struct HintBody {
-    inner: http_body_util::combinators::UnsyncBoxBody<Bytes, axum::Error>,
-    hint: SizeHint,
-}
-
-impl HintBody {
-    pub fn new<B>(body: B, size: Option<u64>) -> Self
-    where
-        B: http_body::Body<Data = Bytes> + Send + 'static,
-        B::Error: Into<axum::BoxError>,
-    {
-        Self {
-            inner: body.map_err(axum::Error::new).boxed_unsync(),
-            hint: size.map(SizeHint::with_exact).unwrap_or_default(),
-        }
-    }
-}
-
-impl http_body::Body for HintBody {
-    type Data = Bytes;
-    type Error = axum::Error;
-
-    #[inline]
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        Pin::new(&mut self.inner).poll_frame(cx)
-    }
-
-    #[inline]
-    fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
-    }
-
-    #[inline]
-    fn size_hint(&self) -> SizeHint {
-        self.hint.clone()
-    }
-}
-
 /// Body that notifies that it has finished by sending a value over the provided channel.
 /// Use AtomicBool flag to make sure we notify only once.
 pub struct NotifyingBody<D, E, S: Clone + Unpin> {
