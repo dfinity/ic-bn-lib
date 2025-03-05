@@ -614,7 +614,7 @@ mod tests {
         let cache = Arc::new(Cache::new(opts, KeyExtractorTest, &Registry::default()).unwrap());
 
         let mut app = Router::new()
-            .route("/:key", get(handler))
+            .route("/{key}", get(handler))
             .layer(from_fn_with_state(Arc::clone(&cache), middleware));
 
         // First request doesn't hit the cache, but is stored in the cache
@@ -727,7 +727,7 @@ mod tests {
         let cache = Arc::new(Cache::new(opts, KeyExtractorTest, &Registry::default()).unwrap());
 
         let app = Router::new()
-            .route("/:key", get(handler_proxy_cache_lock))
+            .route("/{key}", get(handler_proxy_cache_lock))
             .layer(from_fn_with_state(Arc::clone(&cache), middleware));
 
         let req_count = 50;
