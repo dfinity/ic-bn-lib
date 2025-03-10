@@ -19,7 +19,7 @@ bytes = "1.9.0"
 clap = { version = "4.5.20", features = ["derive", "string", "env"] }
 clap_derive = "4.5.18"
 chacha20poly1305 = "0.10.1"
-cloudflare = { git = "https://github.com/cloudflare/cloudflare-rs.git", rev = "f14720e42184ee176a97676e85ef2d2d85bc3aae", default-features = false, features = [
+cloudflare = { version = "0.13.0", default-features = false, features = [
     "rustls-tls",
 ] }
 derive-new = "0.7.0"
