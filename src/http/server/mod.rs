@@ -7,15 +7,15 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use async_trait::async_trait;
-use axum::{extract::Request, Router};
+use axum::{Router, extract::Request};
 use http::Response;
 use hyper::body::Incoming;
 use hyper_util::{
@@ -23,10 +23,10 @@ use hyper_util::{
     server::conn::auto::Builder,
 };
 use prometheus::{
-    register_histogram_vec_with_registry, register_int_counter_vec_with_registry,
-    register_int_gauge_vec_with_registry, HistogramVec, IntCounterVec, IntGaugeVec, Registry,
+    HistogramVec, IntCounterVec, IntGaugeVec, Registry, register_histogram_vec_with_registry,
+    register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry,
 };
-use rustls::{server::ServerConnection, CipherSuite, ProtocolVersion};
+use rustls::{CipherSuite, ProtocolVersion, server::ServerConnection};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpSocket, UnixListener, UnixSocket},
@@ -41,7 +41,7 @@ use tower_service::Service;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use super::{body::NotifyingBody, AsyncCounter, Error, Stats, ALPN_ACME};
+use super::{ALPN_ACME, AsyncCounter, Error, Stats, body::NotifyingBody};
 use crate::tasks::Run;
 
 const HANDSHAKE_DURATION_BUCKETS: &[f64] = &[0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6];
@@ -322,6 +322,27 @@ enum RequestState {
     End,
 }
 
+async fn tls_handshake(
+    rustls_cfg: Arc<rustls::ServerConfig>,
+    stream: impl AsyncReadWrite,
+) -> Result<(impl AsyncReadWrite, TlsInfo), Error> {
+    let tls_acceptor = TlsAcceptor::from(rustls_cfg);
+
+    // Perform the TLS handshake
+    let start = Instant::now();
+    let stream = tls_acceptor
+        .accept(stream)
+        .await
+        .context("TLS accept failed")?;
+    let duration = start.elapsed();
+
+    let conn = stream.get_ref().1;
+    let mut tls_info = TlsInfo::try_from(conn)?;
+    tls_info.handshake_dur = duration;
+
+    Ok((stream, tls_info))
+}
+
 struct Conn {
     addr: Addr,
     remote_addr: Addr,
@@ -332,7 +353,7 @@ struct Conn {
     options: Options,
     metrics: Metrics,
     requests: AtomicU32,
-    tls_acceptor: Option<TlsAcceptor>,
+    rustls_cfg: Option<Arc<rustls::ServerConfig>>,
 }
 
 impl Display for Conn {
@@ -342,40 +363,6 @@ impl Display for Conn {
 }
 
 impl Conn {
-    async fn tls_handshake(
-        &self,
-        stream: impl AsyncReadWrite,
-    ) -> Result<(impl AsyncReadWrite, TlsInfo), Error> {
-        debug!("{}: performing TLS handshake", self);
-
-        // Perform the TLS handshake
-        let start = Instant::now();
-        let stream = self
-            .tls_acceptor
-            .as_ref()
-            .unwrap() // Caller makes sure it's Some()
-            .accept(stream)
-            .await
-            .context("TLS accept failed")?;
-        let duration = start.elapsed();
-
-        let conn = stream.get_ref().1;
-        let mut tls_info = TlsInfo::try_from(conn)?;
-        tls_info.handshake_dur = duration;
-
-        debug!(
-            "{}: handshake finished in {}ms (server: {:?}, proto: {:?}, cipher: {:?}, ALPN: {:?})",
-            self,
-            duration.as_millis(),
-            tls_info.sni,
-            tls_info.protocol,
-            tls_info.cipher,
-            tls_info.alpn,
-        );
-
-        Ok((stream, tls_info))
-    }
-
     async fn handle(&self, stream: Box<dyn AsyncReadWrite>) -> Result<(), Error> {
         let accepted_at = Instant::now();
 
@@ -405,14 +392,28 @@ impl Conn {
         });
 
         // Perform TLS handshake if we're in TLS mode
-        let (stream, tls_info): (Box<dyn AsyncReadWrite>, _) = if self.tls_acceptor.is_some() {
-            let (mut stream, tls_info) = timeout(
+        let (stream, tls_info): (Box<dyn AsyncReadWrite>, _) = if let Some(rustls_cfg) =
+            &self.rustls_cfg
+        {
+            debug!("{}: performing TLS handshake", self);
+
+            let (mut stream_tls, tls_info) = timeout(
                 self.options.tls_handshake_timeout,
-                self.tls_handshake(stream),
+                tls_handshake(rustls_cfg.clone(), stream),
             )
             .await
             .context("TLS handshake timed out")?
             .context("TLS handshake failed")?;
+
+            debug!(
+                "{}: handshake finished in {}ms (server: {:?}, proto: {:?}, cipher: {:?}, ALPN: {:?})",
+                self,
+                tls_info.handshake_dur.as_millis(),
+                tls_info.sni,
+                tls_info.protocol,
+                tls_info.cipher,
+                tls_info.alpn,
+            );
 
             // Close the connection if agreed ALPN is ACME - the handshake is enough for the challenge
             if tls_info
@@ -422,7 +423,7 @@ impl Conn {
             {
                 debug!("{self}: ACME ALPN - closing connection");
 
-                timeout(Duration::from_secs(5), stream.shutdown())
+                timeout(Duration::from_secs(5), stream_tls.shutdown())
                     .await
                     .context("socket shutdown timed out")?
                     .context("socket shutdown failed")?;
@@ -430,7 +431,7 @@ impl Conn {
                 return Ok(());
             }
 
-            (Box::new(stream), Some(Arc::new(tls_info)))
+            (Box::new(stream_tls), Some(Arc::new(tls_info)))
         } else {
             (Box::new(stream), None)
         };
@@ -648,7 +649,7 @@ pub struct Server {
     options: Options,
     metrics: Metrics,
     builder: Builder<TokioExecutor>,
-    tls_acceptor: Option<TlsAcceptor>,
+    rustls_cfg: Option<Arc<rustls::ServerConfig>>,
 }
 
 impl Server {
@@ -681,7 +682,7 @@ impl Server {
             metrics,
             tracker: TaskTracker::new(),
             builder,
-            tls_acceptor: rustls_cfg.map(|x| TlsAcceptor::from(Arc::new(x))),
+            rustls_cfg: rustls_cfg.map(Arc::new),
         }
     }
 
@@ -719,7 +720,7 @@ impl Server {
             options: self.options,
             metrics: self.metrics.clone(), // All metrics have Arc inside
             requests: AtomicU32::new(0),
-            tls_acceptor: self.tls_acceptor.clone(),
+            rustls_cfg: self.rustls_cfg.clone(),
         };
 
         // Spawn a task to handle connection & track it
@@ -743,7 +744,7 @@ impl Server {
         warn!(
             "Server {}: running (TLS: {})",
             self.addr,
-            self.tls_acceptor.is_some()
+            self.rustls_cfg.is_some()
         );
 
         loop {
