@@ -1,4 +1,5 @@
 #![warn(clippy::nursery)]
+#![warn(tail_expr_drop_order)]
 
 pub mod http;
 pub mod tasks;
