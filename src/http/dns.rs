@@ -8,14 +8,15 @@ use anyhow::Context;
 use async_trait::async_trait;
 use hickory_proto::rr::RecordType;
 use hickory_resolver::{
-    config::{NameServerConfigGroup, ResolverConfig, ResolverOpts},
+    TokioResolver,
+    config::{NameServerConfigGroup, ResolveHosts, ResolverConfig, ResolverOpts},
     lookup_ip::LookupIpIntoIter,
-    TokioAsyncResolver,
+    name_server::TokioConnectionProvider,
 };
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use strum_macros::EnumString;
 
-use super::{client::CloneableDnsResolver, Error};
+use super::{Error, client::CloneableDnsResolver};
 
 #[derive(Clone, Copy, Debug, EnumString)]
 #[strum(serialize_all = "snake_case")]
@@ -39,7 +40,7 @@ pub struct Options {
 }
 
 #[derive(Debug, Clone)]
-pub struct Resolver(Arc<TokioAsyncResolver>);
+pub struct Resolver(Arc<TokioResolver>);
 impl CloneableDnsResolver for Resolver {}
 
 // new() must be called in Tokio context
@@ -56,14 +57,16 @@ impl Resolver {
         let cfg = ResolverConfig::from_parts(None, vec![], name_servers);
 
         let mut opts = ResolverOpts::default();
-        opts.rotate = true;
         opts.cache_size = o.cache_size;
-        opts.use_hosts_file = false;
+        opts.use_hosts_file = ResolveHosts::Never;
         opts.preserve_intermediates = false;
         opts.try_tcp_on_error = true;
 
-        let resolver = TokioAsyncResolver::tokio(cfg, opts);
-        Self(Arc::new(resolver))
+        let mut builder =
+            TokioResolver::builder_with_config(cfg, TokioConnectionProvider::default());
+        *builder.options_mut() = opts;
+
+        Self(Arc::new(builder.build()))
     }
 }
 

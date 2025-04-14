@@ -23,10 +23,13 @@ use hyper_util::{
     server::conn::auto::Builder,
 };
 use prometheus::{
-    HistogramVec, IntCounterVec, IntGaugeVec, Registry, register_histogram_vec_with_registry,
-    register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry,
+    HistogramVec, IntCounterVec, IntGaugeVec, Registry,
+    core::{AtomicI64, GenericGauge},
+    register_histogram_vec_with_registry, register_int_counter_vec_with_registry,
+    register_int_gauge_vec_with_registry,
 };
 use rustls::{CipherSuite, ProtocolVersion, server::ServerConnection};
+use scopeguard::defer;
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpSocket, UnixListener, UnixSocket},
@@ -59,6 +62,7 @@ pub struct Metrics {
     conns: IntCounterVec,
     conns_open: IntGaugeVec,
     requests: IntCounterVec,
+    requests_inflight: IntGaugeVec,
     bytes_sent: IntCounterVec,
     bytes_rcvd: IntCounterVec,
     conn_duration: HistogramVec,
@@ -98,6 +102,14 @@ impl Metrics {
                 format!("conn_requests_total"),
                 format!("Counts the number of requests"),
                 LABELS,
+                registry
+            )
+            .unwrap(),
+
+            requests_inflight: register_int_gauge_vec_with_registry!(
+                format!("conn_requests_inflight"),
+                format!("Counts the number of requests that are currently executed"),
+                &LABELS[0..4],
                 registry
             )
             .unwrap(),
@@ -452,8 +464,15 @@ impl Conn {
             .with_label_values(&labels[0..4])
             .inc();
 
+        let requests_inflight = self
+            .metrics
+            .requests_inflight
+            .with_label_values(&labels[0..4]);
+
         // Handle the connection
-        let result = self.handle_inner(stream, conn_info.clone(), tls_info).await;
+        let result = self
+            .handle_inner(stream, conn_info.clone(), tls_info, requests_inflight)
+            .await;
 
         // Record connection metrics
         let (sent, rcvd) = (stats.sent(), stats.rcvd());
@@ -506,6 +525,7 @@ impl Conn {
         stream: Box<dyn AsyncReadWrite>,
         conn_info: Arc<ConnInfo>,
         tls_info: Option<Arc<TlsInfo>>,
+        requests_inflight: GenericGauge<AtomicI64>,
     ) -> Result<(), Error> {
         // Create a timer for idle connection tracking
         let mut idle_timer = Box::pin(sleep(self.options.idle_timeout));
@@ -528,20 +548,30 @@ impl Conn {
             // Notify that we have started processing the request
             let _ = state_tx.try_send(RequestState::Start);
 
+            // Increase the global inflight requests counter
+            requests_inflight.inc();
+
             // Inject connection information
             request.extensions_mut().insert(conn_info.clone());
             if let Some(v) = &tls_info {
                 request.extensions_mut().insert(v.clone());
             }
 
-            // Clone the stuff needed in the async block
+            // Clone the stuff needed in the async block below
             let mut router = self.router.clone();
             let token = self.token_graceful.clone();
             let conn_info = conn_info.clone();
             let state_tx = state_tx.clone();
+            let requests_inflight = requests_inflight.clone();
 
             // Return the future
             async move {
+                // Since the future can be cancelled we need defer to decrease the counter in any case
+                // to avoid leaking the inflight requests
+                defer! {
+                    requests_inflight.dec();
+                }
+
                 // Execute the request
                 let result = router.call(request).await.map(|x| {
                     // Wrap the response body into a notifying one
@@ -622,7 +652,7 @@ impl Conn {
                     // Signal that we're closing
                     conn.as_mut().graceful_shutdown();
                     // Give the client some time to shut down
-                    let _ = timeout(Duration::from_secs(3), conn.as_mut()).await;
+                    let _ = timeout(Duration::from_secs(5), conn.as_mut()).await;
                     break;
                 },
 
