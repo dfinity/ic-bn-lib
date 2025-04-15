@@ -346,7 +346,17 @@ mod test {
         );
 
         assert_eq!(
+            extract_host(&Url::parse("https://foo/bar/beef").unwrap()),
+            "foo:443"
+        );
+
+        assert_eq!(
             extract_host(&Url::parse("http://foo:80/bar/beef").unwrap()),
+            "foo:80"
+        );
+
+        assert_eq!(
+            extract_host(&Url::parse("http://foo/bar/beef").unwrap()),
             "foo:80"
         );
 
