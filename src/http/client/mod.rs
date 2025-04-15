@@ -24,8 +24,16 @@ use url::Url;
 
 use super::Error;
 
-fn extract_host(url: &Url) -> &str {
-    url.authority().split('@').last().unwrap_or_default()
+fn extract_host(url: &Url) -> String {
+    format!(
+        "{}:{}",
+        url.host_str()
+            .unwrap_or_default()
+            .split('@')
+            .last()
+            .unwrap_or_default(),
+        url.port_or_known_default().unwrap_or_default()
+    )
 }
 
 /// Generic HTTP client trait
@@ -231,10 +239,8 @@ impl ReqwestClientLeastLoaded {
 #[async_trait]
 impl Client for ReqwestClientLeastLoaded {
     async fn execute(&self, req: Request) -> Result<Response, reqwest::Error> {
-        // Extract authority from the request URL stripping possible user:pass prefix
-        // The port will be omitted if it matches scheme (https -> 443, http -> 80 etc)
-        // and present if it doesn't match.
-        let host = extract_host(req.url()).to_string();
+        // Extract host:port from the request URL
+        let host = extract_host(req.url());
         let labels = &[&host];
 
         self.metrics
@@ -331,22 +337,22 @@ mod test {
     #[test]
     fn test_extract_host() {
         assert_eq!(
-            extract_host(&Url::parse("https://foo:123/bar/beef").unwrap(),),
+            extract_host(&Url::parse("https://foo:123/bar/beef").unwrap()),
             "foo:123"
         );
 
         assert_eq!(
-            extract_host(&Url::parse("https://foo:443/bar/beef").unwrap(),),
-            "foo"
+            extract_host(&Url::parse("https://foo:443/bar/beef").unwrap()),
+            "foo:443"
         );
 
         assert_eq!(
-            extract_host(&Url::parse("http://foo:80/bar/beef").unwrap(),),
-            "foo"
+            extract_host(&Url::parse("http://foo:80/bar/beef").unwrap()),
+            "foo:80"
         );
 
         assert_eq!(
-            extract_host(&Url::parse("https://top:secret@foo:123/bar/beef").unwrap(),),
+            extract_host(&Url::parse("https://top:secret@foo:123/bar/beef").unwrap()),
             "foo:123"
         );
     }
