@@ -6,16 +6,27 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
+use ahash::RandomState;
 use anyhow::Context;
 use async_trait::async_trait;
 use http::header::HeaderValue;
+use moka::sync::{Cache, CacheBuilder};
+use prometheus::{
+    HistogramVec, IntCounterVec, IntGaugeVec, Registry, register_histogram_vec_with_registry,
+    register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry,
+};
 use reqwest::{Request, Response, dns::Resolve};
 use scopeguard::defer;
+use url::Url;
 
 use super::Error;
+
+fn extract_host(url: &Url) -> &str {
+    url.authority().split('@').last().unwrap_or_default()
+}
 
 /// Generic HTTP client trait
 #[cfg_attr(test, mockall::automock)]
@@ -24,11 +35,61 @@ pub trait Client: Send + Sync + fmt::Debug {
     async fn execute(&self, req: Request) -> Result<Response, reqwest::Error>;
 }
 
+#[derive(Debug, Clone)]
+pub struct ClientStats {
+    pub pool_size: usize,
+    pub outstanding: usize,
+}
+
+pub trait Stats {
+    fn stats(&self) -> ClientStats;
+}
+
 pub trait ClientWithStats: Client + Stats {
     fn to_client(self: Arc<Self>) -> Arc<dyn Client>;
 }
 
 pub trait CloneableDnsResolver: Resolve + Clone + fmt::Debug + 'static {}
+
+#[derive(Clone, Debug)]
+struct Metrics {
+    requests: IntCounterVec,
+    requests_inflight: IntGaugeVec,
+    request_duration: HistogramVec,
+}
+
+impl Metrics {
+    pub fn new(registry: &Registry) -> Self {
+        const LABELS: &[&str] = &["host"];
+
+        Self {
+            requests: register_int_counter_vec_with_registry!(
+                format!("http_client_requests_total"),
+                format!("Counts the number of requests"),
+                LABELS,
+                registry
+            )
+            .unwrap(),
+
+            requests_inflight: register_int_gauge_vec_with_registry!(
+                format!("http_client_requests_inflight"),
+                format!("Counts the number of requests that are currently executed"),
+                LABELS,
+                registry
+            )
+            .unwrap(),
+
+            request_duration: register_histogram_vec_with_registry!(
+                format!("http_client_request_duration_sec"),
+                format!("Records the duration of requests in seconds"),
+                LABELS,
+                [0.01, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2].to_vec(),
+                registry
+            )
+            .unwrap(),
+        }
+    }
+}
 
 /// HTTP client options
 #[derive(Debug, Clone)]
@@ -131,27 +192,38 @@ impl Client for ReqwestClientRoundRobin {
 #[derive(Clone, Debug)]
 pub struct ReqwestClientLeastLoaded {
     inner: Arc<Vec<ReqwestClientLeastLoadedInner>>,
+    metrics: Option<Metrics>,
 }
 
 #[derive(Debug)]
 struct ReqwestClientLeastLoadedInner {
     cli: reqwest::Client,
-    outstanding: AtomicUsize,
+    outstanding: Cache<String, Arc<AtomicUsize>, RandomState>,
 }
 
 impl ReqwestClientLeastLoaded {
-    pub fn new<R: CloneableDnsResolver>(opts: Options<R>, count: usize) -> Result<Self, Error> {
+    pub fn new<R: CloneableDnsResolver>(
+        opts: Options<R>,
+        count: usize,
+        registry: Option<&Registry>,
+    ) -> Result<Self, Error> {
         let inner = (0..count)
             .map(|_| -> Result<_, _> {
                 Ok::<_, Error>(ReqwestClientLeastLoadedInner {
                     cli: new(opts.clone())?,
-                    outstanding: AtomicUsize::new(0),
+                    // Creates a cache with some sensible max capacity to hold target hosts.
+                    // If the host isn't contacted in 10min then we remove it.
+                    // TODO should we make this configurable? Probably ok like this
+                    outstanding: CacheBuilder::new(16384)
+                        .time_to_idle(Duration::from_secs(600))
+                        .build_with_hasher(RandomState::default()),
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Self {
             inner: Arc::new(inner),
+            metrics: registry.map(Metrics::new),
         })
     }
 }
@@ -159,31 +231,74 @@ impl ReqwestClientLeastLoaded {
 #[async_trait]
 impl Client for ReqwestClientLeastLoaded {
     async fn execute(&self, req: Request) -> Result<Response, reqwest::Error> {
-        // Select the client with least outstanding requests
-        let cli = self
+        // Extract authority from the request URL stripping possible user:pass prefix
+        // The port will be omitted if it matches scheme (https -> 443, http -> 80 etc)
+        // and present if it doesn't match.
+        let host = extract_host(req.url()).to_string();
+        let labels = &[&host];
+
+        self.metrics
+            .as_ref()
+            .inspect(|x| x.requests.with_label_values(labels).inc());
+
+        // Select the client with least outstanding requests for the given host
+        let (cli, counter) = self
             .inner
             .iter()
-            .min_by_key(|x| x.outstanding.load(Ordering::SeqCst))
+            .map(|x| {
+                (
+                    &x.cli,
+                    // Get an atomic counter for the given host or create a new one
+                    x.outstanding
+                        .get_with_by_ref(&host, || Arc::new(AtomicUsize::new(0))),
+                )
+            })
+            .min_by_key(|x| x.1.load(Ordering::SeqCst))
             .unwrap();
 
         // The future can be cancelled so we have to use defer to make sure the counter is decreased
         defer! {
-            cli.outstanding.fetch_sub(1, Ordering::SeqCst);
+            counter.fetch_sub(1, Ordering::SeqCst);
+            self.metrics
+                .as_ref()
+                .inspect(|x| x.requests_inflight.with_label_values(labels).dec());
         }
 
-        cli.outstanding.fetch_add(1, Ordering::SeqCst);
-        cli.cli.execute(req).await
+        counter.fetch_add(1, Ordering::SeqCst);
+        self.metrics
+            .as_ref()
+            .inspect(|x| x.requests_inflight.with_label_values(labels).inc());
+
+        // Execute the request & observe duration
+        let start = Instant::now();
+        let result = cli.execute(req).await;
+        self.metrics.as_ref().inspect(|x| {
+            x.request_duration
+                .with_label_values(labels)
+                .observe(start.elapsed().as_secs_f64())
+        });
+
+        result
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct ClientStats {
-    pub pool_size: usize,
-    pub outstanding: usize,
+impl Stats for ReqwestClientLeastLoaded {
+    fn stats(&self) -> ClientStats {
+        ClientStats {
+            pool_size: self.inner.len(),
+            outstanding: self
+                .inner
+                .iter()
+                .flat_map(|x| x.outstanding.iter().map(|x| x.1.load(Ordering::SeqCst)))
+                .sum(),
+        }
+    }
 }
 
-pub trait Stats {
-    fn stats(&self) -> ClientStats;
+impl ClientWithStats for ReqwestClientLeastLoaded {
+    fn to_client(self: Arc<Self>) -> Arc<dyn Client> {
+        self
+    }
 }
 
 pub fn basic_auth<U, P>(username: U, password: Option<P>) -> HeaderValue
@@ -207,4 +322,32 @@ where
     let mut header = HeaderValue::from_bytes(&buf).expect("base64 is always valid HeaderValue");
     header.set_sensitive(true);
     header
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_extract_host() {
+        assert_eq!(
+            extract_host(&Url::parse("https://foo:123/bar/beef").unwrap(),),
+            "foo:123"
+        );
+
+        assert_eq!(
+            extract_host(&Url::parse("https://foo:443/bar/beef").unwrap(),),
+            "foo"
+        );
+
+        assert_eq!(
+            extract_host(&Url::parse("http://foo:80/bar/beef").unwrap(),),
+            "foo"
+        );
+
+        assert_eq!(
+            extract_host(&Url::parse("https://top:secret@foo:123/bar/beef").unwrap(),),
+            "foo:123"
+        );
+    }
 }
