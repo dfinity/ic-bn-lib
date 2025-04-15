@@ -24,13 +24,12 @@ use url::Url;
 
 use super::Error;
 
+// Extracts host:port from the URL
 fn extract_host(url: &Url) -> String {
     format!(
         "{}:{}",
         url.host_str()
-            .unwrap_or_default()
-            .split('@')
-            .last()
+            .and_then(|x| x.split('@').last())
             .unwrap_or_default(),
         url.port_or_known_default().unwrap_or_default()
     )
