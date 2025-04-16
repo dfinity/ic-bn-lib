@@ -5,7 +5,7 @@
 #![allow(clippy::borrow_interior_mutable_const)]
 
 use http::header::{
-    HeaderMap, HeaderName, HeaderValue, CONNECTION, TE, TRANSFER_ENCODING, UPGRADE,
+    CONNECTION, HeaderMap, HeaderName, HeaderValue, TE, TRANSFER_ENCODING, UPGRADE,
 };
 
 // Header names

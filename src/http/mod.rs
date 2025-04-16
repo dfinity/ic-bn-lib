@@ -9,10 +9,10 @@ pub mod shed;
 
 use std::{
     io,
-    pin::{pin, Pin},
+    pin::{Pin, pin},
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     task::{Context, Poll},
 };

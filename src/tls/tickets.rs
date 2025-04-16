@@ -4,10 +4,10 @@ use std::{
 };
 
 use chacha20poly1305::{
-    aead::{Aead, AeadCore, KeyInit, OsRng},
     XChaCha20Poly1305, XNonce,
+    aead::{Aead, AeadCore, KeyInit, OsRng},
 };
-use prometheus::{register_int_counter_vec_with_registry, IntCounterVec, Registry};
+use prometheus::{IntCounterVec, Registry, register_int_counter_vec_with_registry};
 use rustls::server::ProducesTickets;
 use zeroize::ZeroizeOnDrop;
 

@@ -16,7 +16,7 @@ use std::{
     cmp::Ordering,
     future::Future,
     pin::Pin,
-    sync::{atomic::AtomicU64, Arc, Mutex},
+    sync::{Arc, Mutex, atomic::AtomicU64},
     task::{Context, Poll},
     time::{Duration, Instant},
 };
@@ -356,8 +356,8 @@ impl<Inner> Layer<Inner> for LoadShedLayer {
 #[cfg(test)]
 mod test {
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     use tokio_util::task::TaskTracker;

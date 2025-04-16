@@ -9,8 +9,8 @@ use std::{
 use tower::{Layer, Service, ServiceExt};
 
 use super::{
-    little::{LoadShedLayer, LoadShedResponse},
     BoxFuture, ShedReason, ShedResponse,
+    little::{LoadShedLayer, LoadShedResponse},
 };
 
 /// Trait to extract the shedding key from the given request
@@ -129,8 +129,8 @@ impl<T: TypeExtractor, I: Send + Sync + Clone> Layer<I> for ShardedLittleLoadShe
 #[cfg(test)]
 mod test {
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     use tokio_util::task::TaskTracker;

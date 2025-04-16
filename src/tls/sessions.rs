@@ -3,8 +3,8 @@ use std::time::Duration;
 use ahash::RandomState;
 use moka::sync::Cache;
 use prometheus::{
-    register_int_counter_vec_with_registry, register_int_gauge_with_registry, IntCounterVec,
-    IntGauge, Registry,
+    IntCounterVec, IntGauge, Registry, register_int_counter_vec_with_registry,
+    register_int_gauge_with_registry,
 };
 use rustls::server::StoresServerSessions;
 use tokio::time::interval;

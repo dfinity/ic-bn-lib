@@ -1,7 +1,7 @@
 use std::{
-    pin::{pin, Pin},
-    sync::atomic::{AtomicBool, Ordering},
+    pin::{Pin, pin},
     sync::Mutex,
+    sync::atomic::{AtomicBool, Ordering},
     task::{Context, Poll},
     time::Duration,
 };
@@ -16,7 +16,7 @@ use tokio::sync::{
     oneshot::{self, Receiver, Sender},
 };
 
-use super::{calc_headers_size, Error};
+use super::{Error, calc_headers_size};
 
 // Read the given body enforcing a size & time limit
 pub async fn buffer_body<H: HttpBody + Send>(
@@ -65,7 +65,7 @@ impl SyncBody {
     }
 }
 
-impl http_body::Body for SyncBody {
+impl HttpBody for SyncBody {
     type Data = Bytes;
     type Error = axum::Error;
 
@@ -83,7 +83,7 @@ impl http_body::Body for SyncBody {
     }
 
     #[inline]
-    fn size_hint(&self) -> http_body::SizeHint {
+    fn size_hint(&self) -> SizeHint {
         self.inner.lock().unwrap().as_ref().size_hint()
     }
 }
@@ -255,7 +255,6 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use http_body_util::BodyExt;
 
     #[tokio::test]
     async fn test_counting_body_stream() {

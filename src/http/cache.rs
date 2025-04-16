@@ -10,12 +10,12 @@ use ahash::RandomState;
 use async_trait::async_trait;
 use axum::{body::Body, extract::Request, middleware::Next, response::Response};
 use bytes::Bytes;
-use http::{header::RANGE, Method};
+use http::{Method, header::RANGE};
 use http_body::Body as _;
 use moka::sync::{Cache as MokaCache, CacheBuilder as MokaCacheBuilder};
 use prometheus::{
-    register_counter_vec_with_registry, register_histogram_vec_with_registry,
-    register_int_gauge_with_registry, CounterVec, HistogramVec, IntGauge, Registry,
+    CounterVec, HistogramVec, IntGauge, Registry, register_counter_vec_with_registry,
+    register_histogram_vec_with_registry, register_int_gauge_with_registry,
 };
 use sha1::{Digest, Sha1};
 use strum_macros::{Display, IntoStaticStr};
@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::tasks::Run;
 
-use super::{body::buffer_body, calc_headers_size, Error as HttpError};
+use super::{Error as HttpError, body::buffer_body, calc_headers_size};
 
 #[derive(Debug, Clone, Display, PartialEq, Eq, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
@@ -457,12 +457,12 @@ mod tests {
     use super::*;
 
     use axum::{
+        Router,
         body::to_bytes,
         extract::State,
         middleware::from_fn_with_state,
         response::IntoResponse,
         routing::{get, post},
-        Router,
     };
     use http::StatusCode;
     use sha1::Digest;

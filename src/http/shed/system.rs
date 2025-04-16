@@ -5,13 +5,13 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{anyhow, Context as _};
+use anyhow::{Context as _, anyhow};
 use async_trait::async_trait;
 use systemstat::{Platform, System};
 use tower::{Layer, Service, ServiceExt};
 use tracing::{debug, error};
 
-use super::{ewma::EWMA, BoxFuture, ShedReason, ShedResponse};
+use super::{BoxFuture, ShedReason, ShedResponse, ewma::EWMA};
 use crate::Error;
 
 #[async_trait]
@@ -118,7 +118,10 @@ impl<S: GetsSystemInfo> State<S> {
 
         // Check if we're overloaded
         inner.shed_reason = self.evaluate(&inner);
-        debug!("System load: CPU {cpu}, MEM {mem}, LAVG1: {l1}, LAVG5: {l5}, LAVG15: {l15}, Overload: {:?}", inner.shed_reason);
+        debug!(
+            "System load: CPU {cpu}, MEM {mem}, LAVG1: {l1}, LAVG5: {l5}, LAVG15: {l15}, Overload: {:?}",
+            inner.shed_reason
+        );
 
         drop(inner); // clippy
         Ok(())
