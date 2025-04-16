@@ -3,7 +3,7 @@ use std::{io, sync::Arc};
 use anyhow::Error;
 use futures::StreamExt;
 use rustls::server::ResolvesServerCert;
-use rustls_acme::{caches::DirCache, AcmeConfig, AcmeState};
+use rustls_acme::{AcmeConfig, AcmeState, caches::DirCache};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 

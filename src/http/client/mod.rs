@@ -29,7 +29,7 @@ fn extract_host(url: &Url) -> String {
     format!(
         "{}:{}",
         url.host_str()
-            .and_then(|x| x.split('@').last())
+            .and_then(|x| x.split('@').next_back())
             .unwrap_or_default(),
         url.port_or_known_default().unwrap_or_default()
     )

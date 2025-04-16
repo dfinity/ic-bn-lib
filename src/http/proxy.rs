@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::{body::Body, extract::Request, response::Response};
 use url::Url;
 
-use super::{body::SyncBody, headers::strip_connection_headers, Client, Error};
+use super::{Client, Error, body::SyncBody, headers::strip_connection_headers};
 
 /// Proxies provided Axum request to a given URL using Client trait object and returns Axum response
 pub async fn proxy(

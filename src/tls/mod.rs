@@ -1,19 +1,20 @@
 pub mod acme;
 pub mod sessions;
 pub mod tickets;
+pub mod verify;
 
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context};
-use fqdn::{Fqdn, FQDN};
+use anyhow::{Context, anyhow};
+use fqdn::{FQDN, Fqdn};
 use prometheus::Registry;
 use rustls::{
+    ClientConfig, ServerConfig, SupportedProtocolVersion, TicketRotator,
     client::{ClientSessionMemoryCache, Resumption},
     compress::CompressionCache,
     crypto::ring,
     server::{ClientHello, ResolvesServerCert},
     sign::CertifiedKey,
-    ClientConfig, ServerConfig, SupportedProtocolVersion, TicketRotator,
 };
 use rustls_platform_verifier::Verifier;
 use std::{

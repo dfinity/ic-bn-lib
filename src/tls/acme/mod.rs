@@ -7,7 +7,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{anyhow, Context, Error};
+use anyhow::{Context, Error, anyhow};
 use async_trait::async_trait;
 use derive_new::new;
 use instant_acme::{
@@ -208,7 +208,7 @@ impl Acme {
                     return Err(anyhow!(
                         "unexpected authorization status: {:?}",
                         authz.status
-                    ))
+                    ));
                 }
             }
 

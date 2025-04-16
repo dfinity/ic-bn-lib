@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{fmt::Display, sync::Arc, time::Duration};
 
 use anyhow::Error;
 use async_trait::async_trait;
@@ -15,6 +15,12 @@ pub trait Run: Send + Sync {
 #[derive(Clone)]
 struct Task(String, Arc<dyn Run>);
 
+impl Display for Task {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Runs given task periodically
 struct IntervalRunner(Duration, Task);
 
@@ -23,7 +29,7 @@ impl Run for IntervalRunner {
     async fn run(&self, token: CancellationToken) -> Result<(), anyhow::Error> {
         warn!(
             "Task '{}': running with interval {}s",
-            self.1 .0,
+            self.1,
             self.0.as_secs()
         );
 
@@ -35,13 +41,13 @@ impl Run for IntervalRunner {
                 biased;
 
                 () = token.cancelled() => {
-                    warn!("Task '{}': stopped", self.1.0);
+                    warn!("Task '{}': stopped", self.1);
                     return Ok(());
                 },
 
                 _ = interval.tick() => {
                     if let Err(e) = self.1.1.run(token.child_token()).await {
-                        warn!("Task '{}': {e:#}", self.1.0);
+                        warn!("Task '{}': {e:#}", self.1);
                     }
                 }
             }
