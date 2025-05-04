@@ -15,6 +15,7 @@ use rustls::{
     crypto::ring,
     server::{ClientHello, ResolvesServerCert},
     sign::CertifiedKey,
+    version::{TLS12, TLS13},
 };
 use rustls_platform_verifier::Verifier;
 use std::{
@@ -146,6 +147,18 @@ pub struct Options {
     pub sessions_tti: Duration,
     pub ticket_lifetime: Duration,
     pub tls_versions: Vec<&'static SupportedProtocolVersion>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            additional_alpn: vec![],
+            sessions_count: 1024,
+            sessions_tti: Duration::from_secs(3600),
+            ticket_lifetime: Duration::from_secs(3600),
+            tls_versions: vec![&TLS13, &TLS12],
+        }
+    }
 }
 
 /// Creates Rustls server config
