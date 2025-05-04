@@ -94,4 +94,10 @@ x509-parser = "0.17.0"
 zeroize = { version = "1.8.1", features = ["derive"] }
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 mockall = "0.13.0"
+rand_regex = "0.17.0"
+
+[[bench]]
+name = "vector"
+harness = false

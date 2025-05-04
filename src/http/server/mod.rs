@@ -175,6 +175,24 @@ pub struct Options {
     pub max_requests_per_conn: Option<u64>,
 }
 
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            backlog: 2048,
+            tls_handshake_timeout: Duration::from_secs(15),
+            read_timeout: Some(Duration::from_secs(60)),
+            write_timeout: Some(Duration::from_secs(60)),
+            idle_timeout: Duration::from_secs(60),
+            http1_header_read_timeout: Duration::from_secs(10),
+            http2_max_streams: 128,
+            http2_keepalive_interval: Duration::from_secs(20),
+            http2_keepalive_timeout: Duration::from_secs(10),
+            grace_period: Duration::from_secs(60),
+            max_requests_per_conn: None,
+        }
+    }
+}
+
 // TLS information about the connection
 #[derive(Clone, Debug)]
 pub struct TlsInfo {

@@ -7,7 +7,7 @@ use vrl::value::{ObjectMap, Value};
 #[allow(warnings, clippy::all, clippy::pedantic)]
 mod event;
 
-fn encode_map(fields: ObjectMap) -> event::ValueMap {
+pub fn encode_map(fields: ObjectMap) -> event::ValueMap {
     event::ValueMap {
         fields: fields
             .into_iter()
@@ -16,13 +16,13 @@ fn encode_map(fields: ObjectMap) -> event::ValueMap {
     }
 }
 
-fn encode_array(items: Vec<Value>) -> event::ValueArray {
+pub fn encode_array(items: Vec<Value>) -> event::ValueArray {
     event::ValueArray {
         items: items.into_iter().map(encode_value).collect(),
     }
 }
 
-fn encode_value(value: Value) -> event::Value {
+pub fn encode_value(value: Value) -> event::Value {
     event::Value {
         kind: match value {
             Value::Bytes(b) => Some(event::value::Kind::RawBytes(b)),
@@ -41,7 +41,7 @@ fn encode_value(value: Value) -> event::Value {
     }
 }
 
-pub fn encode_event(event: serde_json::Value, buf: &mut BytesMut) -> Result<(), crate::Error> {
+pub fn prepare_event(event: serde_json::Value) -> event::EventArray {
     let event = Value::from(event);
 
     // Dummy fields required by Vector
@@ -57,11 +57,13 @@ pub fn encode_event(event: serde_json::Value, buf: &mut BytesMut) -> Result<(), 
     };
     let event = event::LogArray { logs: vec![event] };
     let event = event::event_array::Events::Logs(event);
-    let event = event::EventArray {
+    event::EventArray {
         events: Some(event),
-    };
+    }
+}
 
-    // Finally encode to Protobuf
+pub fn encode_event(event: serde_json::Value, buf: &mut BytesMut) -> Result<(), crate::Error> {
+    let event = prepare_event(event);
     event.encode(buf).context("unable to encode to Protobuf")?;
     Ok(())
 }

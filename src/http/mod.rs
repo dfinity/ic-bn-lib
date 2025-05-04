@@ -18,7 +18,7 @@ use std::{
 };
 
 use derive_new::new;
-use http::{HeaderMap, Method, Version};
+use http::{HeaderMap, Method, Request, Version};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 pub use client::{Client, ReqwestClient};
@@ -78,6 +78,30 @@ pub const fn http_method(v: &Method) -> &'static str {
         Method::PATCH => "PATCH",
         _ => "",
     }
+}
+
+/// Attempts to extract "host" from "host:port" format.
+/// Host can be either FQDN of IPv4/IPv6.
+pub fn extract_host(host_port: &str) -> Option<&str> {
+    // Cover IPv6 case
+    if host_port.as_bytes()[0] == b'[' {
+        host_port.find(']').map(|i| &host_port[0..=i])
+    } else {
+        host_port.split(':').next()
+    }
+}
+
+/// Attempts to extract host from HTTP2 "authority" pseudo-header or from HTTP/1.1 "Host" header
+pub fn extract_authority<T>(request: &Request<T>) -> Option<&str> {
+    // Try HTTP2 first, then Host header
+    request.uri().authority().map(|x| x.host()).or_else(|| {
+        request
+            .headers()
+            .get(http::header::HOST)
+            .and_then(|x| x.to_str().ok())
+            // Extract host w/o port
+            .and_then(extract_host)
+    })
 }
 
 #[derive(new, Debug)]
@@ -158,5 +182,75 @@ impl<T: AsyncRead + AsyncWrite + Send + Sync + Unpin> AsyncWrite for AsyncCounte
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         pin!(&mut self.inner).poll_flush(cx)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use http::{HeaderValue, Uri, header::HOST};
+
+    use super::*;
+
+    #[test]
+    fn test_extract_host() {
+        assert_eq!(extract_host("foo.bar"), Some("foo.bar"));
+        assert_eq!(extract_host("foo.bar:123"), Some("foo.bar"));
+        assert_eq!(extract_host("foo.bar:"), Some("foo.bar"));
+        assert_eq!(extract_host("foo:123"), Some("foo"));
+
+        assert_eq!(extract_host("127.0.0.1:123"), Some("127.0.0.1"));
+
+        assert_eq!(
+            extract_host("[fe80::b696:91ff:fe84:3ae8]"),
+            Some("[fe80::b696:91ff:fe84:3ae8]")
+        );
+        assert_eq!(
+            extract_host("[fe80::b696:91ff:fe84:3ae8]:123"),
+            Some("[fe80::b696:91ff:fe84:3ae8]")
+        );
+
+        // Unterminated bracket, the only failure case
+        assert_eq!(extract_host("[fe80::b696:91ff:fe84:3ae8:123"), None);
+    }
+
+    #[test]
+    fn test_extract_authority() {
+        // No authority & no host header
+        let mut req = Request::new(());
+        *req.uri_mut() = Uri::builder()
+            .path_and_query("/foo?bar=baz")
+            .build()
+            .unwrap();
+        assert_eq!(extract_authority(&req), None);
+
+        // Authority
+        let mut req = Request::new(());
+        *req.uri_mut() = Uri::builder()
+            .scheme("http")
+            .authority("foo.bar")
+            .path_and_query("/foo?bar=baz")
+            .build()
+            .unwrap();
+        assert_eq!(extract_authority(&req), Some("foo.bar"));
+
+        // Host header
+        let mut req = Request::new(());
+        *req.uri_mut() = Uri::builder()
+            .path_and_query("/foo?bar=baz")
+            .build()
+            .unwrap();
+        (*req.headers_mut()).insert(HOST, HeaderValue::from_static("foo.baz"));
+        assert_eq!(extract_authority(&req), Some("foo.baz"));
+
+        // Both: authority should take precedence (not a real world use case probably)
+        let mut req = Request::new(());
+        *req.uri_mut() = Uri::builder()
+            .scheme("http")
+            .authority("foo.bar")
+            .path_and_query("/foo?bar=baz")
+            .build()
+            .unwrap();
+        (*req.headers_mut()).insert(HOST, HeaderValue::from_static("foo.baz"));
+        assert_eq!(extract_authority(&req), Some("foo.bar"));
     }
 }

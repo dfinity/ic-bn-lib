@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::tasks::Run;
 
-use super::{Error as HttpError, body::buffer_body, calc_headers_size};
+use super::{Error as HttpError, body::buffer_body, calc_headers_size, extract_authority};
 
 #[derive(Debug, Clone, Display, PartialEq, Eq, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
@@ -429,11 +429,8 @@ impl KeyExtractor for KeyExtractorUriRange {
     type Key = [u8; 20];
 
     fn extract<T>(&self, request: &Request<T>) -> Result<Self::Key, Error> {
-        let authority = request
-            .uri()
-            .authority()
+        let authority = extract_authority(request)
             .ok_or_else(|| Error::ExtractKey("no authority found".into()))?
-            .host()
             .as_bytes();
         let paq = request
             .uri()
@@ -464,7 +461,7 @@ mod tests {
         response::IntoResponse,
         routing::{get, post},
     };
-    use http::StatusCode;
+    use http::{HeaderValue, Request, StatusCode, Uri};
     use sha1::Digest;
     use tower::{Service, ServiceExt};
 
@@ -516,13 +513,52 @@ mod tests {
 
     async fn middleware(
         State(cache): State<Arc<Cache<KeyExtractorTest>>>,
-        request: Request,
+        request: Request<Body>,
         next: Next,
     ) -> impl IntoResponse {
         cache
             .process_request(request, next)
             .await
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    }
+
+    #[test]
+    fn test_key_extractor_uri_range() {
+        let x = KeyExtractorUriRange;
+
+        // Baseline
+        let mut req = Request::new("foo");
+        *req.uri_mut() = Uri::from_static("http://foo.bar.baz:80/foo/bar?abc=1");
+        let key1 = x.extract(&req).unwrap();
+
+        // Make sure that changing authority/path/query changes the key
+        let mut req = Request::new("foo");
+        *req.uri_mut() = Uri::from_static("http://foo.bar.baz:80/foo/bar?abc=2");
+        let key2 = x.extract(&req).unwrap();
+        assert_ne!(key1, key2);
+
+        let mut req = Request::new("foo");
+        *req.uri_mut() = Uri::from_static("http://foo.bar.baz:80/foo/ba?abc=1");
+        let key2 = x.extract(&req).unwrap();
+        assert_ne!(key1, key2);
+
+        let mut req = Request::new("foo");
+        *req.uri_mut() = Uri::from_static("http://foo.bar.ba:80/foo/bar?abc=1");
+        let key2 = x.extract(&req).unwrap();
+        assert_ne!(key1, key2);
+
+        // Make sure that changing schema doesn't affect the key
+        let mut req = Request::new("foo");
+        *req.uri_mut() = Uri::from_static("https://foo.bar.baz:80/foo/bar?abc=1");
+        let key2 = x.extract(&req).unwrap();
+        assert_eq!(key1, key2);
+
+        // Make sure that adding Range header changes the key
+        let mut req = Request::new("foo");
+        *req.uri_mut() = Uri::from_static("http://foo.bar.bar:80/foo/bar?abc=1");
+        (*req.headers_mut()).insert(RANGE, HeaderValue::from_static("1000-2000"));
+        let key2 = x.extract(&req).unwrap();
+        assert_ne!(key1, key2);
     }
 
     #[test]
