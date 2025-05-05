@@ -81,7 +81,7 @@ pub const fn http_method(v: &Method) -> &'static str {
 }
 
 /// Attempts to extract "host" from "host:port" format.
-/// Host can be either FQDN of IPv4/IPv6.
+/// Host can be either FQDN or IPv4/IPv6 address.
 pub fn extract_host(host_port: &str) -> Option<&str> {
     // Cover IPv6 case
     if host_port.as_bytes()[0] == b'[' {

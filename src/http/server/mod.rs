@@ -816,18 +816,6 @@ impl Server {
         }
     }
 
-    pub fn new_with_registry(
-        addr: Addr,
-        router: Router,
-        options: Options,
-        registry: &Registry,
-        rustls_cfg: Option<rustls::ServerConfig>,
-    ) -> Self {
-        Self::new(addr, router, options, Metrics::new(registry), rustls_cfg)
-    }
-
-    //pub fn new_simple(addr: SocketAddr, router: Router, )
-
     pub async fn serve(&self, token: CancellationToken) -> Result<(), Error> {
         let listener = Listener::new(self.addr.clone(), self.options.backlog)?;
         self.serve_with_listener(listener, token).await
