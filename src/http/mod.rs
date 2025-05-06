@@ -40,6 +40,8 @@ pub enum Error {
     BodyReadingFailed(String),
     #[error("HTTP request failed: {0}")]
     RequestFailed(#[from] reqwest::Error),
+    #[error("DNS resolving failed: {0}")]
+    DnsError(String),
     #[error("Generic HTTP failure: {0}")]
     HttpError(#[from] http::Error),
     #[error(transparent)]

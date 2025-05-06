@@ -696,6 +696,7 @@ pub struct ServerBuilder {
     addr: Option<Addr>,
     router: Router,
     registry: Registry,
+    metrics: Option<Metrics>,
     options: Options,
     rustls_cfg: Option<rustls::ServerConfig>,
 }
@@ -707,6 +708,7 @@ impl ServerBuilder {
             addr: None,
             router,
             registry: Registry::new(),
+            metrics: None,
             options: Options::default(),
             rustls_cfg: None,
         }
@@ -727,6 +729,13 @@ impl ServerBuilder {
     /// Sets up metrics with provided Registry
     pub fn with_metrics_registry(mut self, registry: &Registry) -> Self {
         self.registry = registry.clone();
+        self
+    }
+
+    /// Sets up metrics with provided Metrics
+    /// Overrides `with_metrics_registry()`
+    pub fn with_metrics(mut self, metrics: Metrics) -> Self {
+        self.metrics = Some(metrics);
         self
     }
 
@@ -756,16 +765,19 @@ impl ServerBuilder {
         Ok(self)
     }
 
+    /// Build the Server
     pub fn build(self) -> Result<Server, Error> {
         let Some(addr) = self.addr else {
             return Err(Error::Generic(anyhow!("Listening address not specified")));
         };
 
+        let metrics = self.metrics.unwrap_or_else(|| Metrics::new(&self.registry));
+
         Ok(Server::new(
             addr,
             self.router,
             self.options,
-            Metrics::new(&self.registry),
+            metrics,
             self.rustls_cfg,
         ))
     }
