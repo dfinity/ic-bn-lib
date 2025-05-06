@@ -21,7 +21,12 @@ use derive_new::new;
 use http::{HeaderMap, Method, Request, Version};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-pub use client::{Client, ReqwestClient, ReqwestClientLeastLoaded, ReqwestClientRoundRobin};
+#[cfg(feature = "clients-hyper")]
+pub use client::clients_hyper::{HyperClient, HyperClientLeastLoaded};
+pub use client::clients_reqwest::{
+    ReqwestClient, ReqwestClientLeastLoaded, ReqwestClientRoundRobin,
+};
+pub use client::{Client, ClientHttp};
 pub use server::{ConnInfo, Server, ServerBuilder};
 
 pub const ALPN_H1: &[u8] = b"http/1.1";
