@@ -699,6 +699,7 @@ mod tests {
 
         // After ttl, request doesn't hit the cache anymore
         sleep(ttl + Duration::from_millis(100)).await;
+        cache.housekeep();
         let req = Request::get("/1").body(Body::from("")).unwrap();
         let result = app.call(req).await.unwrap();
         let cache_status = result.extensions().get::<CacheStatus>().cloned().unwrap();

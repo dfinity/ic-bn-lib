@@ -534,13 +534,6 @@ where
 
 #[cfg(test)]
 mod test {
-    use cloudflare::framework::async_api::Client;
-    use http::Uri;
-    use http_body_util::Empty;
-    use rustls::version::{TLS12, TLS13};
-
-    use crate::{http::dns, tls};
-
     use super::*;
 
     #[test]
