@@ -1,7 +1,10 @@
+use core::task;
 use std::{
     net::{IpAddr, SocketAddr},
+    pin::Pin,
     str::FromStr,
     sync::Arc,
+    task::Poll,
 };
 
 use anyhow::Context;
@@ -9,12 +12,14 @@ use async_trait::async_trait;
 use hickory_proto::rr::RecordType;
 use hickory_resolver::{
     TokioResolver,
-    config::{NameServerConfigGroup, ResolveHosts, ResolverConfig, ResolverOpts},
+    config::{CLOUDFLARE_IPS, NameServerConfigGroup, ResolveHosts, ResolverConfig, ResolverOpts},
     lookup_ip::LookupIpIntoIter,
     name_server::TokioConnectionProvider,
 };
+use hyper_util::client::legacy::connect::dns::Name as HyperName;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use strum_macros::EnumString;
+use tower::Service;
 
 use super::{Error, client::CloneableDnsResolver};
 
@@ -39,12 +44,24 @@ pub struct Options {
     pub cache_size: usize,
 }
 
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            protocol: Protocol::Clear,
+            servers: CLOUDFLARE_IPS.into(),
+            tls_name: "cloudflare-dns.com".into(),
+            cache_size: 1024,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Resolver(Arc<TokioResolver>);
 impl CloneableDnsResolver for Resolver {}
 
-// new() must be called in Tokio context
 impl Resolver {
+    /// Creates a new resolver with given options.
+    /// It must be called in Tokio context.
     pub fn new(o: Options) -> Self {
         let name_servers = match o.protocol {
             Protocol::Clear => NameServerConfigGroup::from_ips_clear(&o.servers, 53, true),
@@ -70,7 +87,13 @@ impl Resolver {
     }
 }
 
-struct SocketAddrs {
+impl Default for Resolver {
+    fn default() -> Self {
+        Self::new(Options::default())
+    }
+}
+
+pub struct SocketAddrs {
     iter: LookupIpIntoIter,
 }
 
@@ -119,5 +142,31 @@ impl Resolves for Resolver {
 
     fn flush_cache(&self) {
         self.0.clear_cache();
+    }
+}
+
+// Implement resolving for Hyper
+impl Service<HyperName> for Resolver {
+    type Response = SocketAddrs;
+    type Error = Error;
+    #[allow(clippy::type_complexity)]
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut task::Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, name: HyperName) -> Self::Future {
+        let resolver = self.0.clone();
+
+        Box::pin(async move {
+            let response = resolver
+                .lookup_ip(name.as_str())
+                .await
+                .map_err(|e| Error::DnsError(e.to_string()))?;
+            let addresses = response.into_iter();
+
+            Ok(SocketAddrs { iter: addresses })
+        })
     }
 }

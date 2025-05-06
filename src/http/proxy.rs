@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use axum::{body::Body, extract::Request, response::Response};
+use bytes::Bytes;
+use http_body_util::Full;
 use url::Url;
 
-use super::{Client, Error, body::SyncBody, headers::strip_connection_headers};
+use super::{Client, Error, body::SyncBody, client::ClientHttp, headers::strip_connection_headers};
 
 /// Proxies provided Axum request to a given URL using Client trait object and returns Axum response
 pub async fn proxy(
@@ -31,6 +33,22 @@ pub async fn proxy(
     let response: http::Response<_> = response.into();
     let (parts, body) = response.into_parts();
 
+    Ok(Response::from_parts(parts, Body::new(body)))
+}
+
+/// Proxies provided request to a given URL using ClientHttp trait object and returns Axum response
+pub async fn proxy_http(
+    mut request: Request<Full<Bytes>>,
+    http_client: &Arc<dyn ClientHttp>,
+) -> Result<Response, Error> {
+    // Strip connection-related headers so that the request fits HTTP/2
+    strip_connection_headers(request.headers_mut());
+
+    // Execute the request
+    let response = http_client.execute(request).await?;
+
+    // Convert the response into Axum one
+    let (parts, body) = response.into_parts();
     Ok(Response::from_parts(parts, Body::new(body)))
 }
 

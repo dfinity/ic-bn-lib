@@ -28,7 +28,7 @@ use prometheus::{
     register_histogram_vec_with_registry, register_int_counter_vec_with_registry,
     register_int_gauge_vec_with_registry,
 };
-use rustls::{CipherSuite, ProtocolVersion, server::ServerConnection};
+use rustls::{CipherSuite, ProtocolVersion, server::ServerConnection, sign::SingleCertAndKey};
 use scopeguard::defer;
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
@@ -45,7 +45,10 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use super::{ALPN_ACME, AsyncCounter, Error, Stats, body::NotifyingBody};
-use crate::tasks::Run;
+use crate::{
+    tasks::Run,
+    tls::{pem_convert_to_rustls, prepare_server_config},
+};
 
 const HANDSHAKE_DURATION_BUCKETS: &[f64] = &[0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6];
 const CONN_DURATION_BUCKETS: &[f64] = &[1.0, 8.0, 32.0, 64.0, 256.0, 512.0, 1024.0];
@@ -173,6 +176,24 @@ pub struct Options {
     pub http2_keepalive_timeout: Duration,
     pub grace_period: Duration,
     pub max_requests_per_conn: Option<u64>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            backlog: 2048,
+            tls_handshake_timeout: Duration::from_secs(15),
+            read_timeout: Some(Duration::from_secs(60)),
+            write_timeout: Some(Duration::from_secs(60)),
+            idle_timeout: Duration::from_secs(60),
+            http1_header_read_timeout: Duration::from_secs(10),
+            http2_max_streams: 128,
+            http2_keepalive_interval: Duration::from_secs(20),
+            http2_keepalive_timeout: Duration::from_secs(10),
+            grace_period: Duration::from_secs(60),
+            max_requests_per_conn: None,
+        }
+    }
 }
 
 // TLS information about the connection
@@ -671,6 +692,97 @@ impl Conn {
     }
 }
 
+pub struct ServerBuilder {
+    addr: Option<Addr>,
+    router: Router,
+    registry: Registry,
+    metrics: Option<Metrics>,
+    options: Options,
+    rustls_cfg: Option<rustls::ServerConfig>,
+}
+
+impl ServerBuilder {
+    /// Creates a builder with a given router & defaults
+    pub fn new(router: Router) -> Self {
+        Self {
+            addr: None,
+            router,
+            registry: Registry::new(),
+            metrics: None,
+            options: Options::default(),
+            rustls_cfg: None,
+        }
+    }
+
+    /// Listens on the given TCP socket
+    pub fn listen_tcp(mut self, socket: SocketAddr) -> Self {
+        self.addr = Some(Addr::Tcp(socket));
+        self
+    }
+
+    /// Listens on the given Unix socket
+    pub fn listen_unix(mut self, path: PathBuf) -> Self {
+        self.addr = Some(Addr::Unix(path));
+        self
+    }
+
+    /// Sets up metrics with provided Registry
+    pub fn with_metrics_registry(mut self, registry: &Registry) -> Self {
+        self.registry = registry.clone();
+        self
+    }
+
+    /// Sets up metrics with provided Metrics
+    /// Overrides `with_metrics_registry()`
+    pub fn with_metrics(mut self, metrics: Metrics) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    /// Sets up TLS with provided ServerConfig
+    pub fn with_rustls_config(mut self, rustls_cfg: rustls::ServerConfig) -> Self {
+        self.rustls_cfg = Some(rustls_cfg);
+        self
+    }
+
+    /// Sets up with provided Options
+    pub const fn with_options(mut self, options: Options) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// Sets up TLS with a single certificate.
+    /// If metrics are needed - provide registry using `with_metrics_registry` before calling this method.
+    pub fn with_rustls_single_cert(mut self, cert: PathBuf, key: PathBuf) -> Result<Self, Error> {
+        let cert = std::fs::read(cert).context("unable to read cert")?;
+        let key = std::fs::read(key).context("unable to read key")?;
+        let cert = pem_convert_to_rustls(&key, &cert).context("unable to parse cert+key pair")?;
+        let resolver = SingleCertAndKey::from(cert);
+        let tls_opts = crate::tls::Options::default();
+        let rustls_cfg = prepare_server_config(tls_opts, Arc::new(resolver), &self.registry);
+
+        self.rustls_cfg = Some(rustls_cfg);
+        Ok(self)
+    }
+
+    /// Build the Server
+    pub fn build(self) -> Result<Server, Error> {
+        let Some(addr) = self.addr else {
+            return Err(Error::Generic(anyhow!("Listening address not specified")));
+        };
+
+        let metrics = self.metrics.unwrap_or_else(|| Metrics::new(&self.registry));
+
+        Ok(Server::new(
+            addr,
+            self.router,
+            self.options,
+            metrics,
+            self.rustls_cfg,
+        ))
+    }
+}
+
 // Listens for new connections on addr with an optional TLS and serves provided Router
 pub struct Server {
     addr: Addr,
@@ -714,16 +826,6 @@ impl Server {
             builder,
             rustls_cfg: rustls_cfg.map(Arc::new),
         }
-    }
-
-    pub fn new_with_registry(
-        addr: Addr,
-        router: Router,
-        options: Options,
-        registry: &Registry,
-        rustls_cfg: Option<rustls::ServerConfig>,
-    ) -> Self {
-        Self::new(addr, router, options, Metrics::new(registry), rustls_cfg)
     }
 
     pub async fn serve(&self, token: CancellationToken) -> Result<(), Error> {
