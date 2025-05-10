@@ -23,7 +23,10 @@ use crate::{
     tls::{pem_convert_to_rustls, sni_matches},
 };
 
-use super::{Acme, TokenManager, Validity};
+use super::{
+    TokenManager,
+    acme::{Acme, Validity},
+};
 
 const ACME_RECORD: &str = "_acme-challenge";
 // 60s is the lowest possible Cloudflare TTL
