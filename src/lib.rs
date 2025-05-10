@@ -5,6 +5,7 @@ pub mod http;
 pub mod tasks;
 pub mod tls;
 pub mod types;
+#[cfg(feature = "vector")]
 pub mod vector;
 
 /// Generic error

@@ -1,7 +1,8 @@
+use std::collections::BTreeMap;
+
 use anyhow::Context;
 use bytes::BytesMut;
 use prost::Message;
-use std::collections::BTreeMap;
 use vrl::value::{ObjectMap, Value};
 
 #[allow(warnings, clippy::all, clippy::pedantic)]
