@@ -318,6 +318,7 @@ impl<K: KeyExtractor> CacheBuilder<K> {
         self
     }
 
+    /// Try to build the cache from this builder
     pub fn build(self) -> Result<Cache<K>, Error> {
         Cache::new(self.opts, self.key_extractor, &self.registry)
     }
@@ -387,14 +388,21 @@ impl<K: KeyExtractor + 'static> Cache<K> {
         Some(Response::from_parts(parts, Body::from(body)))
     }
 
-    pub fn insert(&self, key: K::Key, ttl: Duration, delta: Duration, response: Response<Bytes>) {
+    pub fn insert(
+        &self,
+        key: K::Key,
+        now: Instant,
+        ttl: Duration,
+        delta: Duration,
+        response: Response<Bytes>,
+    ) {
         self.store.insert(
             key,
             Arc::new(Entry {
                 response,
                 delta: delta.as_secs_f64(),
                 ttl,
-                expires: Instant::now() + ttl,
+                expires: now + ttl,
             }),
         );
     }
@@ -482,7 +490,7 @@ impl<K: KeyExtractor + 'static> Cache<K> {
             // If the body was fetched - cache it
             ResponseType::Fetched(v, ttl) => {
                 let delta = now.elapsed();
-                self.insert(key, ttl, delta, v.clone());
+                self.insert(key, now + delta, ttl, delta, v.clone());
 
                 let (mut parts, body) = v.into_parts();
                 parts.headers.insert(X_CACHE_TTL, ttl.as_secs().into());
@@ -755,6 +763,7 @@ mod tests {
 
         assert_eq!(infer_ttl(&req), None);
 
+        // Don't cache
         req.headers_mut()
             .insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
         assert_eq!(infer_ttl(&req), Some(Duration::ZERO));
@@ -763,12 +772,20 @@ mod tests {
             .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
         assert_eq!(infer_ttl(&req), Some(Duration::ZERO));
 
+        // Order matters
         req.headers_mut().insert(
             CACHE_CONTROL,
-            HeaderValue::from_static("no-store, no-cache, foo"),
+            HeaderValue::from_static("no-store, no-cache, max-age=1"),
         );
         assert_eq!(infer_ttl(&req), Some(Duration::ZERO));
 
+        req.headers_mut().insert(
+            CACHE_CONTROL,
+            HeaderValue::from_static("max-age=1, no-store, no-cache"),
+        );
+        assert_eq!(infer_ttl(&req), Some(Duration::from_secs(1)));
+
+        // Max-age
         req.headers_mut()
             .insert(CACHE_CONTROL, HeaderValue::from_static("max-age=86400"));
         assert_eq!(infer_ttl(&req), Some(Duration::from_secs(86400)));
@@ -785,10 +802,12 @@ mod tests {
             .insert(CACHE_CONTROL, HeaderValue::from_static("max-age=-1"));
         assert_eq!(infer_ttl(&req), None);
 
+        // Empty
         req.headers_mut()
             .insert(CACHE_CONTROL, HeaderValue::from_static(""));
         assert_eq!(infer_ttl(&req), None);
 
+        // Broken
         req.headers_mut()
             .insert(CACHE_CONTROL, HeaderValue::from_static("foobar, "));
         assert_eq!(infer_ttl(&req), None);
