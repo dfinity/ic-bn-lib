@@ -23,6 +23,7 @@ pub const X_IC_ERROR_CAUSE: HeaderName = HeaderName::from_static("x-ic-error-cau
 pub const X_IC_REQUEST_TYPE: HeaderName = HeaderName::from_static("x-ic-request-type");
 pub const X_IC_CANISTER_ID: HeaderName = HeaderName::from_static("x-ic-canister-id");
 pub const X_IC_COUNTRY_CODE: HeaderName = HeaderName::from_static("x-ic-country-code");
+pub const X_CACHE_TTL: HeaderName = HeaderName::from_static("x-cache-ttl");
 pub const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 pub const X_REQUESTED_WITH: HeaderName = HeaderName::from_static("x-requested-with");
 pub const X_REAL_IP: HeaderName = HeaderName::from_static("x-real-ip");
