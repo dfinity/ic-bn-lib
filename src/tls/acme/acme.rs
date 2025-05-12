@@ -15,11 +15,8 @@ use tokio::fs;
 use tracing::{debug, info};
 use x509_parser::prelude::*;
 
-use crate::tls::extract_sans;
-
-pub use instant_acme;
-
 use super::{AcmeOptions, TokenManager};
+use crate::tls::extract_sans;
 
 const FILE_CERT: &str = "cert.pem";
 const FILE_KEY: &str = "cert.key";

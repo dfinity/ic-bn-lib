@@ -12,6 +12,8 @@ use async_trait::async_trait;
 use derive_new::new;
 use strum_macros::{Display, EnumString};
 
+pub use instant_acme;
+
 #[derive(Clone, Display, EnumString, PartialEq, Eq)]
 #[strum(serialize_all = "snake_case")]
 pub enum Challenge {
