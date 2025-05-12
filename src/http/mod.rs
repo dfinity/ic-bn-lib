@@ -90,6 +90,10 @@ pub const fn http_method(v: &Method) -> &'static str {
 /// Attempts to extract "host" from "host:port" format.
 /// Host can be either FQDN or IPv4/IPv6 address.
 pub fn extract_host(host_port: &str) -> Option<&str> {
+    if host_port.is_empty() {
+        return None;
+    }
+
     // Cover IPv6 case
     if host_port.as_bytes()[0] == b'[' {
         host_port.find(']').map(|i| &host_port[0..=i])
@@ -216,8 +220,10 @@ mod test {
             Some("[fe80::b696:91ff:fe84:3ae8]")
         );
 
-        // Unterminated bracket, the only failure case
+        // Unterminated bracket
         assert_eq!(extract_host("[fe80::b696:91ff:fe84:3ae8:123"), None);
+        // Empty
+        assert_eq!(extract_host(""), None);
     }
 
     #[test]
