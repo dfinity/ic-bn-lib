@@ -198,7 +198,9 @@ impl<T: AsyncRead + AsyncWrite + Send + Sync + Unpin> AsyncWrite for AsyncCounte
 
 #[cfg(test)]
 mod test {
-    use http::{HeaderValue, Uri, header::HOST};
+    use http::{Uri, header::HOST};
+
+    use crate::hval;
 
     use super::*;
 
@@ -252,7 +254,7 @@ mod test {
             .path_and_query("/foo?bar=baz")
             .build()
             .unwrap();
-        (*req.headers_mut()).insert(HOST, HeaderValue::from_static("foo.baz"));
+        (*req.headers_mut()).insert(HOST, hval!("foo.baz"));
         assert_eq!(extract_authority(&req), Some("foo.baz"));
 
         // Both: authority should take precedence (not a real world use case probably)
@@ -263,7 +265,7 @@ mod test {
             .path_and_query("/foo?bar=baz")
             .build()
             .unwrap();
-        (*req.headers_mut()).insert(HOST, HeaderValue::from_static("foo.baz"));
+        (*req.headers_mut()).insert(HOST, hval!("foo.baz"));
         assert_eq!(extract_authority(&req), Some("foo.bar"));
     }
 }

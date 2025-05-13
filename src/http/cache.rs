@@ -647,6 +647,8 @@ impl KeyExtractor for KeyExtractorUriRange {
 
 #[cfg(test)]
 mod tests {
+    use crate::hval;
+
     use super::*;
 
     use axum::{
@@ -657,7 +659,7 @@ mod tests {
         response::IntoResponse,
         routing::{get, post},
     };
-    use http::{HeaderValue, Request, Response, StatusCode, Uri};
+    use http::{Request, Response, StatusCode, Uri};
     use sha1::Digest;
     use tower::{Service, ServiceExt};
 
@@ -768,7 +770,7 @@ mod tests {
         // Make sure that adding Range header changes the key
         let mut req = Request::new("foo");
         *req.uri_mut() = Uri::from_static("http://foo.bar.bar:80/foo/bar?abc=1");
-        (*req.headers_mut()).insert(RANGE, HeaderValue::from_static("1000-2000"));
+        (*req.headers_mut()).insert(RANGE, hval!("1000-2000"));
         let key2 = x.extract(&req).unwrap();
         assert_ne!(key1, key2);
     }
@@ -780,58 +782,47 @@ mod tests {
         assert_eq!(infer_ttl(&req), None);
 
         // Don't cache
-        req.headers_mut()
-            .insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+        req.headers_mut().insert(CACHE_CONTROL, hval!("no-cache"));
+        assert_eq!(infer_ttl(&req), Some(Duration::ZERO));
+
+        req.headers_mut().insert(CACHE_CONTROL, hval!("no-store"));
         assert_eq!(infer_ttl(&req), Some(Duration::ZERO));
 
         req.headers_mut()
-            .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
-        assert_eq!(infer_ttl(&req), Some(Duration::ZERO));
-
-        req.headers_mut().insert(
-            CACHE_CONTROL,
-            HeaderValue::from_static("no-store, no-cache"),
-        );
+            .insert(CACHE_CONTROL, hval!("no-store, no-cache"));
         assert_eq!(infer_ttl(&req), Some(Duration::ZERO));
 
         // Order matters
-        req.headers_mut().insert(
-            CACHE_CONTROL,
-            HeaderValue::from_static("no-store, no-cache, max-age=1"),
-        );
+        req.headers_mut()
+            .insert(CACHE_CONTROL, hval!("no-store, no-cache, max-age=1"));
         assert_eq!(infer_ttl(&req), Some(Duration::ZERO));
 
-        req.headers_mut().insert(
-            CACHE_CONTROL,
-            HeaderValue::from_static("max-age=1, no-store, no-cache"),
-        );
+        req.headers_mut()
+            .insert(CACHE_CONTROL, hval!("max-age=1, no-store, no-cache"));
         assert_eq!(infer_ttl(&req), Some(Duration::from_secs(1)));
 
         // Max-age
         req.headers_mut()
-            .insert(CACHE_CONTROL, HeaderValue::from_static("max-age=86400"));
+            .insert(CACHE_CONTROL, hval!("max-age=86400"));
         assert_eq!(infer_ttl(&req), Some(Duration::from_secs(86400)));
 
         req.headers_mut()
-            .insert(CACHE_CONTROL, HeaderValue::from_static("max-age=foo"));
+            .insert(CACHE_CONTROL, hval!("max-age=foo"));
         assert_eq!(infer_ttl(&req), None);
 
-        req.headers_mut()
-            .insert(CACHE_CONTROL, HeaderValue::from_static("max-age="));
+        req.headers_mut().insert(CACHE_CONTROL, hval!("max-age="));
         assert_eq!(infer_ttl(&req), None);
 
-        req.headers_mut()
-            .insert(CACHE_CONTROL, HeaderValue::from_static("max-age=-1"));
+        req.headers_mut().insert(CACHE_CONTROL, hval!("max-age=-1"));
         assert_eq!(infer_ttl(&req), None);
 
         // Empty
-        req.headers_mut()
-            .insert(CACHE_CONTROL, HeaderValue::from_static(""));
+        req.headers_mut().insert(CACHE_CONTROL, hval!(""));
         assert_eq!(infer_ttl(&req), None);
 
         // Broken
         req.headers_mut()
-            .insert(CACHE_CONTROL, HeaderValue::from_static(", =foobar, "));
+            .insert(CACHE_CONTROL, hval!(", =foobar, "));
         assert_eq!(infer_ttl(&req), None);
     }
 

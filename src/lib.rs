@@ -34,3 +34,8 @@ pub fn parse_size_decimal(s: &str) -> Result<u64, parse_size::Error> {
 pub fn parse_size_decimal_usize(s: &str) -> Result<usize, parse_size::Error> {
     parse_size(s).map(|x| x as usize)
 }
+
+#[macro_export]
+macro_rules! principal {
+    ($id:expr) => {{ candid::Principal::from_text($id).unwrap() }};
+}
