@@ -221,8 +221,14 @@ impl Default for Opts {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum CacheControl {
+    NoCache,
+    MaxAge(Duration),
+}
+
 /// Tries to infer the caching TTL from the response headers
-fn infer_ttl<T>(req: &Response<T>) -> Option<Duration> {
+fn infer_ttl<T>(req: &Response<T>) -> Option<CacheControl> {
     // Extract the Cache-Control header & try to parse it as a string
     let hdr = req
         .headers()
@@ -237,10 +243,10 @@ fn infer_ttl<T>(req: &Response<T>) -> Option<Duration> {
         };
 
         if ["no-cache", "no-store"].contains(&k) {
-            Some(Duration::ZERO)
+            Some(CacheControl::NoCache)
         } else if k == "max-age" {
             v.and_then(|x| x.parse::<u64>().ok())
-                .map(Duration::from_secs)
+                .map(|x| CacheControl::MaxAge(Duration::from_secs(x)))
         } else {
             None
         }
@@ -555,15 +561,21 @@ impl<K: KeyExtractor + 'static> Cache<K> {
         let ttl = if self.opts.obey_cache_control {
             let ttl = infer_ttl(&response);
 
-            // Do not cache if we're asked not to
-            if ttl == Some(Duration::ZERO) {
-                return Ok(ResponseType::Streamed(
-                    response,
-                    CacheBypassReason::CacheControl,
-                ));
-            }
+            match ttl {
+                // Do not cache if we're asked not to
+                Some(CacheControl::NoCache) => {
+                    return Ok(ResponseType::Streamed(
+                        response,
+                        CacheBypassReason::CacheControl,
+                    ));
+                }
 
-            ttl.unwrap_or(self.opts.ttl).min(self.opts.max_ttl)
+                // Use TTL from max-age capping it to max_ttl
+                Some(CacheControl::MaxAge(v)) => v.min(self.opts.max_ttl),
+
+                // Otherwise use default
+                None => self.opts.ttl,
+            }
         } else {
             self.opts.ttl
         };
@@ -783,28 +795,34 @@ mod tests {
 
         // Don't cache
         req.headers_mut().insert(CACHE_CONTROL, hval!("no-cache"));
-        assert_eq!(infer_ttl(&req), Some(Duration::ZERO));
+        assert_eq!(infer_ttl(&req), Some(CacheControl::NoCache));
 
         req.headers_mut().insert(CACHE_CONTROL, hval!("no-store"));
-        assert_eq!(infer_ttl(&req), Some(Duration::ZERO));
+        assert_eq!(infer_ttl(&req), Some(CacheControl::NoCache));
 
         req.headers_mut()
             .insert(CACHE_CONTROL, hval!("no-store, no-cache"));
-        assert_eq!(infer_ttl(&req), Some(Duration::ZERO));
+        assert_eq!(infer_ttl(&req), Some(CacheControl::NoCache));
 
         // Order matters
         req.headers_mut()
             .insert(CACHE_CONTROL, hval!("no-store, no-cache, max-age=1"));
-        assert_eq!(infer_ttl(&req), Some(Duration::ZERO));
+        assert_eq!(infer_ttl(&req), Some(CacheControl::NoCache));
 
         req.headers_mut()
             .insert(CACHE_CONTROL, hval!("max-age=1, no-store, no-cache"));
-        assert_eq!(infer_ttl(&req), Some(Duration::from_secs(1)));
+        assert_eq!(
+            infer_ttl(&req),
+            Some(CacheControl::MaxAge(Duration::from_secs(1)))
+        );
 
         // Max-age
         req.headers_mut()
             .insert(CACHE_CONTROL, hval!("max-age=86400"));
-        assert_eq!(infer_ttl(&req), Some(Duration::from_secs(86400)));
+        assert_eq!(
+            infer_ttl(&req),
+            Some(CacheControl::MaxAge(Duration::from_secs(86400)))
+        );
 
         req.headers_mut()
             .insert(CACHE_CONTROL, hval!("max-age=foo"));
