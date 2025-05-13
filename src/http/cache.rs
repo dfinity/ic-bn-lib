@@ -278,7 +278,7 @@ impl<K: KeyExtractor> CacheBuilder<K> {
 
     /// Sets the maximum cache entry TTL that can be overriden by `Cache-Control` header. Default 1 day.
     pub const fn max_ttl(mut self, v: Duration) -> Self {
-        self.opts.ttl = v;
+        self.opts.max_ttl = v;
         self
     }
 
@@ -772,6 +772,12 @@ mod tests {
             .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
         assert_eq!(infer_ttl(&req), Some(Duration::ZERO));
 
+        req.headers_mut().insert(
+            CACHE_CONTROL,
+            HeaderValue::from_static("no-store, no-cache"),
+        );
+        assert_eq!(infer_ttl(&req), Some(Duration::ZERO));
+
         // Order matters
         req.headers_mut().insert(
             CACHE_CONTROL,
@@ -809,20 +815,22 @@ mod tests {
 
         // Broken
         req.headers_mut()
-            .insert(CACHE_CONTROL, HeaderValue::from_static("foobar, "));
+            .insert(CACHE_CONTROL, HeaderValue::from_static(", =foobar, "));
         assert_eq!(infer_ttl(&req), None);
     }
 
     #[test]
     fn test_cache_creation_errors() {
-        let mut opts = Opts::default();
-        opts.max_item_size = opts.cache_size as usize;
-        let cache = Cache::new(opts, KeyExtractorTest, &Registry::default());
+        let cache = CacheBuilder::new(KeyExtractorTest)
+            .cache_size(1)
+            .max_item_size(2)
+            .build();
         assert!(cache.is_err());
 
-        let mut opts = Opts::default();
-        opts.ttl = opts.max_ttl + Duration::from_secs(1);
-        let cache = Cache::new(opts, KeyExtractorTest, &Registry::default());
+        let cache = CacheBuilder::new(KeyExtractorTest)
+            .ttl(Duration::from_secs(2))
+            .max_ttl(Duration::from_secs(1))
+            .build();
         assert!(cache.is_err());
     }
 
