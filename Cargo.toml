@@ -8,10 +8,10 @@ repository = "https://github.com/dfinity/ic-bn-lib"
 readme = "README.md"
 
 [features]
-clients-hyper = ["dep:hyper-rustls"]
-acme_dns = ["dep:instant-acme", "dep:cloudflare", "dep:backoff", "dep:rcgen"]
-acme_alpn = ["dep:rustls-acme"]
-vector = ["dep:vrl", "dep:prost", "dep:prost-types"]
+clients-hyper = ["hyper-rustls"]
+acme_dns = ["instant-acme", "cloudflare", "backoff", "rcgen"]
+acme_alpn = ["rustls-acme"]
+vector = ["vrl", "prost", "prost-types"]
 
 [dependencies]
 ahash = "0.8.11"
