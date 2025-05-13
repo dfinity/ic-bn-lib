@@ -92,7 +92,6 @@ pub struct Entry {
     /// Used for x-fetch algorithm.
     delta: f64,
     expires: Instant,
-    ttl: Duration,
 }
 
 impl Entry {
@@ -108,6 +107,7 @@ impl Entry {
         let rnd = rand::random::<f64>();
         let xfetch = self.delta * beta * rnd.ln() * -1.0;
         let ttl_left = (self.expires - now).as_secs_f64();
+
         xfetch > ttl_left
     }
 }
@@ -255,9 +255,9 @@ impl<K: KeyExtractor> Expiry<K::Key, Arc<Entry>> for Expirer<K> {
         &self,
         _key: &K::Key,
         value: &Arc<Entry>,
-        _created_at: Instant,
+        created_at: Instant,
     ) -> Option<Duration> {
-        Some(value.ttl)
+        Some(value.expires - created_at)
     }
 }
 
@@ -418,7 +418,6 @@ impl<K: KeyExtractor + 'static> Cache<K> {
             Arc::new(Entry {
                 response,
                 delta: delta.as_secs_f64(),
-                ttl,
                 expires: now + ttl,
             }),
         );
@@ -1276,7 +1275,6 @@ mod tests {
         let entry = Entry {
             response: Response::builder().body(Bytes::new()).unwrap(),
             delta: 0.5,
-            ttl: Duration::from_secs(60),
             expires: now + Duration::from_secs(60),
         };
 
