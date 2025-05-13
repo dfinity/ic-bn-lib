@@ -21,8 +21,10 @@ use moka::{
     sync::{Cache as MokaCache, CacheBuilder as MokaCacheBuilder},
 };
 use prometheus::{
-    CounterVec, HistogramVec, IntGauge, Registry, register_counter_vec_with_registry,
-    register_histogram_vec_with_registry, register_int_gauge_with_registry,
+    Counter, CounterVec, Histogram, HistogramVec, IntGauge, Registry,
+    register_counter_vec_with_registry, register_counter_with_registry,
+    register_histogram_vec_with_registry, register_histogram_with_registry,
+    register_int_gauge_with_registry,
 };
 use sha1::{Digest, Sha1};
 use strum_macros::{Display, IntoStaticStr};
@@ -124,6 +126,8 @@ pub struct Metrics {
     lock_await: HistogramVec,
     requests_count: CounterVec,
     requests_duration: HistogramVec,
+    ttl: Histogram,
+    x_fetch: Counter,
     memory: IntGauge,
     entries: IntGauge,
 }
@@ -153,6 +157,21 @@ impl Metrics {
                 "cache_requests_duration",
                 "Time it took to execute the request",
                 lbls,
+                registry,
+            )
+            .unwrap(),
+
+            ttl: register_histogram_with_registry!(
+                "cache_ttl",
+                "TTL that was set when storing the response",
+                vec![1.0, 10.0, 100.0, 1000.0, 10000.0, 86400.0],
+                registry,
+            )
+            .unwrap(),
+
+            x_fetch: register_counter_with_registry!(
+                "cache_xfetch_count",
+                "Number of requests that x-fetch refreshed",
                 registry,
             )
             .unwrap(),
@@ -371,16 +390,12 @@ impl<K: KeyExtractor + 'static> Cache<K> {
         })
     }
 
-    pub fn get_lock(&self, key: &K::Key) -> Arc<Mutex<()>> {
-        self.locks
-            .get_with(key.clone(), || Arc::new(Mutex::new(())))
-    }
-
-    pub fn get(&self, key: &K::Key, beta: f64) -> Option<Response> {
+    pub fn get(&self, key: &K::Key, now: Instant, beta: f64) -> Option<Response> {
         let val = self.store.get(key)?;
 
         // Run x-fetch if configured and simulate the cache miss if we need to refresh the entry
-        if val.need_to_refresh(Instant::now(), beta) {
+        if val.need_to_refresh(now, beta) {
+            self.metrics.x_fetch.inc();
             return None;
         }
 
@@ -396,6 +411,8 @@ impl<K: KeyExtractor + 'static> Cache<K> {
         delta: Duration,
         response: Response<Bytes>,
     ) {
+        self.metrics.ttl.observe(ttl.as_secs_f64());
+
         self.store.insert(
             key,
             Arc::new(Entry {
@@ -409,7 +426,7 @@ impl<K: KeyExtractor + 'static> Cache<K> {
 
     pub async fn process_request(&self, request: Request, next: Next) -> Result<Response, Error> {
         let now = Instant::now();
-        let (cache_status, response) = self.process_inner(request, next).await?;
+        let (cache_status, response) = self.process_inner(now, request, next).await?;
 
         // Record metrics
         let cache_bypass_reason_str: &'static str = match &cache_status {
@@ -431,6 +448,7 @@ impl<K: KeyExtractor + 'static> Cache<K> {
 
     async fn process_inner(
         &self,
+        now: Instant,
         request: Request,
         next: Next,
     ) -> Result<(CacheStatus, Response), Error> {
@@ -450,15 +468,14 @@ impl<K: KeyExtractor + 'static> Cache<K> {
             ));
         };
 
-        if let Some(v) = self.get(&key, self.opts.xfetch_beta) {
+        if let Some(v) = self.get(&key, now, self.opts.xfetch_beta) {
             return Ok((CacheStatus::Hit, v));
         }
 
         // Get synchronization lock to handle parallel requests.
-        let lock = self.get_lock(&key);
-
-        // Record the time spent waiting for the lock.
-        let start = Instant::now();
+        let lock = self
+            .locks
+            .get_with_by_ref(&key, || Arc::new(Mutex::new(())));
 
         let mut lock_obtained = false;
         select! {
@@ -476,11 +493,11 @@ impl<K: KeyExtractor + 'static> Cache<K> {
         self.metrics
             .lock_await
             .with_label_values(&[if lock_obtained { "yes" } else { "no" }])
-            .observe(start.elapsed().as_secs_f64());
+            .observe(now.elapsed().as_secs_f64());
 
         // Check again the cache in case some other request filled it
         // while we were waiting for the lock
-        if let Some(v) = self.get(&key, 0.0) {
+        if let Some(v) = self.get(&key, now, 0.0) {
             return Ok((CacheStatus::Hit, v));
         }
 
