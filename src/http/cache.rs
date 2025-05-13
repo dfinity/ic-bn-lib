@@ -1,6 +1,7 @@
 use std::{
     fmt::Debug,
     hash::Hash,
+    marker::PhantomData,
     mem::size_of,
     sync::Arc,
     time::{Duration, Instant},
@@ -10,19 +11,27 @@ use ahash::RandomState;
 use async_trait::async_trait;
 use axum::{body::Body, extract::Request, middleware::Next, response::Response};
 use bytes::Bytes;
-use http::{Method, header::RANGE};
+use http::{
+    Method,
+    header::{CACHE_CONTROL, RANGE},
+};
 use http_body::Body as _;
-use moka::sync::{Cache as MokaCache, CacheBuilder as MokaCacheBuilder};
+use moka::{
+    Expiry,
+    sync::{Cache as MokaCache, CacheBuilder as MokaCacheBuilder},
+};
 use prometheus::{
-    CounterVec, HistogramVec, IntGauge, Registry, register_counter_vec_with_registry,
-    register_histogram_vec_with_registry, register_int_gauge_with_registry,
+    Counter, CounterVec, Histogram, HistogramVec, IntGauge, Registry,
+    register_counter_vec_with_registry, register_counter_with_registry,
+    register_histogram_vec_with_registry, register_histogram_with_registry,
+    register_int_gauge_with_registry,
 };
 use sha1::{Digest, Sha1};
 use strum_macros::{Display, IntoStaticStr};
 use tokio::{select, sync::Mutex, time::sleep};
 use tokio_util::sync::CancellationToken;
 
-use crate::tasks::Run;
+use crate::{http::headers::X_CACHE_TTL, tasks::Run};
 
 use super::{Error as HttpError, body::buffer_body, calc_headers_size, extract_authority};
 
@@ -34,6 +43,7 @@ pub enum CacheBypassReason {
     BodyTooBig,
     HTTPError,
     UnableToExtractKey,
+    CacheControl,
 }
 
 #[derive(Debug, Clone, Display, PartialEq, Eq, Default, IntoStaticStr)]
@@ -71,7 +81,7 @@ pub enum Error {
 }
 
 enum ResponseType {
-    Fetched(Response<Bytes>),
+    Fetched(Response<Bytes>, Duration),
     Streamed(Response, CacheBypassReason),
 }
 
@@ -97,6 +107,7 @@ impl Entry {
         let rnd = rand::random::<f64>();
         let xfetch = self.delta * beta * rnd.ln() * -1.0;
         let ttl_left = (self.expires - now).as_secs_f64();
+
         xfetch > ttl_left
     }
 }
@@ -115,6 +126,8 @@ pub struct Metrics {
     lock_await: HistogramVec,
     requests_count: CounterVec,
     requests_duration: HistogramVec,
+    ttl: Histogram,
+    x_fetch: Counter,
     memory: IntGauge,
     entries: IntGauge,
 }
@@ -148,6 +161,21 @@ impl Metrics {
             )
             .unwrap(),
 
+            ttl: register_histogram_with_registry!(
+                "cache_ttl",
+                "TTL that was set when storing the response",
+                vec![1.0, 10.0, 100.0, 1000.0, 10000.0, 86400.0],
+                registry,
+            )
+            .unwrap(),
+
+            x_fetch: register_counter_with_registry!(
+                "cache_xfetch_count",
+                "Number of requests that x-fetch refreshed",
+                registry,
+            )
+            .unwrap(),
+
             memory: register_int_gauge_with_registry!(
                 "cache_memory",
                 "Memory usage by the cache in bytes",
@@ -169,10 +197,156 @@ pub struct Opts {
     pub cache_size: u64,
     pub max_item_size: usize,
     pub ttl: Duration,
+    pub max_ttl: Duration,
+    pub obey_cache_control: bool,
     pub lock_timeout: Duration,
     pub body_timeout: Duration,
     pub xfetch_beta: f64,
     pub methods: Vec<Method>,
+}
+
+impl Default for Opts {
+    fn default() -> Self {
+        Self {
+            cache_size: 128 * 1024 * 1024,
+            max_item_size: 16 * 1024 * 1024,
+            ttl: Duration::from_secs(10),
+            max_ttl: Duration::from_secs(86400),
+            obey_cache_control: false,
+            lock_timeout: Duration::from_secs(5),
+            body_timeout: Duration::from_secs(60),
+            xfetch_beta: 0.0,
+            methods: vec![Method::GET],
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CacheControl {
+    NoCache,
+    MaxAge(Duration),
+}
+
+/// Tries to infer the caching TTL from the response headers
+fn infer_ttl<T>(req: &Response<T>) -> Option<CacheControl> {
+    // Extract the Cache-Control header & try to parse it as a string
+    let hdr = req
+        .headers()
+        .get(CACHE_CONTROL)
+        .and_then(|x| x.to_str().ok())?;
+
+    // Iterate over the key-value pairs (or just keys)
+    hdr.split(',').find_map(|x| {
+        let (k, v) = {
+            let mut split = x.split('=').map(|s| s.trim());
+            (split.next().unwrap(), split.next())
+        };
+
+        if ["no-cache", "no-store"].contains(&k) {
+            Some(CacheControl::NoCache)
+        } else if k == "max-age" {
+            v.and_then(|x| x.parse::<u64>().ok())
+                .map(|x| CacheControl::MaxAge(Duration::from_secs(x)))
+        } else {
+            None
+        }
+    })
+}
+
+/// Extracts TTL from the Entry
+struct Expirer<K: KeyExtractor>(PhantomData<K>);
+
+impl<K: KeyExtractor> Expiry<K::Key, Arc<Entry>> for Expirer<K> {
+    fn expire_after_create(
+        &self,
+        _key: &K::Key,
+        value: &Arc<Entry>,
+        created_at: Instant,
+    ) -> Option<Duration> {
+        Some(value.expires - created_at)
+    }
+}
+
+/// Builds a cache using some overridable defaults
+pub struct CacheBuilder<K: KeyExtractor> {
+    key_extractor: K,
+    opts: Opts,
+    registry: Registry,
+}
+
+impl<K: KeyExtractor> CacheBuilder<K> {
+    pub fn new(key_extractor: K) -> Self {
+        Self {
+            key_extractor,
+            opts: Opts::default(),
+            registry: Registry::new(),
+        }
+    }
+
+    /// Sets the cache size. Default 128MB.
+    pub const fn cache_size(mut self, v: u64) -> Self {
+        self.opts.cache_size = v;
+        self
+    }
+
+    /// Sets the maximum entry size. Default 16MB.
+    pub const fn max_item_size(mut self, v: usize) -> Self {
+        self.opts.max_item_size = v;
+        self
+    }
+
+    /// Sets the default cache entry TTL. Default 10 sec.
+    pub const fn ttl(mut self, v: Duration) -> Self {
+        self.opts.ttl = v;
+        self
+    }
+
+    /// Sets the maximum cache entry TTL that can be overriden by `Cache-Control` header. Default 1 day.
+    pub const fn max_ttl(mut self, v: Duration) -> Self {
+        self.opts.max_ttl = v;
+        self
+    }
+
+    /// Sets the cache lock timeout. Default 5 sec.
+    pub const fn lock_timeout(mut self, v: Duration) -> Self {
+        self.opts.lock_timeout = v;
+        self
+    }
+
+    /// Sets the body reading timeout. Default 1 min.
+    pub const fn body_timeout(mut self, v: Duration) -> Self {
+        self.opts.body_timeout = v;
+        self
+    }
+
+    /// Sets the beta term of X-Fetch algorithm. Default 0.0
+    pub const fn xfetch_beta(mut self, v: f64) -> Self {
+        self.opts.xfetch_beta = v;
+        self
+    }
+
+    /// Sets cacheable methods. Defaults to only GET.
+    pub fn methods(mut self, v: &[Method]) -> Self {
+        self.opts.methods = v.into();
+        self
+    }
+
+    /// Whether to obey `Cache-Control` headers in the *response*. Defaults to false.
+    pub const fn obey_cache_control(mut self, v: bool) -> Self {
+        self.opts.obey_cache_control = v;
+        self
+    }
+
+    /// Sets the metrics registry to use.
+    pub fn registry(mut self, v: &Registry) -> Self {
+        self.registry = v.clone();
+        self
+    }
+
+    /// Try to build the cache from this builder
+    pub fn build(self) -> Result<Cache<K>, Error> {
+        Cache::new(self.opts, self.key_extractor, &self.registry)
+    }
 }
 
 pub struct Cache<K: KeyExtractor> {
@@ -200,9 +374,13 @@ impl<K: KeyExtractor + 'static> Cache<K> {
             ));
         }
 
+        if opts.ttl > opts.max_ttl {
+            return Err(Error::Other("TTL should be <= max TTL".into()));
+        }
+
         Ok(Self {
             store: MokaCacheBuilder::new(opts.cache_size)
-                .time_to_live(opts.ttl)
+                .expire_after(Expirer::<K>(PhantomData))
                 .weigher(weigh_entry::<K>)
                 .build_with_hasher(RandomState::default()),
 
@@ -218,16 +396,12 @@ impl<K: KeyExtractor + 'static> Cache<K> {
         })
     }
 
-    pub fn get_lock(&self, key: &K::Key) -> Arc<Mutex<()>> {
-        self.locks
-            .get_with(key.clone(), || Arc::new(Mutex::new(())))
-    }
-
-    pub fn get(&self, key: &K::Key, beta: f64) -> Option<Response> {
+    pub fn get(&self, key: &K::Key, now: Instant, beta: f64) -> Option<Response> {
         let val = self.store.get(key)?;
 
         // Run x-fetch if configured and simulate the cache miss if we need to refresh the entry
-        if val.need_to_refresh(Instant::now(), beta) {
+        if val.need_to_refresh(now, beta) {
+            self.metrics.x_fetch.inc();
             return None;
         }
 
@@ -235,22 +409,29 @@ impl<K: KeyExtractor + 'static> Cache<K> {
         Some(Response::from_parts(parts, Body::from(body)))
     }
 
-    pub fn insert(&self, key: K::Key, delta: Duration, response: Response<Bytes>) {
-        let expires = Instant::now() + self.opts.ttl;
+    pub fn insert(
+        &self,
+        key: K::Key,
+        now: Instant,
+        ttl: Duration,
+        delta: Duration,
+        response: Response<Bytes>,
+    ) {
+        self.metrics.ttl.observe(ttl.as_secs_f64());
 
         self.store.insert(
             key,
             Arc::new(Entry {
                 response,
                 delta: delta.as_secs_f64(),
-                expires,
+                expires: now + ttl,
             }),
         );
     }
 
     pub async fn process_request(&self, request: Request, next: Next) -> Result<Response, Error> {
         let now = Instant::now();
-        let (cache_status, response) = self.process_inner(request, next).await?;
+        let (cache_status, response) = self.process_inner(now, request, next).await?;
 
         // Record metrics
         let cache_bypass_reason_str: &'static str = match &cache_status {
@@ -272,6 +453,7 @@ impl<K: KeyExtractor + 'static> Cache<K> {
 
     async fn process_inner(
         &self,
+        now: Instant,
         request: Request,
         next: Next,
     ) -> Result<(CacheStatus, Response), Error> {
@@ -291,15 +473,14 @@ impl<K: KeyExtractor + 'static> Cache<K> {
             ));
         };
 
-        if let Some(v) = self.get(&key, self.opts.xfetch_beta) {
+        if let Some(v) = self.get(&key, now, self.opts.xfetch_beta) {
             return Ok((CacheStatus::Hit, v));
         }
 
         // Get synchronization lock to handle parallel requests.
-        let lock = self.get_lock(&key);
-
-        // Record the time spent waiting for the lock.
-        let start = Instant::now();
+        let lock = self
+            .locks
+            .get_with_by_ref(&key, || Arc::new(Mutex::new(())));
 
         let mut lock_obtained = false;
         select! {
@@ -317,11 +498,11 @@ impl<K: KeyExtractor + 'static> Cache<K> {
         self.metrics
             .lock_await
             .with_label_values(&[if lock_obtained { "yes" } else { "no" }])
-            .observe(start.elapsed().as_secs_f64());
+            .observe(now.elapsed().as_secs_f64());
 
         // Check again the cache in case some other request filled it
         // while we were waiting for the lock
-        if let Some(v) = self.get(&key, 0.0) {
+        if let Some(v) = self.get(&key, now, 0.0) {
             return Ok((CacheStatus::Hit, v));
         }
 
@@ -329,11 +510,12 @@ impl<K: KeyExtractor + 'static> Cache<K> {
         let now = Instant::now();
         Ok(match self.pass_request(request, next).await? {
             // If the body was fetched - cache it
-            ResponseType::Fetched(v) => {
+            ResponseType::Fetched(v, ttl) => {
                 let delta = now.elapsed();
-                self.insert(key, delta, v.clone());
+                self.insert(key, now + delta, ttl, delta, v.clone());
 
-                let (parts, body) = v.into_parts();
+                let (mut parts, body) = v.into_parts();
+                parts.headers.insert(X_CACHE_TTL, ttl.as_secs().into());
                 let response = Response::from_parts(parts, Body::from(body));
                 (CacheStatus::Miss, response)
             }
@@ -375,6 +557,29 @@ impl<K: KeyExtractor + 'static> Cache<K> {
             ));
         }
 
+        // Infer the TTL if requested to obey Cache-Control headers
+        let ttl = if self.opts.obey_cache_control {
+            let ttl = infer_ttl(&response);
+
+            match ttl {
+                // Do not cache if we're asked not to
+                Some(CacheControl::NoCache) => {
+                    return Ok(ResponseType::Streamed(
+                        response,
+                        CacheBypassReason::CacheControl,
+                    ));
+                }
+
+                // Use TTL from max-age capping it to max_ttl
+                Some(CacheControl::MaxAge(v)) => v.min(self.opts.max_ttl),
+
+                // Otherwise use default
+                None => self.opts.ttl,
+            }
+        } else {
+            self.opts.ttl
+        };
+
         // Read the response body into a buffer
         let (parts, body) = response.into_parts();
         let body = buffer_body(body, body_size, self.opts.body_timeout)
@@ -385,7 +590,10 @@ impl<K: KeyExtractor + 'static> Cache<K> {
                 _ => Error::FetchBody(e.to_string()),
             })?;
 
-        Ok(ResponseType::Fetched(Response::from_parts(parts, body)))
+        Ok(ResponseType::Fetched(
+            Response::from_parts(parts, body),
+            ttl,
+        ))
     }
 
     #[cfg(test)]
@@ -451,6 +659,8 @@ impl KeyExtractor for KeyExtractorUriRange {
 
 #[cfg(test)]
 mod tests {
+    use crate::hval;
+
     use super::*;
 
     use axum::{
@@ -461,7 +671,7 @@ mod tests {
         response::IntoResponse,
         routing::{get, post},
     };
-    use http::{HeaderValue, Request, StatusCode, Uri};
+    use http::{Request, Response, StatusCode, Uri};
     use sha1::Digest;
     use tower::{Service, ServiceExt};
 
@@ -511,6 +721,22 @@ mod tests {
         "a".repeat(MAX_ITEM_SIZE + 1)
     }
 
+    async fn handler_cache_control_max_age_1d(_request: Request<Body>) -> impl IntoResponse {
+        [(CACHE_CONTROL, "max-age=86400")]
+    }
+
+    async fn handler_cache_control_max_age_7d(_request: Request<Body>) -> impl IntoResponse {
+        [(CACHE_CONTROL, "max-age=604800")]
+    }
+
+    async fn handler_cache_control_no_cache(_request: Request<Body>) -> impl IntoResponse {
+        [(CACHE_CONTROL, "no-cache")]
+    }
+
+    async fn handler_cache_control_no_store(_request: Request<Body>) -> impl IntoResponse {
+        [(CACHE_CONTROL, "no-store")]
+    }
+
     async fn middleware(
         State(cache): State<Arc<Cache<KeyExtractorTest>>>,
         request: Request<Body>,
@@ -556,40 +782,91 @@ mod tests {
         // Make sure that adding Range header changes the key
         let mut req = Request::new("foo");
         *req.uri_mut() = Uri::from_static("http://foo.bar.bar:80/foo/bar?abc=1");
-        (*req.headers_mut()).insert(RANGE, HeaderValue::from_static("1000-2000"));
+        (*req.headers_mut()).insert(RANGE, hval!("1000-2000"));
         let key2 = x.extract(&req).unwrap();
         assert_ne!(key1, key2);
     }
 
     #[test]
-    fn test_cache_creation_errors() {
-        let opts = Opts {
-            cache_size: 1024,
-            max_item_size: 1024,
-            lock_timeout: PROXY_LOCK_TIMEOUT,
-            body_timeout: Duration::from_secs(1),
-            xfetch_beta: 0.0,
-            ttl: Duration::from_secs(3600),
-            methods: vec![Method::GET],
-        };
+    fn test_infer_ttl() {
+        let mut req = Response::new(());
 
-        let cache = Cache::new(opts, KeyExtractorTest, &Registry::default());
+        assert_eq!(infer_ttl(&req), None);
+
+        // Don't cache
+        req.headers_mut().insert(CACHE_CONTROL, hval!("no-cache"));
+        assert_eq!(infer_ttl(&req), Some(CacheControl::NoCache));
+
+        req.headers_mut().insert(CACHE_CONTROL, hval!("no-store"));
+        assert_eq!(infer_ttl(&req), Some(CacheControl::NoCache));
+
+        req.headers_mut()
+            .insert(CACHE_CONTROL, hval!("no-store, no-cache"));
+        assert_eq!(infer_ttl(&req), Some(CacheControl::NoCache));
+
+        // Order matters
+        req.headers_mut()
+            .insert(CACHE_CONTROL, hval!("no-store, no-cache, max-age=1"));
+        assert_eq!(infer_ttl(&req), Some(CacheControl::NoCache));
+
+        req.headers_mut()
+            .insert(CACHE_CONTROL, hval!("max-age=1, no-store, no-cache"));
+        assert_eq!(
+            infer_ttl(&req),
+            Some(CacheControl::MaxAge(Duration::from_secs(1)))
+        );
+
+        // Max-age
+        req.headers_mut()
+            .insert(CACHE_CONTROL, hval!("max-age=86400"));
+        assert_eq!(
+            infer_ttl(&req),
+            Some(CacheControl::MaxAge(Duration::from_secs(86400)))
+        );
+
+        req.headers_mut()
+            .insert(CACHE_CONTROL, hval!("max-age=foo"));
+        assert_eq!(infer_ttl(&req), None);
+
+        req.headers_mut().insert(CACHE_CONTROL, hval!("max-age="));
+        assert_eq!(infer_ttl(&req), None);
+
+        req.headers_mut().insert(CACHE_CONTROL, hval!("max-age=-1"));
+        assert_eq!(infer_ttl(&req), None);
+
+        // Empty
+        req.headers_mut().insert(CACHE_CONTROL, hval!(""));
+        assert_eq!(infer_ttl(&req), None);
+
+        // Broken
+        req.headers_mut()
+            .insert(CACHE_CONTROL, hval!(", =foobar, "));
+        assert_eq!(infer_ttl(&req), None);
+    }
+
+    #[test]
+    fn test_cache_creation_errors() {
+        let cache = CacheBuilder::new(KeyExtractorTest)
+            .cache_size(1)
+            .max_item_size(2)
+            .build();
+        assert!(cache.is_err());
+
+        let cache = CacheBuilder::new(KeyExtractorTest)
+            .ttl(Duration::from_secs(2))
+            .max_ttl(Duration::from_secs(1))
+            .build();
         assert!(cache.is_err());
     }
 
     #[tokio::test]
     async fn test_cache_bypass() {
-        let opts = Opts {
-            cache_size: MAX_CACHE_SIZE,
-            max_item_size: MAX_ITEM_SIZE,
-            lock_timeout: PROXY_LOCK_TIMEOUT,
-            body_timeout: Duration::from_secs(1),
-            xfetch_beta: 0.0,
-            ttl: Duration::from_secs(3600),
-            methods: vec![Method::GET],
-        };
-
-        let cache = Arc::new(Cache::new(opts, KeyExtractorTest, &Registry::default()).unwrap());
+        let cache = Arc::new(
+            CacheBuilder::new(KeyExtractorTest)
+                .max_item_size(MAX_ITEM_SIZE)
+                .build()
+                .unwrap(),
+        );
 
         let mut app = Router::new()
             .route("/", post(handler))
@@ -635,19 +912,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_hit() {
-        let ttl = Duration::from_millis(500);
+        let ttl = Duration::from_millis(1500);
 
-        let opts = Opts {
-            cache_size: MAX_CACHE_SIZE,
-            max_item_size: MAX_ITEM_SIZE,
-            lock_timeout: PROXY_LOCK_TIMEOUT,
-            body_timeout: Duration::from_secs(1),
-            xfetch_beta: 0.0,
-            ttl,
-            methods: vec![Method::GET],
-        };
-
-        let cache = Arc::new(Cache::new(opts, KeyExtractorTest, &Registry::default()).unwrap());
+        let cache = Arc::new(
+            CacheBuilder::new(KeyExtractorTest)
+                .cache_size(MAX_CACHE_SIZE)
+                .max_item_size(MAX_ITEM_SIZE)
+                .ttl(ttl)
+                .build()
+                .unwrap(),
+        );
 
         let mut app = Router::new()
             .route("/{key}", get(handler))
@@ -698,7 +972,7 @@ mod tests {
         assert_eq!(cache.len(), 2);
 
         // After ttl, request doesn't hit the cache anymore
-        sleep(ttl + Duration::from_millis(100)).await;
+        sleep(ttl + Duration::from_millis(300)).await;
         cache.housekeep();
         let req = Request::get("/1").body(Body::from("")).unwrap();
         let result = app.call(req).await.unwrap();
@@ -722,12 +996,13 @@ mod tests {
 
         // Once cache_size limit is reached some requests should be evicted.
         cache.clear();
-        let req_count = 800;
+        let req_count = 500;
         // First dispatch round, all cache misses.
         for idx in 0..req_count {
             let status = dispatch_get_request(&mut app, format!("/{idx}")).await;
             assert_eq!(status.unwrap(), CacheStatus::Miss);
         }
+
         // Second dispatch round, some requests hit the cache, some don't
         let mut count_misses = 0;
         let mut count_hits = 0;
@@ -743,6 +1018,7 @@ mod tests {
         assert!(count_hits > 0);
         cache.housekeep();
         let entry_size = cache.size() / cache.len();
+
         // Make sure cache size limit was reached.
         // Check that adding one more entry to the cache would overflow its max capacity.
         assert!(MAX_CACHE_SIZE > cache.size());
@@ -750,18 +1026,217 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_proxy_cache_lock() {
-        let opts = Opts {
-            cache_size: MAX_CACHE_SIZE,
-            max_item_size: MAX_ITEM_SIZE,
-            lock_timeout: PROXY_LOCK_TIMEOUT,
-            body_timeout: Duration::from_secs(1),
-            xfetch_beta: 0.0,
-            ttl: Duration::from_millis(500),
-            methods: vec![Method::GET],
-        };
+    async fn test_cache_control() {
+        let cache = Arc::new(
+            CacheBuilder::new(KeyExtractorTest)
+                .obey_cache_control(true)
+                .build()
+                .unwrap(),
+        );
 
-        let cache = Arc::new(Cache::new(opts, KeyExtractorTest, &Registry::default()).unwrap());
+        let mut app = Router::new()
+            .route("/", get(handler))
+            .route(
+                "/cache_control_no_store",
+                get(handler_cache_control_no_store),
+            )
+            .route(
+                "/cache_control_no_cache",
+                get(handler_cache_control_no_cache),
+            )
+            .route(
+                "/cache_control_max_age_1d",
+                get(handler_cache_control_max_age_1d),
+            )
+            .route(
+                "/cache_control_max_age_7d",
+                get(handler_cache_control_max_age_7d),
+            )
+            .layer(from_fn_with_state(Arc::clone(&cache), middleware));
+
+        // Cache-Control no-cache
+        let req = Request::get("/cache_control_no_cache")
+            .body(Body::from("foobar"))
+            .unwrap();
+        let result = app.call(req).await.unwrap();
+        let cache_status = result.extensions().get::<CacheStatus>().cloned().unwrap();
+        assert_eq!(
+            cache_status,
+            CacheStatus::Bypass(CacheBypassReason::CacheControl)
+        );
+        assert_eq!(result.status(), StatusCode::OK);
+        cache.housekeep();
+        assert_eq!(cache.len(), 0);
+
+        // Cache-Control no-store
+        let req = Request::get("/cache_control_no_store")
+            .body(Body::from("foobar"))
+            .unwrap();
+        let result = app.call(req).await.unwrap();
+        let cache_status = result.extensions().get::<CacheStatus>().cloned().unwrap();
+        assert_eq!(
+            cache_status,
+            CacheStatus::Bypass(CacheBypassReason::CacheControl)
+        );
+        assert_eq!(result.status(), StatusCode::OK);
+        cache.housekeep();
+        assert_eq!(cache.len(), 0);
+
+        // Cache-Control max-age 1 day
+        let req = Request::get("/cache_control_max_age_1d")
+            .body(Body::from("foobar"))
+            .unwrap();
+        let result = app.call(req).await.unwrap();
+        let cache_status = result.extensions().get::<CacheStatus>().cloned().unwrap();
+        let ttl = result
+            .headers()
+            .get(X_CACHE_TTL)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert_eq!(cache_status, CacheStatus::Miss);
+        assert_eq!(ttl, 86400);
+        assert_eq!(result.status(), StatusCode::OK);
+        cache.housekeep();
+        assert_eq!(cache.len(), 1);
+
+        // Cache-Control max-age 7 days should still be capped to 1 day
+        let req = Request::get("/cache_control_max_age_7d")
+            .body(Body::from("foobar"))
+            .unwrap();
+        let result = app.call(req).await.unwrap();
+        let cache_status = result.extensions().get::<CacheStatus>().cloned().unwrap();
+        let ttl = result
+            .headers()
+            .get(X_CACHE_TTL)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert_eq!(cache_status, CacheStatus::Miss);
+        assert_eq!(ttl, 86400);
+        assert_eq!(result.status(), StatusCode::OK);
+        cache.housekeep();
+        assert_eq!(cache.len(), 2);
+
+        // w/o Cache-Control we should get a default 10s TTL
+        let req = Request::get("/").body(Body::from("foobar")).unwrap();
+        let result = app.call(req).await.unwrap();
+        let cache_status = result.extensions().get::<CacheStatus>().cloned().unwrap();
+        let ttl = result
+            .headers()
+            .get(X_CACHE_TTL)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert_eq!(cache_status, CacheStatus::Miss);
+        assert_eq!(ttl, 10);
+        assert_eq!(result.status(), StatusCode::OK);
+        cache.housekeep();
+        assert_eq!(cache.len(), 3);
+
+        // Test when we do not obey
+        let cache = Arc::new(
+            CacheBuilder::new(KeyExtractorTest)
+                .obey_cache_control(false)
+                .build()
+                .unwrap(),
+        );
+
+        let mut app = Router::new()
+            .route("/", get(handler))
+            .route(
+                "/cache_control_no_store",
+                get(handler_cache_control_no_store),
+            )
+            .route(
+                "/cache_control_no_cache",
+                get(handler_cache_control_no_cache),
+            )
+            .route(
+                "/cache_control_max_age_1d",
+                get(handler_cache_control_max_age_1d),
+            )
+            .route(
+                "/cache_control_max_age_7d",
+                get(handler_cache_control_max_age_7d),
+            )
+            .layer(from_fn_with_state(Arc::clone(&cache), middleware));
+
+        // Cache-Control no-cache
+        let req = Request::get("/cache_control_no_cache")
+            .body(Body::from("foobar"))
+            .unwrap();
+        let result = app.call(req).await.unwrap();
+        let cache_status = result.extensions().get::<CacheStatus>().cloned().unwrap();
+        assert_eq!(cache_status, CacheStatus::Miss);
+        assert_eq!(result.status(), StatusCode::OK);
+        cache.housekeep();
+        assert_eq!(cache.len(), 1);
+
+        // Cache-Control no-store
+        let req = Request::get("/cache_control_no_store")
+            .body(Body::from("foobar"))
+            .unwrap();
+        let result = app.call(req).await.unwrap();
+        let cache_status = result.extensions().get::<CacheStatus>().cloned().unwrap();
+        assert_eq!(cache_status, CacheStatus::Miss,);
+        assert_eq!(result.status(), StatusCode::OK);
+        cache.housekeep();
+        assert_eq!(cache.len(), 2);
+
+        // Cache-Control max-age 1 day
+        let req = Request::get("/cache_control_max_age_1d")
+            .body(Body::from("foobar"))
+            .unwrap();
+        let result = app.call(req).await.unwrap();
+        let cache_status = result.extensions().get::<CacheStatus>().cloned().unwrap();
+        let ttl = result
+            .headers()
+            .get(X_CACHE_TTL)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert_eq!(cache_status, CacheStatus::Miss);
+        assert_eq!(ttl, 10);
+        assert_eq!(result.status(), StatusCode::OK);
+        cache.housekeep();
+        assert_eq!(cache.len(), 3);
+
+        // w/o Cache-Control we should get a default 10s TTL
+        let req = Request::get("/").body(Body::from("foobar")).unwrap();
+        let result = app.call(req).await.unwrap();
+        let cache_status = result.extensions().get::<CacheStatus>().cloned().unwrap();
+        let ttl = result
+            .headers()
+            .get(X_CACHE_TTL)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert_eq!(cache_status, CacheStatus::Miss);
+        assert_eq!(ttl, 10);
+        assert_eq!(result.status(), StatusCode::OK);
+        cache.housekeep();
+        assert_eq!(cache.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_proxy_cache_lock() {
+        let cache = Arc::new(
+            CacheBuilder::new(KeyExtractorTest)
+                .lock_timeout(PROXY_LOCK_TIMEOUT)
+                .build()
+                .unwrap(),
+        );
 
         let app = Router::new()
             .route("/{key}", get(handler_proxy_cache_lock))

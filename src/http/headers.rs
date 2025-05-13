@@ -8,38 +8,47 @@ use http::header::{
     CONNECTION, HeaderMap, HeaderName, HeaderValue, TE, TRANSFER_ENCODING, UPGRADE,
 };
 
+#[macro_export]
+macro_rules! hname {
+    ($id:expr) => {{ http::header::HeaderName::from_static($id) }};
+}
+
+#[macro_export]
+macro_rules! hval {
+    ($id:expr) => {{ http::header::HeaderValue::from_static($id) }};
+}
+
 // Header names
-pub const X_IC_CACHE_STATUS: HeaderName = HeaderName::from_static("x-ic-cache-status");
-pub const X_IC_CACHE_BYPASS_REASON: HeaderName =
-    HeaderName::from_static("x-ic-cache-bypass-reason");
-pub const X_IC_SUBNET_ID: HeaderName = HeaderName::from_static("x-ic-subnet-id");
-pub const X_IC_NODE_ID: HeaderName = HeaderName::from_static("x-ic-node-id");
-pub const X_IC_SUBNET_TYPE: HeaderName = HeaderName::from_static("x-ic-subnet-type");
-pub const X_IC_CANISTER_ID_CBOR: HeaderName = HeaderName::from_static("x-ic-canister-id-cbor");
-pub const X_IC_METHOD_NAME: HeaderName = HeaderName::from_static("x-ic-method-name");
-pub const X_IC_SENDER: HeaderName = HeaderName::from_static("x-ic-sender");
-pub const X_IC_RETRIES: HeaderName = HeaderName::from_static("x-ic-retries");
-pub const X_IC_ERROR_CAUSE: HeaderName = HeaderName::from_static("x-ic-error-cause");
-pub const X_IC_REQUEST_TYPE: HeaderName = HeaderName::from_static("x-ic-request-type");
-pub const X_IC_CANISTER_ID: HeaderName = HeaderName::from_static("x-ic-canister-id");
-pub const X_IC_COUNTRY_CODE: HeaderName = HeaderName::from_static("x-ic-country-code");
-pub const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
-pub const X_REQUESTED_WITH: HeaderName = HeaderName::from_static("x-requested-with");
-pub const X_REAL_IP: HeaderName = HeaderName::from_static("x-real-ip");
+pub const X_IC_CACHE_STATUS: HeaderName = hname!("x-ic-cache-status");
+pub const X_IC_CACHE_BYPASS_REASON: HeaderName = hname!("x-ic-cache-bypass-reason");
+pub const X_IC_SUBNET_ID: HeaderName = hname!("x-ic-subnet-id");
+pub const X_IC_NODE_ID: HeaderName = hname!("x-ic-node-id");
+pub const X_IC_SUBNET_TYPE: HeaderName = hname!("x-ic-subnet-type");
+pub const X_IC_CANISTER_ID_CBOR: HeaderName = hname!("x-ic-canister-id-cbor");
+pub const X_IC_METHOD_NAME: HeaderName = hname!("x-ic-method-name");
+pub const X_IC_SENDER: HeaderName = hname!("x-ic-sender");
+pub const X_IC_RETRIES: HeaderName = hname!("x-ic-retries");
+pub const X_IC_ERROR_CAUSE: HeaderName = hname!("x-ic-error-cause");
+pub const X_IC_REQUEST_TYPE: HeaderName = hname!("x-ic-request-type");
+pub const X_IC_CANISTER_ID: HeaderName = hname!("x-ic-canister-id");
+pub const X_IC_COUNTRY_CODE: HeaderName = hname!("x-ic-country-code");
+pub const X_CACHE_TTL: HeaderName = hname!("x-cache-ttl");
+pub const X_REQUEST_ID: HeaderName = hname!("x-request-id");
+pub const X_REQUESTED_WITH: HeaderName = hname!("x-requested-with");
+pub const X_REAL_IP: HeaderName = hname!("x-real-ip");
 
 // Header values
-pub const CONTENT_TYPE_CBOR: HeaderValue = HeaderValue::from_static("application/cbor");
-pub const CONTENT_TYPE_OCTET_STREAM: HeaderValue =
-    HeaderValue::from_static("application/octet-stream");
-pub const CONTENT_TYPE_HTML: HeaderValue = HeaderValue::from_static("text/html; charset=utf-8");
-pub const HSTS_1YEAR: HeaderValue = HeaderValue::from_static("max-age=31536000; includeSubDomains");
-pub const X_CONTENT_TYPE_OPTIONS_NO_SNIFF: HeaderValue = HeaderValue::from_static("nosniff");
-pub const X_FRAME_OPTIONS_DENY: HeaderValue = HeaderValue::from_static("DENY");
+pub const CONTENT_TYPE_CBOR: HeaderValue = hval!("application/cbor");
+pub const CONTENT_TYPE_OCTET_STREAM: HeaderValue = hval!("application/octet-stream");
+pub const CONTENT_TYPE_HTML: HeaderValue = hval!("text/html; charset=utf-8");
+pub const HSTS_1YEAR: HeaderValue = hval!("max-age=31536000; includeSubDomains");
+pub const X_CONTENT_TYPE_OPTIONS_NO_SNIFF: HeaderValue = hval!("nosniff");
+pub const X_FRAME_OPTIONS_DENY: HeaderValue = hval!("DENY");
 
 static CONNECTION_HEADERS: [HeaderName; 5] = [
-    HeaderName::from_static("keep-alive"),
-    HeaderName::from_static("proxy-connection"),
-    HeaderName::from_static("http2-settings"),
+    hname!("keep-alive"),
+    hname!("proxy-connection"),
+    hname!("http2-settings"),
     TRANSFER_ENCODING,
     UPGRADE,
 ];
