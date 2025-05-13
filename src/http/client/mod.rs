@@ -50,10 +50,9 @@ pub trait ClientWithStats: Client + Stats {
     fn to_client(self: Arc<Self>) -> Arc<dyn Client>;
 }
 
-pub trait CloneableDnsResolver:
-    Resolve + Service<HyperName> + Clone + fmt::Debug + 'static
-{
-}
+pub trait CloneableDnsResolver: Resolve + Clone + fmt::Debug + 'static {}
+
+pub trait CloneableHyperDnsResolver: Service<HyperName> + Clone + fmt::Debug + 'static {}
 
 #[derive(Clone, Debug)]
 struct Metrics {
