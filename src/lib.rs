@@ -8,6 +8,8 @@ pub mod types;
 #[cfg(feature = "vector")]
 pub mod vector;
 
+pub use prometheus;
+
 /// Generic error
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
