@@ -245,8 +245,12 @@ fn infer_ttl<T>(req: &Response<T>) -> Option<CacheControl> {
         if ["no-cache", "no-store"].contains(&k) {
             Some(CacheControl::NoCache)
         } else if k == "max-age" {
-            v.and_then(|x| x.parse::<u64>().ok())
-                .map(|x| CacheControl::MaxAge(Duration::from_secs(x)))
+            let v = v.and_then(|x| x.parse::<u64>().ok());
+            if v == Some(0) {
+                Some(CacheControl::NoCache)
+            } else {
+                v.map(|x| CacheControl::MaxAge(Duration::from_secs(x)))
+            }
         } else {
             None
         }
@@ -823,6 +827,8 @@ mod tests {
             infer_ttl(&req),
             Some(CacheControl::MaxAge(Duration::from_secs(86400)))
         );
+        req.headers_mut().insert(CACHE_CONTROL, hval!("max-age=0"));
+        assert_eq!(infer_ttl(&req), Some(CacheControl::NoCache));
 
         req.headers_mut()
             .insert(CACHE_CONTROL, hval!("max-age=foo"));
