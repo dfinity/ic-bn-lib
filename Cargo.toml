@@ -105,7 +105,7 @@ tracing = "0.1.40"
 url = "2.5.3"
 # DO NOT upgrade, this breaks monorepo compatibility
 # Read https://github.com/uuid-rs/uuid/releases/tag/1.13.0
-uuid = { version = "1.12.1", features = ["v7"] }
+uuid = { version = "=1.12.1", features = ["v7"] }
 vrl = { version = "0.23.0", default-features = false, features = [
     "value",
 ], optional = true }

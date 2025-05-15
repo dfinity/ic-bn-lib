@@ -1,3 +1,5 @@
+// Needed for certain macros
+#![recursion_limit = "256"]
 #![warn(clippy::nursery)]
 #![warn(tail_expr_drop_order)]
 
