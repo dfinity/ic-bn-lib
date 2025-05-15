@@ -18,5 +18,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6
 
-      - name: Run tests
-        run: cargo test
+      - name: Run tests (all features)
+        run: cargo test --all-features
+
+      - name: Run tests (acme_dns)
+        run: cargo test --features acme_dns
+
+      - name: Run tests (acme_alpn)
+        run: cargo test --features acme_alpn
+
+      - name: Run tests (vector)
+        run: cargo test --features vector
+
+      - name: Run tests (clients-hyper)
+        run: cargo test --features clients-hyper

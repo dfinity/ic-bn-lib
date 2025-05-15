@@ -1,3 +1,5 @@
+// Needed for certain macros
+#![recursion_limit = "256"]
 #![warn(clippy::nursery)]
 #![warn(tail_expr_drop_order)]
 
@@ -7,6 +9,8 @@ pub mod tls;
 pub mod types;
 #[cfg(feature = "vector")]
 pub mod vector;
+
+pub use prometheus;
 
 /// Generic error
 #[derive(thiserror::Error, Debug)]

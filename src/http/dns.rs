@@ -21,7 +21,10 @@ use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use strum_macros::EnumString;
 use tower::Service;
 
-use super::{Error, client::CloneableDnsResolver};
+use super::{
+    Error,
+    client::{CloneableDnsResolver, CloneableHyperDnsResolver},
+};
 
 #[derive(Clone, Copy, Debug, EnumString)]
 #[strum(serialize_all = "snake_case")]
@@ -58,6 +61,7 @@ impl Default for Options {
 #[derive(Debug, Clone)]
 pub struct Resolver(Arc<TokioResolver>);
 impl CloneableDnsResolver for Resolver {}
+impl CloneableHyperDnsResolver for Resolver {}
 
 impl Resolver {
     /// Creates a new resolver with given options.

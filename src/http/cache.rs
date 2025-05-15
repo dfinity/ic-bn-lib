@@ -31,33 +31,52 @@ use strum_macros::{Display, IntoStaticStr};
 use tokio::{select, sync::Mutex, time::sleep};
 use tokio_util::sync::CancellationToken;
 
+use super::{Error as HttpError, body::buffer_body, calc_headers_size, extract_authority};
 use crate::{http::headers::X_CACHE_TTL, tasks::Run};
 
-use super::{Error as HttpError, body::buffer_body, calc_headers_size, extract_authority};
+pub trait CustomBypassReason:
+    Debug + Clone + std::fmt::Display + Into<&'static str> + PartialEq + Eq + Send + Sync + 'static
+{
+}
+
+#[derive(Debug, Clone, Display, PartialEq, Eq, IntoStaticStr)]
+pub enum CustomBypassReasonDummy {}
+impl CustomBypassReason for CustomBypassReasonDummy {}
 
 #[derive(Debug, Clone, Display, PartialEq, Eq, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
-pub enum CacheBypassReason {
+pub enum CacheBypassReason<R: CustomBypassReason> {
     MethodNotCacheable,
     SizeUnknown,
     BodyTooBig,
     HTTPError,
     UnableToExtractKey,
+    UnableToRunBypasser,
     CacheControl,
+    Custom(R),
+}
+
+impl<R: CustomBypassReason> CacheBypassReason<R> {
+    pub fn into_str(self) -> &'static str {
+        match self {
+            Self::Custom(v) => v.into(),
+            _ => self.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Display, PartialEq, Eq, Default, IntoStaticStr)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
-pub enum CacheStatus {
+pub enum CacheStatus<R: CustomBypassReason = CustomBypassReasonDummy> {
     #[default]
     Disabled,
-    Bypass(CacheBypassReason),
+    Bypass(CacheBypassReason<R>),
     Hit,
     Miss,
 }
 
 // Injects itself into a given response to be accessible by middleware
-impl CacheStatus {
+impl<B: CustomBypassReason> CacheStatus<B> {
     pub fn with_response<T>(self, mut resp: Response<T>) -> Response<T> {
         resp.extensions_mut().insert(self);
         resp
@@ -68,6 +87,8 @@ impl CacheStatus {
 pub enum Error {
     #[error("unable to extract key from request: {0}")]
     ExtractKey(String),
+    #[error("unable to execute bypasser: {0}")]
+    ExecuteBypasser(String),
     #[error("timed out while fetching body")]
     FetchBodyTimeout,
     #[error("body is too big")]
@@ -80,9 +101,9 @@ pub enum Error {
     Other(String),
 }
 
-enum ResponseType {
+enum ResponseType<R: CustomBypassReason> {
     Fetched(Response<Bytes>, Duration),
-    Streamed(Response, CacheBypassReason),
+    Streamed(Response, CacheBypassReason<R>),
 }
 
 #[derive(Clone)]
@@ -119,6 +140,26 @@ pub trait KeyExtractor: Clone + Send + Sync + Debug + 'static {
 
     /// Extraction method, will return [`Error`] response when the extraction failed
     fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, Error>;
+}
+
+/// Trait to decide if we need to bypass caching of the given request
+pub trait Bypasser: Clone + Send + Sync + Debug + 'static {
+    /// Custom bypass reason
+    type BypassReason: CustomBypassReason;
+
+    /// Checks if we should bypass the given request
+    fn bypass<T>(&self, req: &Request<T>) -> Result<Option<Self::BypassReason>, Error>;
+}
+
+#[derive(Debug, Clone)]
+pub struct NoopBypasser;
+
+impl Bypasser for NoopBypasser {
+    type BypassReason = CustomBypassReasonDummy;
+
+    fn bypass<T>(&self, _req: &Request<T>) -> Result<Option<Self::BypassReason>, Error> {
+        Ok(None)
+    }
 }
 
 #[derive(Clone)]
@@ -245,8 +286,12 @@ fn infer_ttl<T>(req: &Response<T>) -> Option<CacheControl> {
         if ["no-cache", "no-store"].contains(&k) {
             Some(CacheControl::NoCache)
         } else if k == "max-age" {
-            v.and_then(|x| x.parse::<u64>().ok())
-                .map(|x| CacheControl::MaxAge(Duration::from_secs(x)))
+            let v = v.and_then(|x| x.parse::<u64>().ok());
+            if v == Some(0) {
+                Some(CacheControl::NoCache)
+            } else {
+                v.map(|x| CacheControl::MaxAge(Duration::from_secs(x)))
+            }
         } else {
             None
         }
@@ -268,16 +313,29 @@ impl<K: KeyExtractor> Expiry<K::Key, Arc<Entry>> for Expirer<K> {
 }
 
 /// Builds a cache using some overridable defaults
-pub struct CacheBuilder<K: KeyExtractor> {
+pub struct CacheBuilder<K: KeyExtractor, B: Bypasser> {
     key_extractor: K,
+    bypasser: Option<B>,
     opts: Opts,
     registry: Registry,
 }
 
-impl<K: KeyExtractor> CacheBuilder<K> {
+impl<K: KeyExtractor> CacheBuilder<K, NoopBypasser> {
     pub fn new(key_extractor: K) -> Self {
         Self {
             key_extractor,
+            bypasser: None,
+            opts: Opts::default(),
+            registry: Registry::new(),
+        }
+    }
+}
+
+impl<K: KeyExtractor, B: Bypasser> CacheBuilder<K, B> {
+    pub fn new_with_bypasser(key_extractor: K, bypasser: B) -> Self {
+        Self {
+            key_extractor,
+            bypasser: Some(bypasser),
             opts: Opts::default(),
             registry: Registry::new(),
         }
@@ -344,15 +402,16 @@ impl<K: KeyExtractor> CacheBuilder<K> {
     }
 
     /// Try to build the cache from this builder
-    pub fn build(self) -> Result<Cache<K>, Error> {
-        Cache::new(self.opts, self.key_extractor, &self.registry)
+    pub fn build(self) -> Result<Cache<K, B>, Error> {
+        Cache::new(self.opts, self.key_extractor, self.bypasser, &self.registry)
     }
 }
 
-pub struct Cache<K: KeyExtractor> {
+pub struct Cache<K: KeyExtractor, B: Bypasser = NoopBypasser> {
     store: MokaCache<K::Key, Arc<Entry>, RandomState>,
     locks: MokaCache<K::Key, Arc<Mutex<()>>, RandomState>,
     key_extractor: K,
+    bypasser: Option<B>,
     metrics: Metrics,
     opts: Opts,
 }
@@ -366,8 +425,13 @@ fn weigh_entry<K: KeyExtractor>(_k: &K::Key, v: &Arc<Entry>) -> u32 {
     size as u32
 }
 
-impl<K: KeyExtractor + 'static> Cache<K> {
-    pub fn new(opts: Opts, key_extractor: K, registry: &Registry) -> Result<Self, Error> {
+impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
+    pub fn new(
+        opts: Opts,
+        key_extractor: K,
+        bypasser: Option<B>,
+        registry: &Registry,
+    ) -> Result<Self, Error> {
         if opts.max_item_size as u64 >= opts.cache_size {
             return Err(Error::Other(
                 "Cache item size should be less than whole cache size".into(),
@@ -390,6 +454,7 @@ impl<K: KeyExtractor + 'static> Cache<K> {
                 .build_with_hasher(RandomState::default()),
 
             key_extractor,
+            bypasser,
             metrics: Metrics::new(registry),
 
             opts,
@@ -434,11 +499,11 @@ impl<K: KeyExtractor + 'static> Cache<K> {
         let (cache_status, response) = self.process_inner(now, request, next).await?;
 
         // Record metrics
-        let cache_bypass_reason_str: &'static str = match &cache_status {
-            CacheStatus::Bypass(v) => v.into(),
+        let cache_status_str: &'static str = (&cache_status).into();
+        let cache_bypass_reason_str: &'static str = match cache_status.clone() {
+            CacheStatus::Bypass(v) => v.into_str(),
             _ => "none",
         };
-        let cache_status_str: &'static str = (&cache_status).into();
 
         let labels = &[cache_status_str, cache_bypass_reason_str];
 
@@ -456,7 +521,26 @@ impl<K: KeyExtractor + 'static> Cache<K> {
         now: Instant,
         request: Request,
         next: Next,
-    ) -> Result<(CacheStatus, Response), Error> {
+    ) -> Result<(CacheStatus<B::BypassReason>, Response), Error> {
+        // Check if we have bypasser configured
+        if let Some(b) = &self.bypasser {
+            // Run it
+            if let Ok(v) = b.bypass(&request) {
+                // If it decided to bypass - return the custom reason
+                if let Some(r) = v {
+                    return Ok((
+                        CacheStatus::Bypass(CacheBypassReason::Custom(r)),
+                        next.run(request).await,
+                    ));
+                }
+            } else {
+                return Ok((
+                    CacheStatus::Bypass(CacheBypassReason::UnableToRunBypasser),
+                    next.run(request).await,
+                ));
+            }
+        }
+
         // Check the method
         if !self.opts.methods.contains(request.method()) {
             return Ok((
@@ -526,7 +610,11 @@ impl<K: KeyExtractor + 'static> Cache<K> {
     }
 
     // Passes the request down the line and conditionally fetches the response body
-    async fn pass_request(&self, request: Request, next: Next) -> Result<ResponseType, Error> {
+    async fn pass_request(
+        &self,
+        request: Request,
+        next: Next,
+    ) -> Result<ResponseType<B::BypassReason>, Error> {
         // Execute the response & get the headers
         let response = next.run(request).await;
 
@@ -621,7 +709,7 @@ impl<K: KeyExtractor + 'static> Cache<K> {
 }
 
 #[async_trait]
-impl<K: KeyExtractor> Run for Cache<K> {
+impl<K: KeyExtractor, B: Bypasser> Run for Cache<K, B> {
     async fn run(&self, _: CancellationToken) -> Result<(), anyhow::Error> {
         self.store.run_pending_tasks();
         self.metrics.memory.set(self.store.weighted_size() as i64);
@@ -749,6 +837,25 @@ mod tests {
     }
 
     #[test]
+    fn test_bypass_reason_serialize() {
+        #[derive(Debug, Clone, Display, PartialEq, Eq, IntoStaticStr)]
+        #[strum(serialize_all = "snake_case")]
+        enum CustomReasonTest {
+            Bar,
+        }
+        impl CustomBypassReason for CustomReasonTest {}
+
+        let a: CacheBypassReason<CustomReasonTest> =
+            CacheBypassReason::Custom(CustomReasonTest::Bar);
+        let txt = a.into_str();
+        assert_eq!(txt, "bar");
+
+        let a: CacheBypassReason<CustomReasonTest> = CacheBypassReason::BodyTooBig;
+        let txt = a.into_str();
+        assert_eq!(txt, "body_too_big");
+    }
+
+    #[test]
     fn test_key_extractor_uri_range() {
         let x = KeyExtractorUriRange;
 
@@ -823,6 +930,8 @@ mod tests {
             infer_ttl(&req),
             Some(CacheControl::MaxAge(Duration::from_secs(86400)))
         );
+        req.headers_mut().insert(CACHE_CONTROL, hval!("max-age=0"));
+        assert_eq!(infer_ttl(&req), Some(CacheControl::NoCache));
 
         req.headers_mut()
             .insert(CACHE_CONTROL, hval!("max-age=foo"));
