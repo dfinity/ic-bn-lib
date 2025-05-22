@@ -117,6 +117,7 @@ zeroize = { version = "1.8.1", features = ["derive"] }
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 mockall = "0.13.0"
 rand_regex = "0.17.0"
+indoc = "2.0.6"
 
 [[bench]]
 name = "vector"

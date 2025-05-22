@@ -4,7 +4,7 @@ pub mod sessions;
 pub mod tickets;
 pub mod verify;
 
-use std::sync::Arc;
+use std::{fs::read, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, anyhow};
 use fqdn::{FQDN, Fqdn};
@@ -32,9 +32,24 @@ use crate::http::{ALPN_H1, ALPN_H2};
 pub struct StubResolver(Arc<CertifiedKey>);
 
 impl StubResolver {
+    /// Creates `StubResolver` by parsing PEM-encoded cert & key from provided slices
     pub fn new(cert: &[u8], key: &[u8]) -> Result<Self, Error> {
         Ok(Self(Arc::new(
             pem_convert_to_rustls(key, cert).context("unable to parse cert and/or key")?,
+        )))
+    }
+
+    /// Creates `StubResolver` by loading PEM-encoded cert & key from provided files
+    pub fn new_from_files(cert: PathBuf, key: PathBuf) -> Result<Self, Error> {
+        Ok(Self(Arc::new(
+            pem_load_rustls(key, cert).context("unable to load certificates")?,
+        )))
+    }
+
+    /// Creates `StubResolver` by loading PEM-encoded cert & key from provided concatenated file
+    pub fn new_from_file(pem: PathBuf) -> Result<Self, Error> {
+        Ok(Self(Arc::new(
+            pem_load_rustls_single(pem).context("unable to load certificates")?,
         )))
     }
 }
@@ -119,16 +134,27 @@ pub fn extract_sans(cert: &X509Certificate) -> Result<Vec<String>, Error> {
     Err(anyhow!("SubjectAlternativeName extension not found").into())
 }
 
-// Converts raw PEM certificate chain & private key to a CertifiedKey ready to be consumed by Rustls
+/// Converts raw PEM certificate chain & private key to a CertifiedKey ready to be consumed by Rustls.
+/// This reads the first private key and ignores any others.
 pub fn pem_convert_to_rustls(key: &[u8], certs: &[u8]) -> Result<CertifiedKey, Error> {
     let (key, certs) = (key.to_vec(), certs.to_vec());
+    #[allow(clippy::tuple_array_conversions)] // Clippy being stupid here
+    let pem = [key, certs].concat();
 
-    let key = rustls_pemfile::private_key(&mut key.as_ref())
+    pem_convert_to_rustls_single(&pem)
+}
+
+/// Converts raw concatenated PEM certificate chain & private key to a CertifiedKey ready to be consumed by Rustls.
+/// This reads the first private key and ignores any others.
+pub fn pem_convert_to_rustls_single(pem: &[u8]) -> Result<CertifiedKey, Error> {
+    let pem = pem.to_vec();
+
+    let key = rustls_pemfile::private_key(&mut pem.as_ref())
         .context("unable to read private key")?
         .ok_or_else(|| anyhow!("no private key found"))?;
 
     // Load the cert chain
-    let certs = rustls_pemfile::certs(&mut certs.as_ref())
+    let certs = rustls_pemfile::certs(&mut pem.as_ref())
         .collect::<Result<Vec<_>, _>>()
         .context("unable to read certificate chain")?;
 
@@ -140,6 +166,21 @@ pub fn pem_convert_to_rustls(key: &[u8], certs: &[u8]) -> Result<CertifiedKey, E
     let key = ring::sign::any_supported_type(&key).context("unable to parse private key")?;
 
     Ok(CertifiedKey::new(certs, key))
+}
+
+/// Loads raw concatenated PEM certificate chain & private key and converts to a CertifiedKey ready to be consumed by Rustls.
+/// This reads the first private key and ignores any others.
+pub fn pem_load_rustls(key: PathBuf, certs: PathBuf) -> Result<CertifiedKey, Error> {
+    let key = read(key).context("unable to read private key")?;
+    let certs = read(certs).context("unable to read certificate chain")?;
+    pem_convert_to_rustls(&key, &certs)
+}
+
+/// Loads raw PEM certificate chain & private key and converts to a CertifiedKey ready to be consumed by Rustls.
+/// This reads the first private key and ignores any others.
+pub fn pem_load_rustls_single(pem: PathBuf) -> Result<CertifiedKey, Error> {
+    let pem = read(pem).context("unable to read PEM file")?;
+    pem_convert_to_rustls_single(&pem)
 }
 
 pub struct Options {
@@ -233,8 +274,61 @@ pub fn prepare_client_config(tls_versions: &[&'static SupportedProtocolVersion])
 #[cfg(test)]
 mod test {
     use fqdn::fqdn;
+    use indoc::indoc;
 
     use super::*;
+
+    const CERT: &str = indoc! {"
+        -----BEGIN PRIVATE KEY-----
+        MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCd/7NXWeENaITm
+        YU+eWMJEJMZa6v74g70RpZlprQzx148U0QOKEw/r6mmdSlbN4wsbb9lUu3zmXXpv
+        YDAHYuOTYsDWcuNJXP/gCnPrD2wU8lJt3C5blmeU/9+0U6/ppRmu6kf/jmm7CMBn
+        owI0+kdvTF7sbpiUBXTDujXNsqtX0FaksILc9ZAqpUCC2gqRcOXahzT2vnvJ2N+2
+        bhveG+eB0/5oZcKgx0D4QgjR9k1+thWOQZUCJMg32OYSk4e57WhOQxu9Kh5N2MU1
+        Ff3fhCYXzg7/GhJtWyDmjt1vNBwGW9Zn0BicySdcVFPCmRW3/rZrSpnwvsEnpIuy
+        KGq+NMSXAgMBAAECggEAKYtxTFAxWZW4kF1ZEqFzH3juAT0WYyE8x1WcY8mhhDvy
+        fv5AqH8/qgBe2gGQlp2TL5k2881C184PohaQOnj5rykB3MGj2wgNrgsBlPberBlV
+        rFZ/iAyh2u93EpMIx+5mNPScjumTCp+P/BBERcrjmrPhp9ii3RUcMVUWzaoj3Lhc
+        wa5trC1r7UqbUZeO7NaVA7cGETZLVm8U7NaL8ccb1dKASUzrC9QCy9VVekJbb2S7
+        h38MELR9wvTGS7s4hXQGejb8vEDuXcZzWIFg3YMkJPIyGLAEaRynfeAHm/ji48U0
+        zh1ba3CWE/6z6nayDPqWqrwic4Hff6Mz+SIWAz2LyQKBgQDcdeWweNRVXhVkcFUP
+        JNpUiLOF5j3f4nqZwk7j5hQBxcXilYO/lmrcimvhvJ3ox97GfqCkvEQM8thTnPmi
+        JBagynOfIaUK2qdVwS1BbZ2JpYe3k/rO+iSKtRO4mF94cHgFIafPb5qt0fFz9bDS
+        7D2lnWSbveMvb+mZsp/+FZx2DwKBgQC3eBhAbOSrSGuh7KOuWsav8pROMdcsESpz
+        j8el1iEklRsklYiNrVsztlZtNUXE2zSHeNPsGENDGlvKG8qD/vbcdTFsYa1H8Hk5
+        NydTLAb0/Bm256Xee1Dm5Wt2yG2aLfc9eG0trJz8VgBDhDlulnjo2kavhWIpTBNm
+        0WmkMQsQ+QKBgQDYXd1PlUbPgcb9DEJu2nxs+r02bQHM+TnaLhm/EdAQ7UmJV7Q2
+        FCpMyI2YvsU78O1zYlPHWf5vtucZKLbXqxOKOye+xgZ04KPaRf1keXBj51GLmnBN
+        MrMqbw0r3l/UlI02fBF2RNJKRgHzDO6+E51tLUvQjkyqAewCLI1ZkVw9gQKBgD0F
+        J2O+E+vX4VxwnRvvOyfn0WWUdBFHAEyBJJDGgC1vniBzz3/3iV7QpTwbPMI1eeoY
+        yLs8cpqN2LuGtLtkAGzgWXjHn99OXrMl4eFqwkGW22KW9vbhIs44vZ47GSDvasy6
+        Ee3f/DJ81AegoY1jZIFln57fCP/dOpK20aD3YsvZAoGBAKgaWVYbROCRJ6C8CQGd
+        yetoZ8n25E7O5JtyKSNGwiQyD0IURgLuotiBpQvCCz9HGS53E6HLzBCc4jZc3GDq
+        qVDS5cIgcfWAOBalBQ+JxoHsnLRGXeBBKwvaJB+EzlrV8st1dCmM4gukElBJm/PZ
+        TvEPeiHG81OgB1RPgUt3DVIf
+        -----END PRIVATE KEY-----
+    "};
+
+    const KEY: &str = indoc! {"
+        -----BEGIN CERTIFICATE-----
+        MIIC6TCCAdGgAwIBAgIUK60AjMl8YTJ5nWViMweY043y6/EwDQYJKoZIhvcNAQEL
+        BQAwDzENMAsGA1UEAwwEbm92ZzAeFw0yMzAxMDkyMTM5NTZaFw0zMzAxMDYyMTM5
+        NTZaMA8xDTALBgNVBAMMBG5vdmcwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEK
+        AoIBAQCd/7NXWeENaITmYU+eWMJEJMZa6v74g70RpZlprQzx148U0QOKEw/r6mmd
+        SlbN4wsbb9lUu3zmXXpvYDAHYuOTYsDWcuNJXP/gCnPrD2wU8lJt3C5blmeU/9+0
+        U6/ppRmu6kf/jmm7CMBnowI0+kdvTF7sbpiUBXTDujXNsqtX0FaksILc9ZAqpUCC
+        2gqRcOXahzT2vnvJ2N+2bhveG+eB0/5oZcKgx0D4QgjR9k1+thWOQZUCJMg32OYS
+        k4e57WhOQxu9Kh5N2MU1Ff3fhCYXzg7/GhJtWyDmjt1vNBwGW9Zn0BicySdcVFPC
+        mRW3/rZrSpnwvsEnpIuyKGq+NMSXAgMBAAGjPTA7MAkGA1UdEwQCMAAwDwYDVR0R
+        BAgwBoIEbm92ZzAdBgNVHQ4EFgQUYHN6l0ihbfbLQXqnKPltmv9DWDkwDQYJKoZI
+        hvcNAQELBQADggEBAFBvyns/lJZ+zB4/Tmx3YUryji20XUNwhtlBC6V7rdWCXneY
+        kqKVgbyDZ+XAYX2eL3o1gcv+XJxQgHfL+OqHJCVbK2kkYVSCW38WNVZb+oeTp/w3
+        pgtmg91JcCjFEw2doqImLZLQDX6KK1gDGdTQ2dtisFcxGEkMUyjzqmZmZNzl+u7d
+        JeDygLfGrMleO7ij2hP2vEfgkGbbvM+JCTav0B91Rj8/CbJHBwr8/CW4BJTjsqZC
+        mglNb9+hY8N6XAxntoqZsFzuDyDx7ZSxeAW0yVRemrIPSgcPwpLDBFm4dCSwUHJN
+        ujBjp7DRCQgg8uUq+0FMQ63ioZoR5mXQ5hzmTqk=
+        -----END CERTIFICATE-----
+    "};
 
     #[test]
     fn test_sni_matches() {
@@ -255,5 +349,18 @@ mod test {
 
         // Make sure deeper subdomains are not matched
         assert!(!sni_matches(&fqdn!("baz.baz.foo1.bar"), &domains, true));
+    }
+
+    #[test]
+    fn test_pem_convert_to_rustls_single() {
+        let pem = [KEY, CERT].concat();
+        let res = pem_convert_to_rustls_single(pem.as_bytes()).unwrap();
+        assert!(res.cert.len() == 1);
+    }
+
+    #[test]
+    fn test_pem_convert_to_rustls() {
+        let res = pem_convert_to_rustls(KEY.as_bytes(), CERT.as_bytes()).unwrap();
+        assert!(res.cert.len() == 1);
     }
 }
