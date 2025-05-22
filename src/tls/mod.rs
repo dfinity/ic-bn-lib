@@ -278,7 +278,7 @@ mod test {
 
     use super::*;
 
-    const CERT: &str = indoc! {"
+    const KEY: &str = indoc! {"
         -----BEGIN PRIVATE KEY-----
         MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCd/7NXWeENaITm
         YU+eWMJEJMZa6v74g70RpZlprQzx148U0QOKEw/r6mmdSlbN4wsbb9lUu3zmXXpv
@@ -309,7 +309,7 @@ mod test {
         -----END PRIVATE KEY-----
     "};
 
-    const KEY: &str = indoc! {"
+    const CERT: &str = indoc! {"
         -----BEGIN CERTIFICATE-----
         MIIC6TCCAdGgAwIBAgIUK60AjMl8YTJ5nWViMweY043y6/EwDQYJKoZIhvcNAQEL
         BQAwDzENMAsGA1UEAwwEbm92ZzAeFw0yMzAxMDkyMTM5NTZaFw0zMzAxMDYyMTM5
