@@ -78,6 +78,7 @@ impl<T: AsyncReadWrite> ProxyProtocolStream<T> {
             &buf
         };
 
+        // Parse the header
         let hdr = v2::Header::try_from(hdr).context("unable to parse header")?;
         let addr = match hdr.addresses {
             v2::Addresses::IPv4(v) => SocketAddr::new(IpAddr::V4(v.source_address), v.source_port),
@@ -117,6 +118,8 @@ impl<T: AsyncReadWrite> AsyncRead for ProxyProtocolStream<T> {
             v.truncate(v.len() - buf_avail);
             // Put it back
             self.data.replace(v);
+
+            return Poll::Ready(Ok(()));
         }
 
         pin!(&mut self.inner).poll_read(cx, buf)
