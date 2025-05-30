@@ -81,10 +81,11 @@ pub struct HttpServer {
     pub http_server_grace_period: Duration,
 
     /// Whether to expect connections with Proxy Protocol v2.
-    /// If the connection contains the Proxy Protocol v2 header - then we will the client's IP from it
-    /// instead of TCP endpoint.
-    /// Can be "off", "enabled" or "forced" - if "forced" then connections without a Proxy Protocol
-    /// header will not be accepted.
+    /// If the connection contains the Proxy Protocol v2 header - then we will use the client's IP
+    /// from it instead of TCP endpoint.
+    /// Can be "off", "enabled" or "forced".
+    /// If "enabled" - we'll support connections with or without Proxy Protocol.
+    /// If "forced" then connections without a Proxy Protocol header will not be accepted.
     #[clap(env, long, default_value = "off")]
     pub http_server_proxy_protocol_mode: ProxyProtocolMode,
 }
