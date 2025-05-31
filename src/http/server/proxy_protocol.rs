@@ -8,7 +8,6 @@ use std::{
 use anyhow::{Context as _, anyhow};
 use ppp::v2;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
-use x509_parser::nom::AsBytes;
 
 use super::Error;
 use crate::http::AsyncReadWrite;
@@ -66,6 +65,7 @@ impl<T: AsyncReadWrite> ProxyProtocolStream<T> {
         // Try to read the first part of proxy protocol header into a buffer.
         // We assume that incoming requests are at least MINIMUM_LEN long,
         // which is Ok since even the smallest HTTP request should be longer.
+        // That's not counting TLS handshake if we're running in TLS mode.
         stream
             .read_exact(&mut buf[..MINIMUM_LEN])
             .await
@@ -73,7 +73,7 @@ impl<T: AsyncReadWrite> ProxyProtocolStream<T> {
 
         // If the prefix doesn't match the proxy protocol signature - then we
         // assume that we have no proxy protocol and just bypass the traffic.
-        if &buf[..PREFIX_LEN] != v2::PROTOCOL_PREFIX.as_bytes() {
+        if &buf[..PREFIX_LEN] != v2::PROTOCOL_PREFIX {
             return Ok((Self::new(stream, Some(buf[..MINIMUM_LEN].to_vec())), None));
         }
 
