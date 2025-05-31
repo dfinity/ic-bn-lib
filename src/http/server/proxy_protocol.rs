@@ -17,15 +17,42 @@ use crate::http::AsyncReadWrite;
 const PREFIX_LEN: usize = 12;
 /// The minimum length of a header in bytes.
 const MINIMUM_LEN: usize = PREFIX_LEN + 4;
-/// The index of the start of the big-endian u16 length in the header.
+/// The index of the start of the big-endian u16 length in the header
 const LENGTH_INDEX: usize = PREFIX_LEN + 2;
-/// The length of the read buffer used to read the PROXY protocol header.
+/// The length of the read buffer used to read the Proxy Protocol header
 const BUFFER_LEN: usize = 512;
 
 /// Async Read+Write wrapper that appends some data before the wrapped stream
+#[derive(Debug)]
 pub struct ProxyProtocolStream<T: AsyncReadWrite> {
     inner: T,
     data: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProxyHeaderAddrs {
+    pub src: SocketAddr,
+    pub dst: SocketAddr,
+}
+
+impl TryFrom<v2::Addresses> for ProxyHeaderAddrs {
+    type Error = Error;
+
+    fn try_from(value: v2::Addresses) -> Result<Self, Self::Error> {
+        let (src, dst) = match value {
+            v2::Addresses::IPv4(v) => (
+                SocketAddr::new(IpAddr::V4(v.source_address), v.source_port),
+                SocketAddr::new(IpAddr::V4(v.destination_address), v.destination_port),
+            ),
+            v2::Addresses::IPv6(v) => (
+                SocketAddr::new(IpAddr::V6(v.source_address), v.source_port),
+                SocketAddr::new(IpAddr::V6(v.destination_address), v.destination_port),
+            ),
+            _ => return Err(Error::Generic(anyhow!("unsupported address type"))),
+        };
+
+        Ok(Self { src, dst })
+    }
 }
 
 impl<T: AsyncReadWrite> ProxyProtocolStream<T> {
@@ -33,7 +60,7 @@ impl<T: AsyncReadWrite> ProxyProtocolStream<T> {
         Self { inner, data }
     }
 
-    pub async fn accept(mut stream: T) -> Result<(Self, Option<SocketAddr>), Error> {
+    pub async fn accept(mut stream: T) -> Result<(Self, Option<ProxyHeaderAddrs>), Error> {
         let mut buf = [0; BUFFER_LEN];
 
         // Try to read the first part of proxy protocol header into a buffer.
@@ -60,8 +87,8 @@ impl<T: AsyncReadWrite> ProxyProtocolStream<T> {
         #[allow(unused_assignments)]
         let mut dyn_buf = Vec::new();
         let hdr = if full_len > BUFFER_LEN {
-            dyn_buf = Vec::with_capacity(full_len);
-            dyn_buf.extend_from_slice(&buf[..MINIMUM_LEN]);
+            dyn_buf = vec![0; full_len];
+            dyn_buf[..MINIMUM_LEN].copy_from_slice(&buf[..MINIMUM_LEN]);
             stream
                 .read_exact(&mut dyn_buf[MINIMUM_LEN..full_len])
                 .await
@@ -80,18 +107,9 @@ impl<T: AsyncReadWrite> ProxyProtocolStream<T> {
 
         // Parse the header
         let hdr = v2::Header::try_from(hdr).context("unable to parse header")?;
-        let addr = match hdr.addresses {
-            v2::Addresses::IPv4(v) => SocketAddr::new(IpAddr::V4(v.source_address), v.source_port),
-            v2::Addresses::IPv6(v) => SocketAddr::new(IpAddr::V6(v.source_address), v.source_port),
-            _ => {
-                return Err(Error::Generic(anyhow!(
-                    "unsupported address type: {:?}",
-                    hdr.addresses
-                )));
-            }
-        };
+        let hdr = ProxyHeaderAddrs::try_from(hdr.addresses)?;
 
-        Ok((Self::new(stream, None), Some(addr)))
+        Ok((Self::new(stream, None), Some(hdr)))
     }
 }
 
@@ -221,7 +239,47 @@ mod test {
         let addr = addr.unwrap();
         assert_eq!(
             addr,
-            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(1, 1, 1, 1), 31337))
+            ProxyHeaderAddrs {
+                src: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(1, 1, 1, 1), 31337)),
+                dst: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(2, 2, 2, 2), 443)),
+            }
+        );
+
+        let mut buf = vec![0; 20];
+        stream.read_exact(&mut buf).await?;
+        assert_eq!(buf, &b"foobar foobaz foobar"[..]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_proxy_protocol_accept_with_long_proxy_header() -> Result<(), Error> {
+        let addrs = v2::IPv4::new([1, 1, 1, 1], [2, 2, 2, 2], 31337, 443);
+        let mut hdr = v2::Builder::with_addresses(
+            v2::Version::Two | v2::Command::Proxy,
+            v2::Protocol::Stream,
+            addrs,
+        );
+        for _ in 0..7000 {
+            hdr = hdr.write_tlv(v2::Type::NoOp, &b"foobar"[..]).unwrap();
+        }
+        let mut hdr = hdr.build()?;
+        hdr.extend_from_slice(&b"foobar foobaz foobar"[..]);
+
+        let (recv, mut send) = MockStream::pair();
+        tokio::task::spawn(async move {
+            let n = send.write(&hdr).await.unwrap();
+            assert_eq!(n, hdr.len());
+        });
+
+        let (mut stream, addr) = ProxyProtocolStream::accept(recv).await?;
+        let addr = addr.unwrap();
+        assert_eq!(
+            addr,
+            ProxyHeaderAddrs {
+                src: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(1, 1, 1, 1), 31337)),
+                dst: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(2, 2, 2, 2), 443)),
+            }
         );
 
         let mut buf = vec![0; 20];
@@ -250,5 +308,21 @@ mod test {
         assert_eq!(buf, &b"baz foobar"[..]);
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_proxy_protocol_accept_with_invalid_header() {
+        // Create a valid prefix, but invalid header data after it
+        let mut hdr = v2::PROTOCOL_PREFIX.to_vec();
+        hdr.extend_from_slice(&b"foobar foobaz foobar"[..]);
+
+        let (recv, mut send) = MockStream::pair();
+        tokio::task::spawn(async move {
+            let n = send.write(&hdr).await.unwrap();
+            assert_eq!(n, hdr.len());
+        });
+
+        let res = ProxyProtocolStream::accept(recv).await;
+        assert!(res.is_err());
     }
 }

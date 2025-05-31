@@ -29,7 +29,7 @@ use prometheus::{
     register_histogram_vec_with_registry, register_int_counter_vec_with_registry,
     register_int_gauge_vec_with_registry,
 };
-use proxy_protocol::ProxyProtocolStream;
+use proxy_protocol::{ProxyHeaderAddrs, ProxyProtocolStream};
 use rustls::{CipherSuite, ProtocolVersion, server::ServerConnection, sign::SingleCertAndKey};
 use scopeguard::defer;
 use strum::EnumString;
@@ -240,6 +240,7 @@ impl TryFrom<&ServerConnection> for TlsInfo {
 pub struct ConnInfo {
     pub id: Uuid,
     pub accepted_at: Instant,
+    pub local_addr: Addr,
     pub remote_addr: Addr,
     pub traffic: Arc<Stats>,
     pub req_count: AtomicU64,
@@ -251,6 +252,7 @@ impl Default for ConnInfo {
         Self {
             id: Uuid::new_v4(),
             accepted_at: Instant::now(),
+            local_addr: Addr::default(),
             remote_addr: Addr::default(),
             traffic: Arc::new(Stats::new()),
             req_count: AtomicU64::new(0),
@@ -424,32 +426,34 @@ impl Conn {
         // Wrap with traffic counter
         let (stream, stats) = AsyncCounter::new(stream);
 
-        let (stream, proxy_addr): (Box<dyn AsyncReadWrite>, Option<SocketAddr>) =
+        // Read & parse Proxy Protocol v2 header if configured
+        let (stream, proxy_hdr): (Box<dyn AsyncReadWrite>, Option<ProxyHeaderAddrs>) =
             if self.options.proxy_protocol_mode != ProxyProtocolMode::Off {
-                let (stream, addr) = ProxyProtocolStream::accept(stream)
+                let (stream, hdr) = ProxyProtocolStream::accept(stream)
                     .await
                     .context("unable to accept Proxy Protocol")?;
 
-                if self.options.proxy_protocol_mode == ProxyProtocolMode::Forced && addr.is_none() {
+                if self.options.proxy_protocol_mode == ProxyProtocolMode::Forced && hdr.is_none() {
                     return Err(Error::Generic(anyhow!(
                         "Proxy Protocol expected, but not detected"
                     )));
                 }
 
-                (Box::new(stream), addr)
+                (Box::new(stream), hdr)
             } else {
                 (Box::new(stream), None)
             };
 
-        // Use remote IP from Proxy Protocol if it's available
-        let remote_addr = proxy_addr
-            .map(Addr::Tcp)
-            .unwrap_or_else(|| self.remote_addr.clone());
+        // Use IPs from Proxy Protocol if available
+        let (local_addr, remote_addr) = proxy_hdr
+            .map(|x| (Addr::Tcp(x.dst), Addr::Tcp(x.src)))
+            .unwrap_or_else(|| (self.addr.clone(), self.remote_addr.clone()));
 
         let conn_info = Arc::new(ConnInfo {
             id: Uuid::now_v7(),
             accepted_at,
             remote_addr,
+            local_addr,
             traffic: stats.clone(),
             req_count: AtomicU64::new(0),
             close: self.token_forceful.clone(),
