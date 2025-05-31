@@ -29,7 +29,7 @@ use prometheus::{
     register_histogram_vec_with_registry, register_int_counter_vec_with_registry,
     register_int_gauge_vec_with_registry,
 };
-use proxy_protocol::{ProxyHeaderAddrs, ProxyProtocolStream};
+use proxy_protocol::{ProxyHeader, ProxyProtocolStream};
 use rustls::{CipherSuite, ProtocolVersion, server::ServerConnection, sign::SingleCertAndKey};
 use scopeguard::defer;
 use strum::EnumString;
@@ -427,7 +427,7 @@ impl Conn {
         let (stream, stats) = AsyncCounter::new(stream);
 
         // Read & parse Proxy Protocol v2 header if configured
-        let (stream, proxy_hdr): (Box<dyn AsyncReadWrite>, Option<ProxyHeaderAddrs>) =
+        let (stream, proxy_hdr): (Box<dyn AsyncReadWrite>, Option<ProxyHeader>) =
             if self.options.proxy_protocol_mode != ProxyProtocolMode::Off {
                 let (stream, hdr) = ProxyProtocolStream::accept(stream)
                     .await

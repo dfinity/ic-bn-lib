@@ -30,12 +30,12 @@ pub struct ProxyProtocolStream<T: AsyncReadWrite> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProxyHeaderAddrs {
+pub struct ProxyHeader {
     pub src: SocketAddr,
     pub dst: SocketAddr,
 }
 
-impl TryFrom<v2::Addresses> for ProxyHeaderAddrs {
+impl TryFrom<v2::Addresses> for ProxyHeader {
     type Error = Error;
 
     fn try_from(value: v2::Addresses) -> Result<Self, Self::Error> {
@@ -60,7 +60,7 @@ impl<T: AsyncReadWrite> ProxyProtocolStream<T> {
         Self { inner, data }
     }
 
-    pub async fn accept(mut stream: T) -> Result<(Self, Option<ProxyHeaderAddrs>), Error> {
+    pub async fn accept(mut stream: T) -> Result<(Self, Option<ProxyHeader>), Error> {
         let mut buf = [0; BUFFER_LEN];
 
         // Try to read the first part of proxy protocol header into a buffer.
@@ -107,7 +107,7 @@ impl<T: AsyncReadWrite> ProxyProtocolStream<T> {
 
         // Parse the header
         let hdr = v2::Header::try_from(hdr).context("unable to parse header")?;
-        let hdr = ProxyHeaderAddrs::try_from(hdr.addresses)?;
+        let hdr = ProxyHeader::try_from(hdr.addresses)?;
 
         Ok((Self::new(stream, None), Some(hdr)))
     }
@@ -214,6 +214,7 @@ mod test {
         let mut buf = vec![0; 2];
         s.read_exact(&mut buf).await.unwrap();
         assert_eq!(buf, b"ar");
+        assert!(s.read(&mut buf).await.is_err());
 
         Ok(())
     }
@@ -239,7 +240,7 @@ mod test {
         let addr = addr.unwrap();
         assert_eq!(
             addr,
-            ProxyHeaderAddrs {
+            ProxyHeader {
                 src: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(1, 1, 1, 1), 31337)),
                 dst: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(2, 2, 2, 2), 443)),
             }
@@ -276,7 +277,7 @@ mod test {
         let addr = addr.unwrap();
         assert_eq!(
             addr,
-            ProxyHeaderAddrs {
+            ProxyHeader {
                 src: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(1, 1, 1, 1), 31337)),
                 dst: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(2, 2, 2, 2), 443)),
             }
