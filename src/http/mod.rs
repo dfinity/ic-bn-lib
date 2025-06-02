@@ -49,6 +49,8 @@ pub enum Error {
     BodyReadingFailed(String),
     #[error("HTTP request failed: {0}")]
     RequestFailed(#[from] reqwest::Error),
+    #[error("No Proxy Protocol v2 detected")]
+    NoProxyProtocolDetected,
     #[error("DNS resolving failed: {0}")]
     DnsError(String),
     #[error("Generic HTTP failure: {0}")]

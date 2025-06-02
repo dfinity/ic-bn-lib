@@ -21,13 +21,7 @@ const LENGTH_INDEX: usize = PREFIX_LEN + 2;
 /// The length of the read buffer used to read the Proxy Protocol header
 const BUFFER_LEN: usize = 512;
 
-/// Async Read+Write wrapper that appends some data before the wrapped stream
-#[derive(Debug)]
-pub struct ProxyProtocolStream<T: AsyncReadWrite> {
-    inner: T,
-    data: Option<Vec<u8>>,
-}
-
+/// Data extracted from a Proxy Protocol header
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProxyHeader {
     pub src: SocketAddr,
@@ -52,6 +46,13 @@ impl TryFrom<v2::Addresses> for ProxyHeader {
 
         Ok(Self { src, dst })
     }
+}
+
+/// Async Read+Write wrapper that appends some data before the wrapped stream
+#[derive(Debug)]
+pub struct ProxyProtocolStream<T: AsyncReadWrite> {
+    inner: T,
+    data: Option<Vec<u8>>,
 }
 
 impl<T: AsyncReadWrite> ProxyProtocolStream<T> {
@@ -134,7 +135,8 @@ impl<T: AsyncReadWrite> AsyncRead for ProxyProtocolStream<T> {
             v.rotate_left(buf_avail);
             // Truncate it
             v.truncate(v.len() - buf_avail);
-            // Put it back
+            // Put it back.
+            // This helps avoid reallocating the Vec between read calls.
             self.data.replace(v);
 
             return Poll::Ready(Ok(()));

@@ -434,9 +434,7 @@ impl Conn {
                     .context("unable to accept Proxy Protocol")?;
 
                 if self.options.proxy_protocol_mode == ProxyProtocolMode::Forced && hdr.is_none() {
-                    return Err(Error::Generic(anyhow!(
-                        "Proxy Protocol expected, but not detected"
-                    )));
+                    return Err(Error::NoProxyProtocolDetected);
                 }
 
                 (Box::new(stream), hdr)
