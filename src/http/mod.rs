@@ -33,6 +33,10 @@ pub const ALPN_H1: &[u8] = b"http/1.1";
 pub const ALPN_H2: &[u8] = b"h2";
 pub const ALPN_ACME: &[u8] = b"acme-tls/1";
 
+/// Blanket async read+write trait for streams Box-ing
+pub trait AsyncReadWrite: AsyncRead + AsyncWrite + Send + Sync + Unpin {}
+impl<T: AsyncRead + AsyncWrite + Send + Sync + Unpin> AsyncReadWrite for T {}
+
 /// Generic error for now
 /// TODO improve
 #[derive(thiserror::Error, Debug)]
@@ -45,6 +49,8 @@ pub enum Error {
     BodyReadingFailed(String),
     #[error("HTTP request failed: {0}")]
     RequestFailed(#[from] reqwest::Error),
+    #[error("No Proxy Protocol v2 detected")]
+    NoProxyProtocolDetected,
     #[error("DNS resolving failed: {0}")]
     DnsError(String),
     #[error("Generic HTTP failure: {0}")]
@@ -133,13 +139,13 @@ impl Stats {
     }
 }
 
-// Async read+write wrapper that counts bytes read/written
-pub struct AsyncCounter<T: AsyncRead + AsyncWrite + Send + Sync + Unpin> {
+/// Async read+write wrapper that counts bytes read/written
+pub struct AsyncCounter<T: AsyncReadWrite> {
     inner: T,
     stats: Arc<Stats>,
 }
 
-impl<T: AsyncRead + AsyncWrite + Send + Sync + Unpin> AsyncCounter<T> {
+impl<T: AsyncReadWrite> AsyncCounter<T> {
     pub fn new(inner: T) -> (Self, Arc<Stats>) {
         let stats = Arc::new(Stats::new());
 
@@ -153,14 +159,14 @@ impl<T: AsyncRead + AsyncWrite + Send + Sync + Unpin> AsyncCounter<T> {
     }
 }
 
-impl<T: AsyncRead + AsyncWrite + Send + Sync + Unpin> AsyncRead for AsyncCounter<T> {
+impl<T: AsyncReadWrite> AsyncRead for AsyncCounter<T> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let size_before = buf.filled().len();
-        let poll = Pin::new(&mut self.inner).poll_read(cx, buf);
+        let poll = pin!(&mut self.inner).poll_read(cx, buf);
         if matches!(&poll, Poll::Ready(Ok(()))) {
             let rcvd = buf.filled().len() - size_before;
             self.stats.rcvd.fetch_add(rcvd as u64, Ordering::SeqCst);
@@ -170,7 +176,7 @@ impl<T: AsyncRead + AsyncWrite + Send + Sync + Unpin> AsyncRead for AsyncCounter
     }
 }
 
-impl<T: AsyncRead + AsyncWrite + Send + Sync + Unpin> AsyncWrite for AsyncCounter<T> {
+impl<T: AsyncReadWrite> AsyncWrite for AsyncCounter<T> {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,

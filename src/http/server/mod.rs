@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod proxy_protocol;
 
 use std::{
     fmt::Display,
@@ -28,10 +29,12 @@ use prometheus::{
     register_histogram_vec_with_registry, register_int_counter_vec_with_registry,
     register_int_gauge_vec_with_registry,
 };
+use proxy_protocol::{ProxyHeader, ProxyProtocolStream};
 use rustls::{CipherSuite, ProtocolVersion, server::ServerConnection, sign::SingleCertAndKey};
 use scopeguard::defer;
+use strum::EnumString;
 use tokio::{
-    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
+    io::AsyncWriteExt,
     net::{TcpListener, TcpSocket, UnixListener, UnixSocket},
     pin, select,
     sync::mpsc::channel,
@@ -44,7 +47,7 @@ use tower_service::Service;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use super::{ALPN_ACME, AsyncCounter, Error, Stats, body::NotifyingBody};
+use super::{ALPN_ACME, AsyncCounter, AsyncReadWrite, Error, Stats, body::NotifyingBody};
 use crate::{
     tasks::Run,
     tls::{pem_convert_to_rustls, prepare_server_config},
@@ -55,10 +58,6 @@ const CONN_DURATION_BUCKETS: &[f64] = &[1.0, 8.0, 32.0, 64.0, 256.0, 512.0, 1024
 const CONN_REQUESTS: &[f64] = &[1.0, 4.0, 8.0, 16.0, 32.0, 64.0, 256.0];
 
 const YEAR: Duration = Duration::from_secs(86400 * 365);
-
-// Blanket async read+write trait for streams Box-ing
-trait AsyncReadWrite: AsyncRead + AsyncWrite + Send + Sync + Unpin {}
-impl<T: AsyncRead + AsyncWrite + Send + Sync + Unpin> AsyncReadWrite for T {}
 
 #[derive(Clone)]
 pub struct Metrics {
@@ -163,6 +162,14 @@ impl Metrics {
     }
 }
 
+/// Status of Proxy Protocol in the Server
+#[derive(Clone, Copy, Debug, PartialEq, Eq, EnumString)]
+pub enum ProxyProtocolMode {
+    Off,
+    Enabled,
+    Forced,
+}
+
 #[derive(Clone, Copy)]
 pub struct Options {
     pub backlog: u32,
@@ -176,6 +183,7 @@ pub struct Options {
     pub http2_keepalive_timeout: Duration,
     pub grace_period: Duration,
     pub max_requests_per_conn: Option<u64>,
+    pub proxy_protocol_mode: ProxyProtocolMode,
 }
 
 impl Default for Options {
@@ -192,6 +200,7 @@ impl Default for Options {
             http2_keepalive_timeout: Duration::from_secs(10),
             grace_period: Duration::from_secs(60),
             max_requests_per_conn: None,
+            proxy_protocol_mode: ProxyProtocolMode::Off,
         }
     }
 }
@@ -231,6 +240,7 @@ impl TryFrom<&ServerConnection> for TlsInfo {
 pub struct ConnInfo {
     pub id: Uuid,
     pub accepted_at: Instant,
+    pub local_addr: Addr,
     pub remote_addr: Addr,
     pub traffic: Arc<Stats>,
     pub req_count: AtomicU64,
@@ -242,6 +252,7 @@ impl Default for ConnInfo {
         Self {
             id: Uuid::new_v4(),
             accepted_at: Instant::now(),
+            local_addr: Addr::default(),
             remote_addr: Addr::default(),
             traffic: Arc::new(Stats::new()),
             req_count: AtomicU64::new(0),
@@ -415,10 +426,32 @@ impl Conn {
         // Wrap with traffic counter
         let (stream, stats) = AsyncCounter::new(stream);
 
+        // Read & parse Proxy Protocol v2 header if configured
+        let (stream, proxy_hdr): (Box<dyn AsyncReadWrite>, Option<ProxyHeader>) =
+            if self.options.proxy_protocol_mode != ProxyProtocolMode::Off {
+                let (stream, hdr) = ProxyProtocolStream::accept(stream)
+                    .await
+                    .context("unable to accept Proxy Protocol")?;
+
+                if self.options.proxy_protocol_mode == ProxyProtocolMode::Forced && hdr.is_none() {
+                    return Err(Error::NoProxyProtocolDetected);
+                }
+
+                (Box::new(stream), hdr)
+            } else {
+                (Box::new(stream), None)
+            };
+
+        // Use IPs from Proxy Protocol if available
+        let (local_addr, remote_addr) = proxy_hdr
+            .map(|x| (Addr::Tcp(x.dst), Addr::Tcp(x.src)))
+            .unwrap_or_else(|| (self.addr.clone(), self.remote_addr.clone()));
+
         let conn_info = Arc::new(ConnInfo {
             id: Uuid::now_v7(),
             accepted_at,
-            remote_addr: self.remote_addr.clone(),
+            remote_addr,
+            local_addr,
             traffic: stats.clone(),
             req_count: AtomicU64::new(0),
             close: self.token_forceful.clone(),
