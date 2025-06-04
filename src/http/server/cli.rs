@@ -120,3 +120,22 @@ impl From<&HttpServer> for tls::Options {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use clap::Parser;
+
+    use super::*;
+
+    #[derive(clap::Parser)]
+    struct Cli {
+        #[command(flatten)]
+        server: HttpServer,
+    }
+
+    #[test]
+    fn test_cli() {
+        let args: Vec<&str> = vec![];
+        Cli::parse_from(args);
+    }
+}

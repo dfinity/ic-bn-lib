@@ -164,6 +164,7 @@ impl Metrics {
 
 /// Status of Proxy Protocol in the Server
 #[derive(Clone, Copy, Debug, PartialEq, Eq, EnumString)]
+#[strum(serialize_all = "snake_case")]
 pub enum ProxyProtocolMode {
     Off,
     Enabled,

@@ -55,3 +55,22 @@ impl<R: CloneableDnsResolver> From<&HttpClient> for super::Options<R> {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use clap::Parser;
+
+    use super::*;
+
+    #[derive(clap::Parser)]
+    struct Cli {
+        #[command(flatten)]
+        server: HttpClient,
+    }
+
+    #[test]
+    fn test_cli() {
+        let args: Vec<&str> = vec![];
+        Cli::parse_from(args);
+    }
+}
