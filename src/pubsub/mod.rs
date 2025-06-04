@@ -1,4 +1,12 @@
-use std::{hash::Hash, marker::PhantomData, sync::Arc, time::Duration};
+use std::{
+    hash::Hash,
+    marker::PhantomData,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use ahash::RandomState;
 use moka::sync::{Cache, CacheBuilder};
@@ -22,15 +30,17 @@ impl<T: Clone + Send + Sync + 'static> Message for T {}
 /// Broker options
 #[derive(Clone, Debug)]
 pub struct Opts {
-    /// How many topics maximum we will support
+    /// How many topics maximum we will support.
+    /// Oldest topic will be evicted if this number is exceeded.
     pub max_topics: u64,
-    /// If the topic doesn't get messages for that long,
-    /// it will be deleted
+    /// If the topic doesn't get messages or subscribers for that long, then it will be deleted.
     pub idle_timeout: Duration,
     /// Maximum buffer size of the publishing queue (per-topic).
-    /// When it's exceeded (due to slow consumers) - the slow consumers lose
-    /// the oldest messages
+    /// When it's exceeded (due to slow consumers) - the slow consumers lose  the oldest messages
     pub buffer_size: usize,
+    /// Maximum number of subscribers (per-topic).
+    /// No new subscribers can be created if this number is exceeded.
+    pub max_subscribers: usize,
 }
 
 impl Default for Opts {
@@ -39,6 +49,7 @@ impl Default for Opts {
             max_topics: 1_000_000,
             idle_timeout: Duration::from_secs(600),
             buffer_size: 10_000,
+            max_subscribers: 10_000,
         }
     }
 }
@@ -47,17 +58,25 @@ impl Default for Opts {
 #[derive(Clone)]
 struct Topic<M: Message> {
     tx: Sender<M>,
+    subscribers: Arc<AtomicUsize>,
 }
 
 impl<M: Message> Topic<M> {
     fn new(capacity: usize) -> Self {
         Self {
             tx: Sender::new(capacity),
+            subscribers: Arc::new(AtomicUsize::new(0)),
         }
     }
 
-    fn subscribe(&self) -> Receiver<M> {
-        self.tx.subscribe()
+    fn subscribe(&self, metric: IntGauge) -> Subscriber<M> {
+        self.subscribers.fetch_add(1, Ordering::SeqCst);
+
+        Subscriber {
+            rx: self.tx.subscribe(),
+            metric,
+            counter: self.subscribers.clone(),
+        }
     }
 }
 
@@ -65,6 +84,7 @@ impl<M: Message> Topic<M> {
 pub struct Subscriber<M: Message> {
     rx: Receiver<M>,
     metric: IntGauge,
+    counter: Arc<AtomicUsize>,
 }
 
 impl<M: Message> Subscriber<M> {
@@ -77,6 +97,7 @@ impl<M: Message> Drop for Subscriber<M> {
     fn drop(&mut self) {
         // Decrement subscriber count
         self.metric.dec();
+        self.counter.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -149,14 +170,15 @@ impl<M: Message, T: TopicId> Broker<M, T> {
     }
 
     /// Subscribe to a given topic, returning a Receiver that can be used to consume messages
-    pub fn subscribe(&self, topic: &T) -> Subscriber<M> {
-        self.metrics.subscribers.inc();
-        let rx = self.get_topic(topic).subscribe();
-
-        Subscriber {
-            rx,
-            metric: self.metrics.subscribers.clone(),
+    pub fn subscribe(&self, topic: &T) -> Option<Subscriber<M>> {
+        let topic = self.get_topic(topic);
+        // Check if we're at the limit already
+        if topic.subscribers.load(Ordering::SeqCst) >= self.opts.max_subscribers {
+            return None;
         }
+
+        self.metrics.subscribers.inc();
+        Some(topic.subscribe(self.metrics.subscribers.clone()))
     }
 
     /// Tries to send the message to the given topic.
@@ -209,6 +231,12 @@ impl<M: Message, T: TopicId> BrokerBuilder<M, T> {
         self
     }
 
+    /// Set per-topic max subscriber limit. Default is 10k.
+    pub const fn with_max_subscribers(mut self, max_subscribers: usize) -> Self {
+        self.opts.max_subscribers = max_subscribers;
+        self
+    }
+
     /// Set Prometheus registry to use
     pub fn with_metric_registry(mut self, registry: &Registry) -> Self {
         self.registry = registry.clone();
@@ -227,7 +255,10 @@ mod test {
 
     #[tokio::test]
     async fn test_pubsub() {
-        let b: Broker<String, String> = BrokerBuilder::new().with_buffer_size(3).build();
+        let b: Broker<String, String> = BrokerBuilder::new()
+            .with_buffer_size(3)
+            .with_max_subscribers(1)
+            .build();
 
         let topic1 = "foo".to_string();
         let topic2 = "dead".to_string();
@@ -238,8 +269,10 @@ mod test {
         assert_eq!(b.metrics.topics.get(), 2);
 
         // Subscribe
-        let mut foo_sub = b.subscribe(&topic1);
-        let mut dead_sub = b.subscribe(&topic2);
+        let mut foo_sub = b.subscribe(&topic1).unwrap();
+        let mut dead_sub = b.subscribe(&topic2).unwrap();
+        // Make sure we hit the subscriber limit
+        assert!(b.subscribe(&topic1).is_none());
         assert_eq!(b.metrics.subscribers.get(), 2);
 
         // Publish up to a buffer size & receive
@@ -295,6 +328,10 @@ mod test {
 
         // Again no subscribers - error
         assert!(b.publish(&topic1, "".into()).is_err());
-        assert!(b.publish(&topic2, "".into()).is_err())
+        assert!(b.publish(&topic2, "".into()).is_err());
+
+        // We can subscribe again
+        assert!(b.subscribe(&topic1).is_some());
+        assert!(b.subscribe(&topic2).is_some());
     }
 }
