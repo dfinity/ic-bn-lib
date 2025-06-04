@@ -94,6 +94,8 @@ where
 mod test {
     use std::time::Duration;
 
+    use clap::Parser;
+
     use super::*;
     use crate::types::RequestType;
 
@@ -114,5 +116,19 @@ mod test {
             TypeLatency::<RequestType>::from_str("sync_call:1s").unwrap(),
             TypeLatency::<RequestType>(RequestType::SyncCall, Duration::from_millis(1000))
         );
+    }
+
+    #[derive(clap::Parser)]
+    struct Cli {
+        #[command(flatten)]
+        sharded: ShedSharded<RequestType>,
+        #[command(flatten)]
+        system: ShedSystem,
+    }
+
+    #[test]
+    fn test_cli() {
+        let args: Vec<&str> = vec![];
+        Cli::parse_from(args);
     }
 }
