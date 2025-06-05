@@ -179,7 +179,8 @@ impl<M: Message, T: TopicId> Broker<M, T> {
         self.topics.contains_key(topic)
     }
 
-    /// Subscribe to a given topic, returning a Receiver that can be used to consume messages
+    /// Subscribe to a given topic, returning a Subscriber that can be used to consume messages.
+    /// If the limit of subscribers is reached - it returns None.
     pub fn subscribe(&self, topic: &T) -> Option<Subscriber<M>> {
         // Fetch or create a new topic
         let topic = self.topics.get_with_by_ref(topic, || {
@@ -197,9 +198,8 @@ impl<M: Message, T: TopicId> Broker<M, T> {
     }
 
     /// Tries to send the message to the given topic.
-    /// If the topic does not exist (no subscribers),
-    /// then the function will return None.
-    /// If it exists, but there are no subscribers - it will return SendError.
+    /// If the topic does not exist, TopicDoesNotExist is returned.
+    /// If it exists, but there are no active subscribers - it will return NoSubscribers.
     pub fn publish(&self, topic: &T, message: M) -> PublishResult {
         // Check if the topic exists
         let Some(topic) = self.topics.get(topic) else {
