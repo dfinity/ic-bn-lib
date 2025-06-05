@@ -1,12 +1,4 @@
-use std::{
-    hash::Hash,
-    marker::PhantomData,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::{hash::Hash, marker::PhantomData, sync::Arc, time::Duration};
 
 use ahash::RandomState;
 use moka::sync::{Cache, CacheBuilder};
@@ -37,7 +29,7 @@ pub struct Opts {
     /// If the topic doesn't get messages or subscribers for that long, then it will be deleted.
     pub idle_timeout: Duration,
     /// Maximum buffer size of the publishing queue (per-topic).
-    /// When it's exceeded (due to slow consumers) - the slow consumers lose  the oldest messages
+    /// When it's exceeded (due to slow consumers) - the slow consumers lose the oldest messages
     pub buffer_size: usize,
     /// Maximum number of subscribers (per-topic).
     /// No new subscribers can be created if this number is exceeded.
@@ -59,7 +51,6 @@ impl Default for Opts {
 pub struct Subscriber<M: Message> {
     rx: Receiver<M>,
     metric: IntGauge,
-    counter: Arc<AtomicUsize>,
 }
 
 impl<M: Message> Subscriber<M> {
@@ -72,7 +63,6 @@ impl<M: Message> Drop for Subscriber<M> {
     fn drop(&mut self) {
         // Decrement subscriber count
         self.metric.dec();
-        self.counter.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -80,24 +70,19 @@ impl<M: Message> Drop for Subscriber<M> {
 #[derive(Clone)]
 struct Topic<M: Message> {
     tx: Sender<M>,
-    subscribers: Arc<AtomicUsize>,
 }
 
 impl<M: Message> Topic<M> {
     fn new(capacity: usize) -> Self {
         Self {
             tx: Sender::new(capacity),
-            subscribers: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     fn subscribe(&self, metric: IntGauge) -> Subscriber<M> {
-        self.subscribers.fetch_add(1, Ordering::SeqCst);
-
         Subscriber {
             rx: self.tx.subscribe(),
             metric,
-            counter: self.subscribers.clone(),
         }
     }
 
@@ -189,7 +174,7 @@ impl<M: Message, T: TopicId> Broker<M, T> {
         });
 
         // Check if we're at the limit already
-        if topic.subscribers.load(Ordering::SeqCst) >= self.opts.max_subscribers {
+        if topic.tx.receiver_count() >= self.opts.max_subscribers {
             return None;
         }
 
@@ -220,6 +205,7 @@ impl<M: Message, T: TopicId> Broker<M, T> {
     }
 }
 
+/// Builder to build a Broker
 pub struct BrokerBuilder<M, T> {
     opts: Opts,
     metrics: Metrics,
