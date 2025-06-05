@@ -174,6 +174,11 @@ impl<M: Message, T: TopicId> Broker<M, T> {
         }
     }
 
+    /// Tells if the given topic exists
+    pub fn topic_exists(&self, topic: &T) -> bool {
+        self.topics.contains_key(topic)
+    }
+
     /// Subscribe to a given topic, returning a Receiver that can be used to consume messages
     pub fn subscribe(&self, topic: &T) -> Option<Subscriber<M>> {
         // Fetch or create a new topic
@@ -310,6 +315,8 @@ mod test {
         // Subscribe
         let mut foo_sub = b.subscribe(&topic1).unwrap();
         let mut dead_sub = b.subscribe(&topic2).unwrap();
+        assert!(b.topic_exists(&topic1));
+        assert!(b.topic_exists(&topic2));
         assert_eq!(b.metrics.topics.get(), 2);
 
         // Make sure we hit the subscriber limit
