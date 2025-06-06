@@ -648,7 +648,9 @@ impl Conn {
         });
 
         // Serve the connection
-        let conn = self.builder.serve_connection(Box::pin(stream), service);
+        let conn = self
+            .builder
+            .serve_connection_with_upgrades(Box::pin(stream), service);
         // Using mutable future reference requires pinning
         pin!(conn);
 
