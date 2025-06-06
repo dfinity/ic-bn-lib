@@ -3,14 +3,10 @@ use std::{hash::Hash, marker::PhantomData, sync::Arc, time::Duration};
 use ahash::RandomState;
 use moka::sync::{Cache, CacheBuilder};
 use prometheus::{
-    IntCounterVec, IntGauge, Registry, register_int_counter_vec_with_registry,
+    IntCounter, IntGauge, Registry, register_int_counter_with_registry,
     register_int_gauge_with_registry,
 };
-use strum::{Display, EnumString, IntoStaticStr};
-use tokio::sync::broadcast::{
-    Receiver, Sender,
-    error::{RecvError, SendError},
-};
+use tokio::sync::broadcast::{Receiver, Sender, error::RecvError};
 
 /// Trait that a topic ID should implement
 pub trait TopicId: Hash + Eq + Clone + Send + Sync + 'static {}
@@ -48,9 +44,10 @@ impl Default for Opts {
 }
 
 /// Subscriber to receive messages
+#[derive(Debug)]
 pub struct Subscriber<M: Message> {
     rx: Receiver<M>,
-    metric: IntGauge,
+    metrics: Arc<Metrics>,
 }
 
 impl<M: Message> Subscriber<M> {
@@ -62,40 +59,78 @@ impl<M: Message> Subscriber<M> {
 impl<M: Message> Drop for Subscriber<M> {
     fn drop(&mut self) {
         // Decrement subscriber count
-        self.metric.dec();
+        self.metrics.subscribers.dec();
     }
 }
 
 /// Topic to manage subscribers
-#[derive(Clone)]
-struct Topic<M: Message> {
+#[derive(Debug, Clone)]
+pub struct Topic<M: Message> {
     tx: Sender<M>,
+    max_subscribers: usize,
+    metrics: Arc<Metrics>,
 }
 
 impl<M: Message> Topic<M> {
-    fn new(capacity: usize) -> Self {
+    fn new(capacity: usize, metrics: Arc<Metrics>, max_subscribers: usize) -> Self {
+        metrics.topics.inc();
+
         Self {
             tx: Sender::new(capacity),
+            max_subscribers,
+            metrics,
         }
     }
 
-    fn subscribe(&self, metric: IntGauge) -> Subscriber<M> {
-        Subscriber {
+    /// Returns the number of subscribers on this topic
+    pub fn subscriber_count(&self) -> usize {
+        self.tx.receiver_count()
+    }
+
+    /// Subscribes to this topic.
+    /// Fails if there are already too many subscirbers.
+    pub fn subscribe(&self) -> Result<Subscriber<M>, SubscribeError> {
+        // Check if we're at the limit already
+        if self.tx.receiver_count() >= self.max_subscribers {
+            return Err(SubscribeError::TooManySubscribers);
+        }
+
+        self.metrics.subscribers.inc();
+        Ok(Subscriber {
             rx: self.tx.subscribe(),
-            metric,
-        }
+            metrics: self.metrics.clone(),
+        })
     }
 
-    fn publish(&self, msg: M) -> Result<usize, SendError<M>> {
-        self.tx.send(msg)
+    /// Publishes the message to this topic
+    pub fn publish(&self, message: M) -> Result<usize, PublishError> {
+        self.tx.send(message).map_or_else(
+            |_| {
+                self.metrics.msgs_dropped.inc();
+                Err(PublishError::NoSubscribers)
+            },
+            |v| {
+                self.metrics.msgs_sent.inc();
+                Ok(v)
+            },
+        )
     }
 }
 
+impl<M: Message> Drop for Topic<M> {
+    fn drop(&mut self) {
+        // Decrement topic count
+        self.metrics.topics.dec();
+    }
+}
+
+/// Metrics for a Broker
 #[derive(Debug, Clone)]
 pub struct Metrics {
     topics: IntGauge,
-    msgs_sent: IntCounterVec,
     subscribers: IntGauge,
+    msgs_sent: IntCounter,
+    msgs_dropped: IntCounter,
 }
 
 impl Metrics {
@@ -108,10 +143,16 @@ impl Metrics {
             )
             .unwrap(),
 
-            msgs_sent: register_int_counter_vec_with_registry!(
+            msgs_sent: register_int_counter_with_registry!(
                 format!("pubsub_msgs_published"),
                 format!("Number of messages published"),
-                &["dropped"],
+                registry
+            )
+            .unwrap(),
+
+            msgs_dropped: register_int_counter_with_registry!(
+                format!("pubsub_msgs_dropped"),
+                format!("Number of messages dropped"),
                 registry
             )
             .unwrap(),
@@ -126,29 +167,36 @@ impl Metrics {
     }
 }
 
-#[derive(Debug, Clone, Display, IntoStaticStr, EnumString, Eq, PartialEq)]
-#[strum(serialize_all = "snake_case")]
-pub enum PublishResult {
+/// Result of a publish operation
+#[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
+pub enum PublishError {
+    #[error("Topic does not exist")]
     TopicDoesNotExist,
+    #[error("Topic has no subscribers")]
     NoSubscribers,
-    Success(usize),
 }
 
+/// Result of a subscribe operation
+#[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
+pub enum SubscribeError {
+    #[error("Too many subscribers")]
+    TooManySubscribers,
+}
+
+/// Broker that manages topics
+#[derive(Debug, Clone)]
 pub struct Broker<M: Message, T: TopicId> {
     opts: Opts,
     topics: Cache<T, Arc<Topic<M>>, RandomState>,
-    metrics: Metrics,
+    metrics: Arc<Metrics>,
 }
 
 impl<M: Message, T: TopicId> Broker<M, T> {
     /// Create a new Broker
     pub fn new(opts: Opts, metrics: Metrics) -> Self {
-        let metrics_clone = metrics.clone();
+        let metrics = Arc::new(metrics);
 
         let topics = CacheBuilder::new(opts.max_topics)
-            .eviction_listener(move |_k, _v, _r| {
-                metrics_clone.topics.dec();
-            })
             .time_to_idle(opts.idle_timeout)
             .build_with_hasher(RandomState::new());
 
@@ -159,49 +207,49 @@ impl<M: Message, T: TopicId> Broker<M, T> {
         }
     }
 
+    /// Fetches the given topic if it exists
+    pub fn topic_get(&self, topic: &T) -> Option<Arc<Topic<M>>> {
+        self.topics.get(topic)
+    }
+
+    /// Fetches or creates the given topic
+    pub fn topic_get_or_create(&self, topic: &T) -> Arc<Topic<M>> {
+        self.topics.get_with_by_ref(topic, || {
+            Arc::new(Topic::new(
+                self.opts.buffer_size,
+                self.metrics.clone(),
+                self.opts.max_subscribers,
+            ))
+        })
+    }
+
     /// Tells if the given topic exists
     pub fn topic_exists(&self, topic: &T) -> bool {
         self.topics.contains_key(topic)
     }
 
-    /// Subscribe to a given topic, returning a Subscriber that can be used to consume messages.
-    /// If the limit of subscribers is reached - it returns None.
-    pub fn subscribe(&self, topic: &T) -> Option<Subscriber<M>> {
-        // Fetch or create a new topic
-        let topic = self.topics.get_with_by_ref(topic, || {
-            self.metrics.topics.inc();
-            Arc::new(Topic::new(self.opts.buffer_size))
-        });
-
-        // Check if we're at the limit already
-        if topic.tx.receiver_count() >= self.opts.max_subscribers {
-            return None;
-        }
-
-        self.metrics.subscribers.inc();
-        Some(topic.subscribe(self.metrics.subscribers.clone()))
+    /// Removes the given topic.
+    /// If there are subscribers - they will get a RecvError.
+    pub fn topic_remove(&self, topic: &T) {
+        self.topics.invalidate(topic);
+        self.topics.run_pending_tasks();
     }
 
-    /// Tries to send the message to the given topic.
-    /// If the topic does not exist, TopicDoesNotExist is returned.
-    /// If it exists, but there are no active subscribers - it will return NoSubscribers.
-    pub fn publish(&self, topic: &T, message: M) -> PublishResult {
+    /// Shorthand for topic_get_or_create().subscribe(topic)
+    pub fn subscribe(&self, topic: &T) -> Result<Subscriber<M>, SubscribeError> {
+        let topic = self.topic_get_or_create(topic);
+        topic.subscribe()
+    }
+
+    /// Shorthand for topic_get().publish(message)
+    pub fn publish(&self, topic: &T, message: M) -> Result<usize, PublishError> {
         // Check if the topic exists
-        let Some(topic) = self.topics.get(topic) else {
-            self.metrics.msgs_sent.with_label_values(&["yes"]).inc();
-            return PublishResult::TopicDoesNotExist;
+        let Some(topic) = self.topic_get(topic) else {
+            self.metrics.msgs_dropped.inc();
+            return Err(PublishError::TopicDoesNotExist);
         };
 
-        topic.publish(message).map_or_else(
-            |_| {
-                self.metrics.msgs_sent.with_label_values(&["yes"]).inc();
-                PublishResult::NoSubscribers
-            },
-            |v| {
-                self.metrics.msgs_sent.with_label_values(&["no"]).inc();
-                PublishResult::Success(v)
-            },
-        )
+        topic.publish(message)
     }
 }
 
@@ -289,107 +337,112 @@ mod test {
         // No subscribers
         assert_eq!(
             b.publish(&topic1, "".into()),
-            PublishResult::TopicDoesNotExist
+            Err(PublishError::TopicDoesNotExist)
         );
         assert_eq!(
             b.publish(&topic2, "".into()),
-            PublishResult::TopicDoesNotExist
+            Err(PublishError::TopicDoesNotExist)
         );
         assert_eq!(b.metrics.topics.get(), 0);
-        assert_eq!(b.metrics.msgs_sent.with_label_values(&["yes"]).get(), 2);
+        assert_eq!(b.metrics.msgs_dropped.get(), 2);
 
         // Subscribe
-        let mut foo_sub = b.subscribe(&topic1).unwrap();
-        let mut dead_sub = b.subscribe(&topic2).unwrap();
+        let mut t1_sub = b.subscribe(&topic1).unwrap();
+        let mut t2_sub = b.subscribe(&topic2).unwrap();
         assert!(b.topic_exists(&topic1));
         assert!(b.topic_exists(&topic2));
         assert_eq!(b.metrics.topics.get(), 2);
 
         // Make sure we hit the subscriber limit
-        assert!(b.subscribe(&topic1).is_none());
+        assert_eq!(
+            b.subscribe(&topic1).unwrap_err(),
+            SubscribeError::TooManySubscribers
+        );
         assert_eq!(b.metrics.subscribers.get(), 2);
 
         // Publish up to a buffer size & receive
-        assert_eq!(b.publish(&topic1, "bar1".into()), PublishResult::Success(1));
-        assert_eq!(
-            b.publish(&topic2, "beef1".into()),
-            PublishResult::Success(1)
-        );
-        assert_eq!(b.publish(&topic1, "bar2".into()), PublishResult::Success(1));
-        assert_eq!(
-            b.publish(&topic2, "beef2".into()),
-            PublishResult::Success(1)
-        );
-        assert_eq!(b.publish(&topic1, "bar3".into()), PublishResult::Success(1));
-        assert_eq!(
-            b.publish(&topic2, "beef3".into()),
-            PublishResult::Success(1)
-        );
-        assert_eq!(b.metrics.msgs_sent.with_label_values(&["no"]).get(), 6);
+        assert_eq!(b.publish(&topic1, "bar1".into()), Ok(1));
+        assert_eq!(b.publish(&topic2, "beef1".into()), Ok(1));
+        assert_eq!(b.publish(&topic1, "bar2".into()), Ok(1));
+        assert_eq!(b.publish(&topic2, "beef2".into()), Ok(1));
+        assert_eq!(b.publish(&topic1, "bar3".into()), Ok(1));
+        assert_eq!(b.publish(&topic2, "beef3".into()), Ok(1));
+        assert_eq!(b.metrics.msgs_sent.get(), 6);
 
-        assert_eq!(foo_sub.recv().await.unwrap(), "bar1");
-        assert_eq!(dead_sub.recv().await.unwrap(), "beef1");
-        assert_eq!(foo_sub.recv().await.unwrap(), "bar2");
-        assert_eq!(dead_sub.recv().await.unwrap(), "beef2");
-        assert_eq!(foo_sub.recv().await.unwrap(), "bar3");
-        assert_eq!(dead_sub.recv().await.unwrap(), "beef3");
+        assert_eq!(t1_sub.recv().await.unwrap(), "bar1");
+        assert_eq!(t2_sub.recv().await.unwrap(), "beef1");
+        assert_eq!(t1_sub.recv().await.unwrap(), "bar2");
+        assert_eq!(t2_sub.recv().await.unwrap(), "beef2");
+        assert_eq!(t1_sub.recv().await.unwrap(), "bar3");
+        assert_eq!(t2_sub.recv().await.unwrap(), "beef3");
 
         // Publish more than a buffer size.
         // The oldest message is lost.
-        assert_eq!(b.publish(&topic1, "bar1".into()), PublishResult::Success(1));
-        assert_eq!(
-            b.publish(&topic2, "beef1".into()),
-            PublishResult::Success(1)
-        );
-        assert_eq!(b.publish(&topic1, "bar2".into()), PublishResult::Success(1));
-        assert_eq!(
-            b.publish(&topic2, "beef2".into()),
-            PublishResult::Success(1)
-        );
-        assert_eq!(b.publish(&topic1, "bar3".into()), PublishResult::Success(1));
-        assert_eq!(
-            b.publish(&topic2, "beef3".into()),
-            PublishResult::Success(1)
-        );
-        assert_eq!(b.publish(&topic1, "bar4".into()), PublishResult::Success(1));
-        assert_eq!(
-            b.publish(&topic2, "beef4".into()),
-            PublishResult::Success(1)
-        );
-        assert_eq!(b.publish(&topic1, "bar5".into()), PublishResult::Success(1));
-        assert_eq!(
-            b.publish(&topic2, "beef5".into()),
-            PublishResult::Success(1)
-        );
+        assert_eq!(b.publish(&topic1, "bar1".into()), Ok(1));
+        assert_eq!(b.publish(&topic2, "beef1".into()), Ok(1));
+        assert_eq!(b.publish(&topic1, "bar2".into()), Ok(1));
+        assert_eq!(b.publish(&topic2, "beef2".into()), Ok(1));
+        assert_eq!(b.publish(&topic1, "bar3".into()), Ok(1));
+        assert_eq!(b.publish(&topic2, "beef3".into()), Ok(1));
+        assert_eq!(b.publish(&topic1, "bar4".into()), Ok(1));
+        assert_eq!(b.publish(&topic2, "beef4".into()), Ok(1));
+        assert_eq!(b.publish(&topic1, "bar5".into()), Ok(1));
+        assert_eq!(b.publish(&topic2, "beef5".into()), Ok(1));
 
         assert!(matches!(
-            foo_sub.recv().await.unwrap_err(),
+            t1_sub.recv().await.unwrap_err(),
             RecvError::Lagged(_)
         ));
         assert!(matches!(
-            dead_sub.recv().await.unwrap_err(),
+            t2_sub.recv().await.unwrap_err(),
             RecvError::Lagged(_)
         ));
-        assert_eq!(foo_sub.recv().await.unwrap(), "bar2");
-        assert_eq!(dead_sub.recv().await.unwrap(), "beef2");
-        assert_eq!(foo_sub.recv().await.unwrap(), "bar3");
-        assert_eq!(dead_sub.recv().await.unwrap(), "beef3");
-        assert_eq!(foo_sub.recv().await.unwrap(), "bar4");
-        assert_eq!(dead_sub.recv().await.unwrap(), "beef4");
-        assert_eq!(foo_sub.recv().await.unwrap(), "bar5");
-        assert_eq!(dead_sub.recv().await.unwrap(), "beef5");
+        assert_eq!(t1_sub.recv().await.unwrap(), "bar2");
+        assert_eq!(t2_sub.recv().await.unwrap(), "beef2");
+        assert_eq!(t1_sub.recv().await.unwrap(), "bar3");
+        assert_eq!(t2_sub.recv().await.unwrap(), "beef3");
+        assert_eq!(t1_sub.recv().await.unwrap(), "bar4");
+        assert_eq!(t2_sub.recv().await.unwrap(), "beef4");
+        assert_eq!(t1_sub.recv().await.unwrap(), "bar5");
+        assert_eq!(t2_sub.recv().await.unwrap(), "beef5");
 
         // Drop subscribers
-        drop(foo_sub);
-        drop(dead_sub);
+        drop(t1_sub);
+        drop(t2_sub);
         assert_eq!(b.metrics.subscribers.get(), 0);
+        assert_eq!(b.metrics.topics.get(), 2);
 
         // No subscribers
-        assert_eq!(b.publish(&topic1, "".into()), PublishResult::NoSubscribers);
-        assert_eq!(b.publish(&topic2, "".into()), PublishResult::NoSubscribers);
+        assert_eq!(
+            b.publish(&topic1, "".into()).unwrap_err(),
+            PublishError::NoSubscribers
+        );
+        assert_eq!(
+            b.publish(&topic2, "".into()).unwrap_err(),
+            PublishError::NoSubscribers
+        );
 
-        // We can subscribe again
-        assert!(b.subscribe(&topic1).is_some());
-        assert!(b.subscribe(&topic2).is_some());
+        // Try to subscribe again using topic API
+        let t1 = b.topic_get_or_create(&topic1);
+        let t2 = b.topic_get_or_create(&topic2);
+        let mut t1_sub = t1.subscribe().unwrap();
+        let mut t2_sub = t2.subscribe().unwrap();
+
+        // Publish & read
+        assert_eq!(t1.publish("foo".into()).unwrap(), 1);
+        assert_eq!(t2.publish("bar".into()).unwrap(), 1);
+        assert_eq!(t1_sub.recv().await.unwrap(), "foo");
+        assert_eq!(t2_sub.recv().await.unwrap(), "bar");
+
+        // Remove topics
+        b.topic_remove(&topic1);
+        b.topic_remove(&topic2);
+        drop(t1);
+        drop(t2);
+        assert_eq!(b.metrics.topics.get(), 0);
+
+        // Subscribers should error out
+        assert_eq!(t1_sub.recv().await.unwrap_err(), RecvError::Closed);
+        assert_eq!(t2_sub.recv().await.unwrap_err(), RecvError::Closed);
     }
 }
