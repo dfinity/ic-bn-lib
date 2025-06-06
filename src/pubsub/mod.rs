@@ -43,6 +43,65 @@ impl Default for Opts {
     }
 }
 
+/// Result of a publish operation
+#[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
+pub enum PublishError {
+    #[error("Topic does not exist")]
+    TopicDoesNotExist,
+    #[error("Topic has no subscribers")]
+    NoSubscribers,
+}
+
+/// Result of a subscribe operation
+#[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
+pub enum SubscribeError {
+    #[error("Too many subscribers")]
+    TooManySubscribers,
+}
+
+/// Metrics for a Broker
+#[derive(Debug, Clone)]
+pub struct Metrics {
+    topics: IntGauge,
+    subscribers: IntGauge,
+    msgs_sent: IntCounter,
+    msgs_dropped: IntCounter,
+}
+
+impl Metrics {
+    pub fn new(registry: &Registry) -> Self {
+        Self {
+            topics: register_int_gauge_with_registry!(
+                format!("pubsub_topics"),
+                format!("Number of topics currently active"),
+                registry
+            )
+            .unwrap(),
+
+            msgs_sent: register_int_counter_with_registry!(
+                format!("pubsub_msgs_published"),
+                format!("Number of messages published"),
+                registry
+            )
+            .unwrap(),
+
+            msgs_dropped: register_int_counter_with_registry!(
+                format!("pubsub_msgs_dropped"),
+                format!("Number of messages dropped"),
+                registry
+            )
+            .unwrap(),
+
+            subscribers: register_int_gauge_with_registry!(
+                format!("pubsub_subscribers"),
+                format!("Number of subscribers currently active"),
+                registry
+            )
+            .unwrap(),
+        }
+    }
+}
+
 /// Subscriber to receive messages
 #[derive(Debug)]
 pub struct Subscriber<M: Message> {
@@ -122,65 +181,6 @@ impl<M: Message> Drop for Topic<M> {
         // Decrement topic count
         self.metrics.topics.dec();
     }
-}
-
-/// Metrics for a Broker
-#[derive(Debug, Clone)]
-pub struct Metrics {
-    topics: IntGauge,
-    subscribers: IntGauge,
-    msgs_sent: IntCounter,
-    msgs_dropped: IntCounter,
-}
-
-impl Metrics {
-    pub fn new(registry: &Registry) -> Self {
-        Self {
-            topics: register_int_gauge_with_registry!(
-                format!("pubsub_topics"),
-                format!("Number of topics currently active"),
-                registry
-            )
-            .unwrap(),
-
-            msgs_sent: register_int_counter_with_registry!(
-                format!("pubsub_msgs_published"),
-                format!("Number of messages published"),
-                registry
-            )
-            .unwrap(),
-
-            msgs_dropped: register_int_counter_with_registry!(
-                format!("pubsub_msgs_dropped"),
-                format!("Number of messages dropped"),
-                registry
-            )
-            .unwrap(),
-
-            subscribers: register_int_gauge_with_registry!(
-                format!("pubsub_subscribers"),
-                format!("Number of subscribers currently active"),
-                registry
-            )
-            .unwrap(),
-        }
-    }
-}
-
-/// Result of a publish operation
-#[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
-pub enum PublishError {
-    #[error("Topic does not exist")]
-    TopicDoesNotExist,
-    #[error("Topic has no subscribers")]
-    NoSubscribers,
-}
-
-/// Result of a subscribe operation
-#[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
-pub enum SubscribeError {
-    #[error("Too many subscribers")]
-    TooManySubscribers,
 }
 
 /// Broker that manages topics
