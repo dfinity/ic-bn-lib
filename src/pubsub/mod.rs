@@ -110,6 +110,7 @@ pub struct Subscriber<M: Message> {
 }
 
 impl<M: Message> Subscriber<M> {
+    /// Receive the next message from the topic
     pub async fn recv(&mut self) -> Result<M, RecvError> {
         self.rx.recv().await
     }
