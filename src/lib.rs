@@ -4,6 +4,7 @@
 #![warn(tail_expr_drop_order)]
 
 pub mod http;
+pub mod pubsub;
 pub mod tasks;
 pub mod tls;
 pub mod types;

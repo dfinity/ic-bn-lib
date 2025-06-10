@@ -648,7 +648,9 @@ impl Conn {
         });
 
         // Serve the connection
-        let conn = self.builder.serve_connection(Box::pin(stream), service);
+        let conn = self
+            .builder
+            .serve_connection_with_upgrades(Box::pin(stream), service);
         // Using mutable future reference requires pinning
         pin!(conn);
 
@@ -849,7 +851,8 @@ impl Server {
             .max_concurrent_streams(Some(options.http2_max_streams))
             .timer(TokioTimer::new()) // Needed for the keepalives below
             .keep_alive_interval(Some(options.http2_keepalive_interval))
-            .keep_alive_timeout(options.http2_keepalive_timeout);
+            .keep_alive_timeout(options.http2_keepalive_timeout)
+            .enable_connect_protocol(); // Needed for Websockets
 
         Self {
             addr,
