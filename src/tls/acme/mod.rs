@@ -2,7 +2,7 @@
 pub mod alpn;
 #[cfg(feature = "acme_client")]
 pub mod client;
-#[cfg(any(test, feature = "acme_dns"))]
+#[cfg(feature = "acme_dns")]
 pub mod dns;
 
 use anyhow::Error;

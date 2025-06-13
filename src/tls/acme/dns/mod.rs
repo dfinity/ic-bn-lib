@@ -1,5 +1,4 @@
 pub mod cloudflare;
-pub mod pebble;
 
 use std::{
     path::PathBuf,
@@ -333,7 +332,7 @@ mod test {
     use tempdir::TempDir;
 
     use super::*;
-    use crate::{tests::pebble::Env, tls::acme::dns::pebble::TokenManagerPebble};
+    use crate::tests::pebble::{Env, dns::TokenManagerPebble};
 
     #[ignore]
     #[tokio::test]

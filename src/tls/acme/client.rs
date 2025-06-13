@@ -470,8 +470,8 @@ mod test {
     use instant_acme::RevocationReason;
 
     use crate::{
-        tests::pebble::Env,
-        tls::{acme::dns::pebble::TokenManagerPebble, pem_convert_to_rustls},
+        tests::pebble::{Env, dns::TokenManagerPebble},
+        tls::pem_convert_to_rustls,
     };
 
     use super::*;
