@@ -111,12 +111,18 @@ impl TokenManager for TokenManagerDns {
     }
 }
 
-#[derive(Clone, Display, EnumString, PartialEq, Eq)]
+#[derive(Debug, Clone, Display, EnumString, PartialEq, Eq)]
 pub enum Validity {
     Missing,
     Expires,
     SANMismatch,
     Valid,
+}
+
+#[derive(Debug, Clone, Display, EnumString, PartialEq, Eq)]
+pub enum RefreshResult {
+    StillValid,
+    Refreshed,
 }
 
 pub struct AcmeDns {
@@ -260,12 +266,17 @@ impl AcmeDns {
     }
 
     /// Checks if certificate is still valid & reissues if needed
-    async fn refresh(&self) -> Result<(), Error> {
+    async fn refresh(&self) -> Result<RefreshResult, Error> {
+        // Try to load certificate from disk first
+        if self.cert.load_full().is_none() {
+            let _ = self.load().await;
+        }
+
         let validity = self.is_valid().await.context("unable to check validity")?;
 
         if validity == Validity::Valid {
             debug!("ACME-DNS: Certificate is still valid");
-            return Ok(());
+            return Ok(RefreshResult::StillValid);
         }
 
         debug!("ACME-DNS: Certificate validity is '{validity}', renewing");
@@ -287,7 +298,7 @@ impl AcmeDns {
             .await
             .context("unable to load certificate from disk")?;
 
-        Ok(())
+        Ok(RefreshResult::Refreshed)
     }
 }
 
@@ -309,7 +320,10 @@ impl ResolvesServerCert for AcmeDns {
 #[async_trait]
 impl Run for AcmeDns {
     async fn run(&self, _: CancellationToken) -> Result<(), Error> {
-        self.refresh().await.context("unable to refresh")
+        self.refresh()
+            .await
+            .context("unable to refresh")
+            .map(|_| ())
     }
 }
 
@@ -349,7 +363,8 @@ mod test {
         };
 
         let acme_dns = AcmeDns::new(opts).await.unwrap();
-        acme_dns.refresh().await.unwrap();
+        assert_eq!(acme_dns.refresh().await.unwrap(), RefreshResult::Refreshed);
+        assert_eq!(acme_dns.refresh().await.unwrap(), RefreshResult::StillValid);
 
         assert!(acme_dns.cert.load_full().is_some());
     }
