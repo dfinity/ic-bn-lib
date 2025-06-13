@@ -23,3 +23,6 @@ jobs:
 
       - name: Run tests (all feature combinations)
         run: cargo test-all-features
+
+      - name: Run ACME tests
+        run: ./test-acme.sh
