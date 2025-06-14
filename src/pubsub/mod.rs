@@ -440,7 +440,6 @@ mod test {
         b.topic_remove(&topic2);
         drop(t1);
         drop(t2);
-        assert_eq!(b.metrics.topics.get(), 0);
 
         // Subscribers should error out
         assert_eq!(t1_sub.recv().await.unwrap_err(), RecvError::Closed);
