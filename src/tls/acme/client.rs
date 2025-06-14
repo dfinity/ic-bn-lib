@@ -14,7 +14,6 @@ use instant_acme::{
     OrderStatus, RevocationRequest,
 };
 use rcgen::{CertificateParams, DistinguishedName, KeyPair};
-use strum_macros::{Display, EnumString};
 use tracing::debug;
 use url::Url;
 
@@ -25,6 +24,8 @@ use crate::{
 
 use super::TokenManager;
 
+/// Type of ACME server.
+/// Can be either Prod or Staging LetsEncrypt or a custom one.
 pub enum AcmeUrl {
     LetsEncryptStaging,
     LetsEncryptProduction,
@@ -41,24 +42,17 @@ impl Display for AcmeUrl {
     }
 }
 
+/// Certificate and private key pair
 pub struct Cert {
     pub cert: Vec<u8>,
     pub key: Vec<u8>,
 }
 
-#[derive(Clone, Display, EnumString)]
-pub enum Validity {
-    UnableToRead,
-    NoCertsFound,
-    Expires,
-    SANMismatch,
-    Valid,
-}
-
 struct HttpClient(HyperClient<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>);
 
 impl HttpClient {
-    pub fn new(insecure_tls: bool) -> Self {
+    /// Create a new client
+    fn new(insecure_tls: bool) -> Self {
         let mut tls_config =
             prepare_client_config(&[&rustls::version::TLS13, &rustls::version::TLS12]);
 
@@ -97,6 +91,7 @@ impl HttpClientTrait for HttpClient {
     }
 }
 
+/// Client options
 pub struct Opts {
     pub challenge: ChallengeType,
     pub url: AcmeUrl,
@@ -115,6 +110,7 @@ impl Default for Opts {
     }
 }
 
+/// Builder that builds a Client
 pub struct ClientBuilder {
     opts: Opts,
     account: Option<Account>,
@@ -129,6 +125,7 @@ impl Default for ClientBuilder {
 }
 
 impl ClientBuilder {
+    /// Create a new builder, optionally with an insecure TLS
     pub fn new(insecure_tls: bool) -> Self {
         Self {
             opts: Opts::default(),
@@ -278,7 +275,7 @@ impl Client {
     }
 
     /// Iterates over authorizations in the order and tries to fulfill them.
-    /// Returns the list of IDs that are later used in the cleanup
+    /// Returns the list of IDs that are later used in the cleanup.
     async fn process_authorizations(&self, order: &mut Order) -> Result<Vec<String>, Error> {
         let authorizations = order
             .authorizations()
@@ -336,7 +333,7 @@ impl Client {
                 .context("unable to set challenge as ready")?;
         }
 
-        Ok(challenges.into_iter().map(|(id, _, _)| id).collect())
+        Ok(challenges.into_iter().map(|x| x.0).collect())
     }
 
     /// Cleans up the tokens after issuance

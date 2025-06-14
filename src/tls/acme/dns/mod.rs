@@ -272,7 +272,6 @@ impl AcmeDns {
         }
 
         let validity = self.is_valid().await.context("unable to check validity")?;
-
         if validity == Validity::Valid {
             debug!("ACME-DNS: Certificate is still valid");
             return Ok(RefreshResult::StillValid);
@@ -355,7 +354,7 @@ mod test {
             path: dir.path().to_path_buf(),
             domains: vec![fqdn!("foo")],
             wildcard: true,
-            renew_before: Duration::from_secs(86400 * 30),
+            renew_before: Duration::from_secs(30),
             account_credentials: None,
             token_manager,
             insecure_tls: true,
@@ -363,8 +362,8 @@ mod test {
 
         let acme_dns = AcmeDns::new(opts).await.unwrap();
         assert_eq!(acme_dns.refresh().await.unwrap(), RefreshResult::Refreshed);
-        assert_eq!(acme_dns.refresh().await.unwrap(), RefreshResult::StillValid);
-
         assert!(acme_dns.cert.load_full().is_some());
+
+        assert_eq!(acme_dns.refresh().await.unwrap(), RefreshResult::StillValid);
     }
 }

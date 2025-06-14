@@ -46,11 +46,11 @@ fn pebble_config(dir: &Path, listen: String) -> String {
     json!({
     "pebble": {
         "listenAddress": listen,
-        "managementListenAddress": "0.0.0.0:15000",
+        "managementListenAddress": "",
         "certificate": dir.join(PEBBLE_CERT).to_string_lossy(),
         "privateKey": dir.join(PEBBLE_KEY).to_string_lossy(),
-        "httpPort": 5002,
-        "tlsPort": 5001,
+        "httpPort": 35002,
+        "tlsPort": 35001,
         "ocspResponderURL": "",
         "externalAccountBindingRequired": false,
         "domainBlocklist": ["blocked-domain.example"],
@@ -93,6 +93,11 @@ impl Dns {
         cmd.arg(format!("{}:{}", opts.ip, opts.port_man));
         cmd.arg("-dns01");
         cmd.arg(format!("{}:{}", opts.ip, opts.port_dns));
+        // Disable the rest
+        cmd.arg("-doh");
+        cmd.arg("-http01");
+        cmd.arg("-https01");
+        cmd.arg("-tlsalpn01");
 
         let process = cmd.spawn().expect("failed to start DNS service");
         wait_for_server(&format!("{}:{}", opts.ip, opts.port_man));
@@ -206,7 +211,7 @@ impl Env {
     pub fn stop(&mut self) {
         println!("Stopping Pebble...");
         println!(
-            "DNS process exited with: {:?}",
+            "Pebble process exited with: {:?}",
             stop_process(&mut self.pebble.process)
         );
 

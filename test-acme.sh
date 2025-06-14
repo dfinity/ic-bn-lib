@@ -1,17 +1,19 @@
 #!/bin/bash
 
+VER="2.8.0"
+
 # Pebble DNS
-PEBBLE_DNS_MACOS_ARM64_URL="https://github.com/letsencrypt/pebble/releases/download/v2.8.0/pebble-challtestsrv-darwin-arm64.tar.gz"
+PEBBLE_DNS_MACOS_ARM64_URL="https://github.com/letsencrypt/pebble/releases/download/v${VER}/pebble-challtestsrv-darwin-arm64.tar.gz"
 PEBBLE_DNS_MACOS_ARM64_SHA="1bc5a6cfa062d9756e98d67825daf67f61dd655bcb6025efca2138fe836c9bbc"
 
-PEBBLE_DNS_LINUX_AMD64_URL="https://github.com/letsencrypt/pebble/releases/download/v2.8.0/pebble-challtestsrv-linux-amd64.zip"
+PEBBLE_DNS_LINUX_AMD64_URL="https://github.com/letsencrypt/pebble/releases/download/v${VER}/pebble-challtestsrv-linux-amd64.zip"
 PEBBLE_DNS_LINUX_AMD64_SHA="cf7a200af39c2d1872ed6bc9b51c1ba7ca9feabc395d08b59bb1d7aa1a158d8b"
 
 # Pebble
-PEBBLE_MACOS_ARM64_URL="https://github.com/letsencrypt/pebble/releases/download/v2.8.0/pebble-darwin-arm64.tar.gz"
+PEBBLE_MACOS_ARM64_URL="https://github.com/letsencrypt/pebble/releases/download/v${VER}/pebble-darwin-arm64.tar.gz"
 PEBBLE_MACOS_ARM64_SHA="39e07d63dc776521f2ffe0584e5f4f081c984ac02742c882b430891d89f0c866"
 
-PEBBLE_LINUX_AMD64_URL="https://github.com/letsencrypt/pebble/releases/download/v2.8.0/pebble-linux-amd64.tar.gz"
+PEBBLE_LINUX_AMD64_URL="https://github.com/letsencrypt/pebble/releases/download/v${VER}/pebble-linux-amd64.tar.gz"
 PEBBLE_LINUX_AMD64_SHA="34595d915bbc2fc827affb3f58593034824df57e95353b031c8d5185724485ce"
 
 # Detect OS/ARCH
@@ -28,7 +30,7 @@ elif [ "$(uname -om)" == "Darwin arm64" ]; then
     PEBBLE_URL=${PEBBLE_MACOS_ARM64_URL}
     PEBBLE_SHA=${PEBBLE_MACOS_ARM64_SHA}
 else
-    echo "Unknown architecture"
+    echo "Unsupported OS/architecture"
     exit 1
 fi
 
