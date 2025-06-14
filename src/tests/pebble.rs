@@ -95,9 +95,13 @@ impl Dns {
         cmd.arg(format!("{}:{}", opts.ip, opts.port_dns));
         // Disable the rest
         cmd.arg("-doh");
+        cmd.arg("");
         cmd.arg("-http01");
+        cmd.arg("");
         cmd.arg("-https01");
+        cmd.arg("");
         cmd.arg("-tlsalpn01");
+        cmd.arg("");
 
         let process = cmd.spawn().expect("failed to start DNS service");
         wait_for_server(&format!("{}:{}", opts.ip, opts.port_man));
