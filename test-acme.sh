@@ -2,12 +2,14 @@
 
 VER="2.8.0"
 
+set -e
+
 # Pebble DNS
 PEBBLE_DNS_MACOS_ARM64_URL="https://github.com/letsencrypt/pebble/releases/download/v${VER}/pebble-challtestsrv-darwin-arm64.tar.gz"
 PEBBLE_DNS_MACOS_ARM64_SHA="1bc5a6cfa062d9756e98d67825daf67f61dd655bcb6025efca2138fe836c9bbc"
 
-PEBBLE_DNS_LINUX_AMD64_URL="https://github.com/letsencrypt/pebble/releases/download/v${VER}/pebble-challtestsrv-linux-amd64.zip"
-PEBBLE_DNS_LINUX_AMD64_SHA="cf7a200af39c2d1872ed6bc9b51c1ba7ca9feabc395d08b59bb1d7aa1a158d8b"
+PEBBLE_DNS_LINUX_AMD64_URL="https://github.com/letsencrypt/pebble/releases/download/v2.8.0/pebble-challtestsrv-linux-amd64.tar.gz"
+PEBBLE_DNS_LINUX_AMD64_SHA="a817449d1f05ae58bcb7bf073b4cebe5d31512f859ba4b83951bd825d28d2114"
 
 # Pebble
 PEBBLE_MACOS_ARM64_URL="https://github.com/letsencrypt/pebble/releases/download/v${VER}/pebble-darwin-arm64.tar.gz"
