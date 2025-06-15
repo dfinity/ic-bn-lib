@@ -80,7 +80,7 @@ pub struct DnsOpts {
 }
 
 pub struct Dns {
-    process: Child,
+    process: Option<Child>,
     opts: DnsOpts,
 }
 
@@ -108,7 +108,10 @@ impl Dns {
 
         println!("DNS service started");
 
-        Self { process, opts }
+        Self {
+            process: Some(process),
+            opts,
+        }
     }
 }
 
@@ -121,7 +124,7 @@ pub struct PebbleOpts {
 
 pub struct Pebble {
     opts: PebbleOpts,
-    process: Child,
+    process: Option<Child>,
     _dir: TempDir,
 }
 
@@ -150,12 +153,16 @@ impl Pebble {
         cmd.arg(dir.path().join("pebble.conf"));
         cmd.arg("-strict");
 
+        // Lower rejected nonces from 5 to 1 since sometimes even with 3 retries
+        // instant-acme hits the badNonce error
+        cmd.env("PEBBLE_WFE_NONCEREJECT", "1");
+
         let process = cmd.spawn().expect("failed to start Pebble");
         wait_for_server(&format!("{}:{}", opts.ip, opts.port_dir));
         println!("Pebble started");
 
         Self {
-            process,
+            process: Some(process),
             _dir: dir,
             opts,
         }
@@ -211,19 +218,16 @@ impl Env {
         format!("{}:{}", self.pebble.opts.ip, self.pebble.opts.port_dir)
     }
 
-    #[allow(clippy::cognitive_complexity)]
     pub fn stop(&mut self) {
-        println!("Stopping Pebble...");
-        println!(
-            "Pebble process exited with: {:?}",
-            stop_process(&mut self.pebble.process)
-        );
+        if let Some(mut v) = self.pebble.process.take() {
+            println!("Stopping Pebble...");
+            println!("Pebble process exited with: {:?}", stop_process(&mut v));
+        }
 
-        println!("Stopping DNS process");
-        println!(
-            "DNS process exited with: {:?}",
-            stop_process(&mut self.dns.process)
-        );
+        if let Some(mut v) = self.dns.process.take() {
+            println!("Stopping DNS process");
+            println!("DNS process exited with: {:?}", stop_process(&mut v));
+        }
     }
 }
 

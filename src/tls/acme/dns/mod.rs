@@ -365,5 +365,6 @@ mod test {
         assert!(acme_dns.cert.load_full().is_some());
 
         assert_eq!(acme_dns.refresh().await.unwrap(), RefreshResult::StillValid);
+        assert!(acme_dns.cert.load_full().is_some());
     }
 }
