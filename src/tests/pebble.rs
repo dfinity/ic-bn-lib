@@ -49,11 +49,11 @@ fn pebble_config(dir: &Path, listen: String) -> String {
         "managementListenAddress": "",
         "certificate": dir.join(PEBBLE_CERT).to_string_lossy(),
         "privateKey": dir.join(PEBBLE_KEY).to_string_lossy(),
-        "httpPort": 35002,
-        "tlsPort": 35001,
+        "httpPort": 0,
+        "tlsPort": 0,
         "ocspResponderURL": "",
         "externalAccountBindingRequired": false,
-        "domainBlocklist": ["blocked-domain.example"],
+        "domainBlocklist": [],
         "retryAfter": {
             "authz": 3,
             "order": 5
@@ -63,10 +63,6 @@ fn pebble_config(dir: &Path, listen: String) -> String {
                 "description": "The profile you know and love",
                 "validityPeriod": 7776000
             },
-            "shortlived": {
-                "description": "A short-lived cert profile, without actual enforcement",
-                "validityPeriod": 518400
-            }
         }
     }})
     .to_string()
@@ -153,8 +149,8 @@ impl Pebble {
         cmd.arg(dir.path().join("pebble.conf"));
         cmd.arg("-strict");
 
-        // Lower rejected nonces from 5 to 1 since sometimes even with 3 retries
-        // instant-acme hits the badNonce error
+        // Lower rejected nonces chance from 5% to 1% since sometimes
+        // even with 3 retries instant-acme hits the badNonce error 3 times in a row
         cmd.env("PEBBLE_WFE_NONCEREJECT", "1");
 
         let process = cmd.spawn().expect("failed to start Pebble");
