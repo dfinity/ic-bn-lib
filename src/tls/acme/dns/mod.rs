@@ -31,16 +31,14 @@ use crate::{
     tasks::Run,
     tls::{
         acme::client::{AcmeUrl, Client, ClientBuilder},
-        extract_sans, pem_convert_to_rustls, sni_matches,
+        extract_sans, pem_convert_to_rustls_single, sni_matches,
     },
 };
 
 use super::TokenManager;
 
 const ACME_RECORD: &str = "_acme-challenge";
-
 const FILE_CERT: &str = "cert.pem";
-const FILE_KEY: &str = "cert.key";
 
 // 60s is the lowest possible Cloudflare TTL
 const TTL: u32 = 60;
@@ -189,6 +187,7 @@ impl AcmeDns {
                 .create_account("mailto:boundary-nodes@dfinity.org")
                 .await
                 .context("unable to create ACME account")?;
+            builder = builder2;
 
             // Save the credentials to file
             let creds = serde_json::to_vec_pretty(&creds)
@@ -196,8 +195,6 @@ impl AcmeDns {
             fs::write(&account_path, creds)
                 .await
                 .context("unable to save ACME credentials to file")?;
-
-            builder = builder2;
         }
 
         let client = Arc::new(
@@ -220,14 +217,11 @@ impl AcmeDns {
 
     /// Loads the certificates from files into storage
     async fn load(&self) -> Result<(), Error> {
-        let cert = fs::read(self.path.join(FILE_CERT))
+        let cert_and_key = fs::read(self.path.join(FILE_CERT))
             .await
             .context("unable to read cert")?;
-        let key = fs::read(self.path.join(FILE_KEY))
-            .await
-            .context("unable to read key")?;
 
-        let ckey = pem_convert_to_rustls(&key, &cert)
+        let ckey = pem_convert_to_rustls_single(&cert_and_key)
             .context("unable to convert certificate to Rustls format")?;
 
         self.cert.store(Some(Arc::new(ckey)));
@@ -250,7 +244,8 @@ impl AcmeDns {
 
         // Check if it's time to renew
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        if now > cert.validity().not_after.timestamp() as u64 - self.renew_before.as_secs() {
+        let left = (cert.validity().not_after.timestamp() as u64).saturating_sub(now);
+        if left < self.renew_before.as_secs() {
             return Ok(Validity::Expires);
         }
 
@@ -285,12 +280,10 @@ impl AcmeDns {
             .await
             .context("unable to issue a certificate")?;
 
-        fs::write(self.path.join(FILE_CERT), &cert.cert)
+        let cert_and_key = [cert.cert, cert.key].concat();
+        fs::write(self.path.join(FILE_CERT), &cert_and_key)
             .await
             .context("unable to store certificate")?;
-        fs::write(self.path.join(FILE_KEY), &cert.key)
-            .await
-            .context("unable to store key")?;
 
         self.load()
             .await
@@ -331,7 +324,10 @@ mod test {
     use tempdir::TempDir;
 
     use super::*;
-    use crate::tests::pebble::{Env, dns::TokenManagerPebble};
+    use crate::{
+        tests::pebble::{Env, dns::TokenManagerPebble},
+        tls::extract_sans_der,
+    };
 
     #[ignore]
     #[tokio::test]
@@ -362,9 +358,15 @@ mod test {
 
         let acme_dns = AcmeDns::new(opts).await.unwrap();
         assert_eq!(acme_dns.refresh().await.unwrap(), RefreshResult::Refreshed);
-        assert!(acme_dns.cert.load_full().is_some());
+        let cert = acme_dns.cert.load_full().unwrap();
+        let mut sans = extract_sans_der(cert.end_entity_cert().unwrap()).unwrap();
+        sans.sort();
+        assert_eq!(sans, vec!["*.foo", "foo"]);
 
         assert_eq!(acme_dns.refresh().await.unwrap(), RefreshResult::StillValid);
-        assert!(acme_dns.cert.load_full().is_some());
+        let cert = acme_dns.cert.load_full().unwrap();
+        let mut sans = extract_sans_der(cert.end_entity_cert().unwrap()).unwrap();
+        sans.sort();
+        assert_eq!(sans, vec!["*.foo", "foo"]);
     }
 }
