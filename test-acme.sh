@@ -50,17 +50,17 @@ tar -C . -xf pebble.tar.gz --transform 's/.*\///g' --wildcards --no-anchored 'pe
 chmod +x pebble pebble-challtestsrv
 
 # Run tests
-cargo test -- \
+cargo test --features acme_dns -- \
     --ignored \
     --nocapture \
     --test tests::pebble::dns::test::test_token_manager_pebble
 
-cargo test -- \
+cargo test --features acme_dns -- \
     --ignored \
     --nocapture \
     --test tls::acme::client::test::test_acme_client
 
-cargo test -- \
+cargo test --features acme_dns -- \
     --ignored \
     --nocapture \
     --test tls::acme::dns::test::test_acme_dns

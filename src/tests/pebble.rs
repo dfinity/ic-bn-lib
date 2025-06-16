@@ -262,10 +262,10 @@ pub mod dns {
     use serde_json::json;
     use url::Url;
 
-    use crate::tls::acme::{
-        TokenManager,
-        dns::{DnsManager, Record},
-    };
+    use crate::tls::acme::TokenManager;
+
+    #[cfg(feature = "acme_dns")]
+    use crate::tls::acme::dns::{DnsManager, Record};
 
     /// Manages ACME tokens using Pebble Challenge Test Server.
     /// To be used for testing only.
@@ -325,6 +325,7 @@ pub mod dns {
         }
     }
 
+    #[cfg(feature = "acme_dns")]
     #[async_trait]
     impl DnsManager for TokenManagerPebble {
         async fn create(
@@ -367,22 +368,25 @@ pub mod dns {
                 .unwrap();
             assert_eq!(r, vec![("TXT".to_string(), "bar".to_string())]);
 
-            tm.create("baz", "txt", Record::Txt("deadbeef".into()), 0)
-                .await
-                .unwrap();
-            let r = resolver
-                .resolve("_acme-challenge.baz", "TXT")
-                .await
-                .unwrap();
-            assert_eq!(r, vec![("TXT".to_string(), "deadbeef".to_string())]);
-
             tm.unset("foo").await.unwrap();
             let r = resolver.resolve("_acme-challenge.foo", "TXT").await;
             assert!(r.is_err());
 
-            tm.unset("baz").await.unwrap();
-            let r = resolver.resolve("_acme-challenge.baz", "TXT").await;
-            assert!(r.is_err());
+            #[cfg(feature = "acme_dns")]
+            {
+                tm.create("baz", "txt", Record::Txt("deadbeef".into()), 0)
+                    .await
+                    .unwrap();
+                let r = resolver
+                    .resolve("_acme-challenge.baz", "TXT")
+                    .await
+                    .unwrap();
+                assert_eq!(r, vec![("TXT".to_string(), "deadbeef".to_string())]);
+
+                tm.unset("baz").await.unwrap();
+                let r = resolver.resolve("_acme-challenge.baz", "TXT").await;
+                assert!(r.is_err());
+            }
         }
     }
 }
