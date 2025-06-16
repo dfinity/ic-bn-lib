@@ -255,7 +255,7 @@ impl Drop for Env {
     }
 }
 
-#[cfg(feature = "acme_client")]
+#[cfg(feature = "acme")]
 pub mod dns {
     use anyhow::{Error, anyhow};
     use async_trait::async_trait;

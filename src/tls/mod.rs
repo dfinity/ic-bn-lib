@@ -1,4 +1,4 @@
-#[cfg(any(feature = "acme_alpn", feature = "acme_client"))]
+#[cfg(feature = "acme")]
 pub mod acme;
 pub mod sessions;
 pub mod tickets;

@@ -1,6 +1,6 @@
 #[cfg(feature = "acme_alpn")]
 pub mod alpn;
-#[cfg(feature = "acme_client")]
+#[cfg(feature = "acme")]
 pub mod client;
 #[cfg(feature = "acme_dns")]
 pub mod dns;
@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use instant_acme::LetsEncrypt;
 use strum_macros::{Display, EnumString};
 
-#[cfg(feature = "acme_client")]
+#[cfg(feature = "acme")]
 pub use instant_acme;
 use url::Url;
 
