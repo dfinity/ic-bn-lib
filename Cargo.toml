@@ -12,7 +12,7 @@ default = []
 clients-hyper = ["dep:hyper-rustls"]
 acme_client = ["dep:instant-acme", "dep:rcgen", "dep:hyper-rustls"]
 acme_dns = ["acme_client", "dep:cloudflare"]
-acme_alpn = ["dep:rustls-acme"]
+acme_alpn = ["dep:rustls-acme", "dep:instant-acme"]
 vector = ["dep:vrl", "dep:prost", "dep:prost-types"]
 
 [dependencies]

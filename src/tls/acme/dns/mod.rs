@@ -30,7 +30,10 @@ use crate::{
     retry_async,
     tasks::Run,
     tls::{
-        acme::client::{AcmeUrl, Client, ClientBuilder},
+        acme::{
+            AcmeUrl,
+            client::{Client, ClientBuilder},
+        },
         extract_sans, pem_convert_to_rustls_single, sni_matches,
     },
 };

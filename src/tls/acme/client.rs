@@ -1,4 +1,4 @@
-use std::{fmt::Display, pin::Pin, sync::Arc, time::Duration};
+use std::{pin::Pin, sync::Arc, time::Duration};
 
 use anyhow::{Context, Error, anyhow};
 use bytes::Bytes;
@@ -10,37 +10,18 @@ use hyper_util::{
 };
 use instant_acme::{
     Account, AccountCredentials, AuthorizationStatus, BytesResponse, ChallengeType,
-    HttpClient as HttpClientTrait, Identifier, LetsEncrypt, NewAccount, NewOrder, Order,
-    OrderStatus, RevocationRequest,
+    HttpClient as HttpClientTrait, Identifier, NewAccount, NewOrder, Order, OrderStatus,
+    RevocationRequest,
 };
 use rcgen::{CertificateParams, DistinguishedName, KeyPair};
 use tracing::debug;
-use url::Url;
 
 use crate::{
     RetryError, retry_async,
-    tls::{prepare_client_config, verify::NoopServerCertVerifier},
+    tls::{acme::AcmeUrl, prepare_client_config, verify::NoopServerCertVerifier},
 };
 
 use super::TokenManager;
-
-/// Type of ACME server.
-/// Can be either Prod or Staging LetsEncrypt or a custom one.
-pub enum AcmeUrl {
-    LetsEncryptStaging,
-    LetsEncryptProduction,
-    Custom(Url),
-}
-
-impl Display for AcmeUrl {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::LetsEncryptStaging => write!(f, "{}", LetsEncrypt::Staging.url()),
-            Self::LetsEncryptProduction => write!(f, "{}", LetsEncrypt::Production.url()),
-            Self::Custom(v) => write!(f, "{}", v),
-        }
-    }
-}
 
 /// Certificate and private key pair
 pub struct Cert {

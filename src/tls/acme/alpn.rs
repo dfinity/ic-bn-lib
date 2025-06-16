@@ -7,11 +7,13 @@ use rustls_acme::{AcmeConfig, AcmeState, caches::DirCache};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
+use crate::tls::acme::AcmeUrl;
+
 #[derive(derive_new::new)]
 pub struct Opts {
+    pub acme_url: AcmeUrl,
     pub domains: Vec<String>,
     pub contact: String,
-    pub staging: bool,
     pub cache_path: PathBuf,
 }
 
@@ -20,7 +22,7 @@ struct Runner(AcmeState<io::Error, io::Error>, CancellationToken);
 pub fn new(opts: Opts, token: CancellationToken) -> Arc<dyn ResolvesServerCert> {
     let state = AcmeConfig::new(opts.domains)
         .contact_push(opts.contact)
-        .directory_lets_encrypt(!opts.staging);
+        .directory(opts.acme_url.to_string());
 
     let state = state.cache(DirCache::new(opts.cache_path)).state();
     let resolver = state.resolver();
