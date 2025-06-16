@@ -53,6 +53,11 @@ chmod +x pebble pebble-challtestsrv
 cargo test -- \
     --ignored \
     --nocapture \
+    --test tests::pebble::dns::test::test_token_manager_pebble
+
+cargo test -- \
+    --ignored \
+    --nocapture \
     --test tls::acme::client::test::test_acme_client
 
 cargo test -- \

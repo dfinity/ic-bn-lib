@@ -8,7 +8,7 @@ repository = "https://github.com/dfinity/ic-bn-lib"
 readme = "README.md"
 
 [features]
-default = ["acme_dns", "acme_alpn"]
+default = []
 clients-hyper = ["dep:hyper-rustls"]
 acme_client = ["dep:instant-acme", "dep:rcgen", "dep:hyper-rustls"]
 acme_dns = ["acme_client", "dep:cloudflare"]

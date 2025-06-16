@@ -1,8 +1,9 @@
 use std::{
     env, fs,
-    net::TcpStream,
+    net::{IpAddr, TcpStream},
     path::Path,
     process::{Child, Command, ExitStatus},
+    sync::Arc,
     thread::sleep,
     time::Duration,
 };
@@ -14,7 +15,10 @@ use nix::{
 use serde_json::json;
 use tempdir::TempDir;
 
-use crate::tests::{TEST_CERT, TEST_KEY};
+use crate::{
+    http::dns::{Options, Protocol, Resolver, Resolves},
+    tests::{TEST_CERT, TEST_KEY},
+};
 
 const PEBBLE_KEY: &str = "pebble-key.pem";
 const PEBBLE_CERT: &str = "pebble-cert.pem";
@@ -70,7 +74,7 @@ fn pebble_config(dir: &Path, listen: String) -> String {
 
 pub struct DnsOpts {
     pub path: String,
-    pub ip: String,
+    pub ip: IpAddr,
     pub port_man: u16,
     pub port_dns: u16,
 }
@@ -113,7 +117,7 @@ impl Dns {
 
 pub struct PebbleOpts {
     pub path: String,
-    pub ip: String,
+    pub ip: IpAddr,
     pub port_dir: u16,
     pub dns_server: String,
 }
@@ -179,14 +183,14 @@ impl Default for Env {
 impl Env {
     pub fn new_with_paths(path_pebble: &str, path_dns: &str) -> Self {
         let dns_opts = DnsOpts {
-            ip: "127.0.0.1".to_string(),
+            ip: "127.0.0.1".parse().unwrap(),
             path: path_dns.into(),
             port_dns: 38053,
             port_man: 38055,
         };
 
         let pebble_opts = PebbleOpts {
-            ip: "127.0.0.1".to_string(),
+            ip: "127.0.0.1".parse().unwrap(),
             path: path_pebble.into(),
             port_dir: 34000,
             dns_server: "127.0.0.1:38053".to_string(),
@@ -206,12 +210,30 @@ impl Env {
         Self::new_with_paths(&path_pebble, &path_dns)
     }
 
+    pub const fn port_dns_cleartext(&self) -> u16 {
+        self.dns.opts.port_dns
+    }
+
+    pub const fn ip_dns_cleartext(&self) -> IpAddr {
+        self.dns.opts.ip
+    }
+
     pub fn addr_dns_management(&self) -> String {
         format!("{}:{}", self.dns.opts.ip, self.dns.opts.port_man)
     }
 
     pub fn addr_acme(&self) -> String {
         format!("{}:{}", self.pebble.opts.ip, self.pebble.opts.port_dir)
+    }
+
+    /// Returns a ready-to-use DNS resolver targeting pebble-challtestsrv
+    pub fn resolver(&self) -> Arc<dyn Resolves> {
+        Arc::new(Resolver::new(Options {
+            protocol: Protocol::Clear(self.port_dns_cleartext()),
+            servers: vec![self.ip_dns_cleartext()],
+            tls_name: "".into(),
+            cache_size: 0,
+        }))
     }
 
     pub fn stop(&mut self) {
@@ -240,7 +262,10 @@ pub mod dns {
     use serde_json::json;
     use url::Url;
 
-    use crate::tls::acme::TokenManager;
+    use crate::tls::acme::{
+        TokenManager,
+        dns::{DnsManager, Record},
+    };
 
     /// Manages ACME tokens using Pebble Challenge Test Server.
     /// To be used for testing only.
@@ -300,16 +325,64 @@ pub mod dns {
         }
     }
 
+    #[async_trait]
+    impl DnsManager for TokenManagerPebble {
+        async fn create(
+            &self,
+            zone: &str,
+            _name: &str,
+            record: Record,
+            _ttl: u32,
+        ) -> Result<(), Error> {
+            let Record::Txt(token) = record;
+            self.set(zone, &token).await
+        }
+
+        async fn delete(&self, zone: &str, _name: &str) -> Result<(), Error> {
+            self.unset(zone).await
+        }
+    }
+
     #[cfg(test)]
     mod test {
         use super::*;
+        use crate::tests::pebble::Env;
 
         #[ignore]
         #[tokio::test]
         async fn test_token_manager_pebble() {
-            let tm = TokenManagerPebble::new("http://127.0.0.1:8055".parse().unwrap());
+            let pebble_env = Env::new();
+
+            let tm = TokenManagerPebble::new(
+                format!("http://{}", pebble_env.addr_dns_management())
+                    .parse()
+                    .unwrap(),
+            );
+            let resolver = pebble_env.resolver();
+
             tm.set("foo", "bar").await.unwrap();
+            let r = resolver
+                .resolve("_acme-challenge.foo", "TXT")
+                .await
+                .unwrap();
+            assert_eq!(r, vec![("TXT".to_string(), "bar".to_string())]);
+
+            tm.create("baz", "txt", Record::Txt("deadbeef".into()), 0)
+                .await
+                .unwrap();
+            let r = resolver
+                .resolve("_acme-challenge.baz", "TXT")
+                .await
+                .unwrap();
+            assert_eq!(r, vec![("TXT".to_string(), "deadbeef".to_string())]);
+
             tm.unset("foo").await.unwrap();
+            let r = resolver.resolve("_acme-challenge.foo", "TXT").await;
+            assert!(r.is_err());
+
+            tm.unset("baz").await.unwrap();
+            let r = resolver.resolve("_acme-challenge.baz", "TXT").await;
+            assert!(r.is_err());
         }
     }
 }

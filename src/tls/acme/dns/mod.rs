@@ -341,6 +341,9 @@ mod test {
                 .unwrap(),
         ));
 
+        let resolver = pebble_env.resolver();
+        let token_manager_dns = Arc::new(TokenManagerDns::new(resolver, token_manager));
+
         let opts = Opts {
             acme_url: AcmeUrl::Custom(
                 format!("https://{}/dir", pebble_env.addr_acme())
@@ -352,7 +355,7 @@ mod test {
             wildcard: true,
             renew_before: Duration::from_secs(30),
             account_credentials: None,
-            token_manager,
+            token_manager: token_manager_dns,
             insecure_tls: true,
         };
 
