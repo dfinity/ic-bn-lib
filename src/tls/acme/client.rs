@@ -457,7 +457,7 @@ mod test {
     #[ignore]
     #[tokio::test]
     async fn test_acme_client() {
-        let pebble_env = Env::new();
+        let pebble_env = Env::new().await;
 
         let tm = Arc::new(TokenManagerPebble::new(
             format!("http://{}", pebble_env.addr_dns_management())

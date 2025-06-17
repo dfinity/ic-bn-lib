@@ -12,7 +12,13 @@ pub mod types;
 #[cfg(feature = "vector")]
 pub mod vector;
 
+use std::{fs::File, path::Path};
+
+use anyhow::{Context, anyhow};
+use bytes::Bytes;
+use futures::StreamExt;
 pub use prometheus;
+use tokio::io::AsyncWriteExt;
 
 /// Generic error
 #[derive(thiserror::Error, Debug)]
@@ -54,6 +60,66 @@ pub enum RetryError {
     Permanent(anyhow::Error),
     #[error("Transient error: {0:?}")]
     Transient(anyhow::Error),
+}
+
+/// Downloads the given url to given path.
+/// Destination folder must exist.
+pub fn download_url_to(url: &str, path: &Path) -> Result<u64, Error> {
+    let mut r = reqwest::blocking::get(url).context("unable to perform HTTP request")?;
+    if !r.status().is_success() {
+        return Err(anyhow!("incorrect HTTP code: {}", r.status()).into());
+    }
+
+    let mut file = File::create(path).context("could not create file")?;
+    Ok(r.copy_to(&mut file)
+        .context("unable to write body to file")?)
+}
+
+/// Downloads the given url and returns it as Bytes
+pub fn download_url(url: &str) -> Result<Bytes, Error> {
+    let r = reqwest::blocking::get(url).context("unable to perform HTTP request")?;
+    if !r.status().is_success() {
+        return Err(anyhow!("incorrect HTTP code: {}", r.status()).into());
+    }
+
+    Ok(r.bytes().context("unable to fetch file")?)
+}
+
+/// Downloads the given url to given path.
+/// Destination folder must exist.
+pub async fn download_url_to_async(url: &str, path: &Path) -> Result<(), Error> {
+    let r = reqwest::get(url)
+        .await
+        .context("unable to perform HTTP request")?;
+    if !r.status().is_success() {
+        return Err(anyhow!("incorrect HTTP code: {}", r.status()).into());
+    }
+
+    let mut file = tokio::fs::File::create(path)
+        .await
+        .context("could not create file")?;
+
+    let mut stream = r.bytes_stream();
+    while let Some(v) = stream.next().await {
+        file.write(&v.context("unable to read chunk")?)
+            .await
+            .context("unable to write chunk")?;
+    }
+
+    Ok(())
+}
+
+/// Downloads the given url and returns it as Bytes
+pub async fn download_url_async(url: &str) -> Result<Bytes, Error> {
+    let r = reqwest::get(url)
+        .await
+        .context("unable to perform HTTP request")?;
+
+    if !r.status().is_success() {
+        return Err(anyhow!("incorrect HTTP code: {}", r.status()).into());
+    }
+
+    Ok(r.bytes().await.context("unable to fetch file")?)
 }
 
 /// Retrying async closures/functions holding mutable references is a pain in Rust.

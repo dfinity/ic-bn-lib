@@ -335,7 +335,7 @@ mod test {
     #[ignore]
     #[tokio::test]
     async fn test_acme_dns() {
-        let pebble_env = Env::new();
+        let pebble_env = Env::new().await;
         let dir = TempDir::new("test_acme_dns").unwrap();
 
         let token_manager = Arc::new(TokenManagerPebble::new(

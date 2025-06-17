@@ -1,27 +1,120 @@
 use std::{
-    env, fs,
+    env,
     net::{IpAddr, TcpStream},
-    path::Path,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
     process::{Child, Command, ExitStatus},
     sync::Arc,
     thread::sleep,
     time::Duration,
 };
 
+use anyhow::{Context, Error, anyhow};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use nix::{
     sys::signal::{Signal, kill},
     unistd::Pid,
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tempdir::TempDir;
+use tokio::fs;
 
 use crate::{
+    download_url_async,
     http::dns::{Options, Protocol, Resolver, Resolves},
     tests::{TEST_CERT, TEST_KEY},
 };
 
+const VER: &str = "2.8.0";
 const PEBBLE_KEY: &str = "pebble-key.pem";
 const PEBBLE_CERT: &str = "pebble-cert.pem";
+
+/// Extracts given file from the .tar.gz archive represented by Bytes
+fn untar(arch: Bytes, file: &str) -> Result<Bytes, Error> {
+    let gzip = flate2::read::GzDecoder::new(arch.reader());
+    let mut arch = tar::Archive::new(gzip);
+
+    for f in arch.entries().context("unable to get TAR entries")? {
+        let mut f = f.context("unable to get file from TAR")?;
+        let p = f.path().context("unable to get file path")?;
+        if p.file_name().unwrap_or_default().to_string_lossy() == file {
+            let buf = BytesMut::with_capacity(f.size() as usize);
+            let mut writer = buf.writer();
+            std::io::copy(&mut f, &mut writer).context("unable to copy file to buffer")?;
+            return Ok(writer.into_inner().freeze());
+        }
+    }
+
+    Err(anyhow!("File not found in archive"))
+}
+
+/// Downloads pebble & pebble-challtestsrv to the given directory, checks hashes & extracts the binaries.
+/// If the binaries already exist - then we don't download anything.
+pub async fn download(path: &Path) -> Result<(), Error> {
+    use anyhow::{Context, anyhow};
+
+    let urls = json!({
+        "pebble": {
+            "linux": {
+                "url": format!("https://github.com/letsencrypt/pebble/releases/download/v{VER}/pebble-linux-amd64.tar.gz"),
+                "sha": "34595d915bbc2fc827affb3f58593034824df57e95353b031c8d5185724485ce",
+            },
+            "macos": {
+                "url": format!("https://github.com/letsencrypt/pebble/releases/download/v{VER}/pebble-darwin-arm64.tar.gz"),
+                "sha": "39e07d63dc776521f2ffe0584e5f4f081c984ac02742c882b430891d89f0c866",
+            }
+        },
+        "pebble-challtestsrv": {
+            "linux": {
+                "url": format!("https://github.com/letsencrypt/pebble/releases/download/v{VER}/pebble-challtestsrv-linux-amd64.tar.gz"),
+                "sha": "a817449d1f05ae58bcb7bf073b4cebe5d31512f859ba4b83951bd825d28d2114",
+            },
+            "macos": {
+                "url": format!("https://github.com/letsencrypt/pebble/releases/download/v{VER}/pebble-challtestsrv-darwin-arm64.tar.gz"),
+                "sha": "1bc5a6cfa062d9756e98d67825daf67f61dd655bcb6025efca2138fe836c9bbc",
+            }
+        }
+    });
+
+    let os = std::env::consts::OS;
+
+    let process = async |name: &str| -> Result<(), Error> {
+        let path = path.join(name);
+
+        if fs::try_exists(&path).await? {
+            return Ok(());
+        }
+
+        let buf = download_url_async(urls[name][os]["url"].as_str().unwrap())
+            .await
+            .context(format!("unable to download {name}"))?;
+        let hash = Sha256::digest(&buf);
+        if hash[..] != hex::decode(urls[name][os]["sha"].as_str().unwrap()).unwrap()[..] {
+            return Err(anyhow!("{name} hash mismatch"));
+        }
+        let binary = untar(buf, name).context(format!("unable to extract {name}"))?;
+        fs::write(&path, binary)
+            .await
+            .context(format!("unable to write {name}"))?;
+        let mut perms = fs::metadata(&path)
+            .await
+            .context("unable to get perms")?
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms)
+            .await
+            .context("unable to set perms")?;
+
+        Ok(())
+    };
+
+    // Download stuff
+    process("pebble").await?;
+    process("pebble-challtestsrv").await?;
+
+    Ok(())
+}
 
 fn stop_process(p: &mut Child) -> ExitStatus {
     let pid = p.id() as i32;
@@ -73,7 +166,7 @@ fn pebble_config(dir: &Path, listen: String) -> String {
 }
 
 pub struct DnsOpts {
-    pub path: String,
+    pub path: PathBuf,
     pub ip: IpAddr,
     pub port_man: u16,
     pub port_dns: u16,
@@ -85,8 +178,15 @@ pub struct Dns {
 }
 
 impl Dns {
-    pub fn new(opts: DnsOpts) -> Self {
+    pub async fn new(opts: DnsOpts) -> Self {
         println!("Starting DNS server...");
+
+        // Try to download the binaries if they don't exist
+        if !fs::try_exists(&opts.path).await.unwrap() {
+            download(&opts.path.parent().unwrap())
+                .await
+                .expect("unable to download binaries");
+        }
 
         let mut cmd = Command::new(&opts.path);
         cmd.arg("-management");
@@ -116,7 +216,7 @@ impl Dns {
 }
 
 pub struct PebbleOpts {
-    pub path: String,
+    pub path: PathBuf,
     pub ip: IpAddr,
     pub port_dir: u16,
     pub dns_server: String,
@@ -129,7 +229,7 @@ pub struct Pebble {
 }
 
 impl Pebble {
-    pub fn new(opts: PebbleOpts) -> Self {
+    pub async fn new(opts: PebbleOpts) -> Self {
         println!("Starting Pebble...");
 
         let dir = TempDir::new("pebble").expect("unable to create temp dir");
@@ -138,13 +238,23 @@ impl Pebble {
             dir.path().join("pebble.conf"),
             pebble_config(dir.path(), format!("{}:{}", opts.ip, opts.port_dir)),
         )
+        .await
         .expect("unable to write Pebble config");
 
         fs::write(dir.path().join("pebble-cert.pem"), TEST_CERT.as_bytes())
+            .await
             .expect("unable to write Pebble cert");
 
         fs::write(dir.path().join("pebble-key.pem"), TEST_KEY.as_bytes())
+            .await
             .expect("unable to write Pebble key");
+
+        // Try to download the binaries if they don't exist
+        if !fs::try_exists(&opts.path).await.unwrap() {
+            download(&opts.path.parent().unwrap())
+                .await
+                .expect("unable to download binaries");
+        }
 
         let mut cmd = Command::new(&opts.path);
         cmd.arg("-dnsserver");
@@ -174,14 +284,8 @@ pub struct Env {
     pub dns: Dns,
 }
 
-impl Default for Env {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Env {
-    pub fn new_with_paths(path_pebble: &str, path_dns: &str) -> Self {
+    pub async fn new_with_paths(path_pebble: &str, path_dns: &str) -> Self {
         let dns_opts = DnsOpts {
             ip: "127.0.0.1".parse().unwrap(),
             path: path_dns.into(),
@@ -196,18 +300,18 @@ impl Env {
             dns_server: "127.0.0.1:38053".to_string(),
         };
 
-        let dns = Dns::new(dns_opts);
-        let pebble = Pebble::new(pebble_opts);
+        let dns = Dns::new(dns_opts).await;
+        let pebble = Pebble::new(pebble_opts).await;
 
         Self { dns, pebble }
     }
 
-    pub fn new() -> Self {
+    pub async fn new() -> Self {
         let path_pebble = env::var("PEBBLE").unwrap_or_else(|_| "./pebble".to_owned());
         let path_dns =
             env::var("CHALLTESTSRV").unwrap_or_else(|_| "./pebble-challtestsrv".to_owned());
 
-        Self::new_with_paths(&path_pebble, &path_dns)
+        Self::new_with_paths(&path_pebble, &path_dns).await
     }
 
     pub const fn port_dns_cleartext(&self) -> u16 {
@@ -255,7 +359,18 @@ impl Drop for Env {
     }
 }
 
-#[cfg(feature = "acme")]
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[ignore]
+    #[tokio::test]
+    async fn test_download() {
+        let dir = TempDir::new("pebble_download").unwrap();
+        download(dir.path()).await.unwrap();
+    }
+}
+
 pub mod dns {
     use anyhow::{Error, anyhow};
     use async_trait::async_trait;
@@ -352,7 +467,7 @@ pub mod dns {
         #[ignore]
         #[tokio::test]
         async fn test_token_manager_pebble() {
-            let pebble_env = Env::new();
+            let pebble_env = Env::new().await;
 
             let tm = TokenManagerPebble::new(
                 format!("http://{}", pebble_env.addr_dns_management())

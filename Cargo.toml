@@ -10,7 +10,15 @@ readme = "README.md"
 [features]
 default = []
 clients-hyper = ["dep:hyper-rustls"]
-acme = ["dep:instant-acme", "dep:rcgen", "dep:hyper-rustls"]
+acme = [
+    "dep:instant-acme",
+    "dep:rcgen",
+    "dep:hyper-rustls",
+    "dep:tar",
+    "dep:flate2",
+    "dep:hex",
+    "dep:sha2",
+]
 acme_dns = ["acme", "dep:cloudflare"]
 acme_alpn = ["acme", "dep:rustls-acme"]
 vector = ["dep:vrl", "dep:prost", "dep:prost-types"]
@@ -30,9 +38,11 @@ cloudflare = { version = "0.13.0", default-features = false, features = [
     "rustls-tls",
 ], optional = true }
 derive-new = "0.7.0"
+flate2 = { version = "1.0", optional = true }
 fqdn = "0.4.1"
 futures = "0.3.31"
 futures-util = "0.3.31"
+hex = { version = "0.4.3", optional = true }
 hickory-proto = "0.25.1"
 hickory-resolver = { version = "0.25.1", features = [
     "tls-ring",
@@ -70,6 +80,7 @@ prost-types = { version = "0.13.3", optional = true }
 rand = { version = "0.8.5", features = ["small_rng"] }
 rcgen = { version = "0.13.1", optional = true }
 reqwest = { version = "0.12.12", default-features = false, features = [
+    "blocking",
     "http2",
     "rustls-tls",
     "hickory-dns",
@@ -91,9 +102,11 @@ scopeguard = "1.2.0"
 serde = { version = "1.0.214", features = ["derive"] }
 serde_json = "1.0.132"
 sha1 = "0.10.6"
+sha2 = { version = "0.10.9", optional = true }
 strum = { version = "0.27.1", features = ["derive"] }
 strum_macros = "0.27.1"
 systemstat = "0.2.3"
+tar = { version = "0.4.44", optional = true }
 tempdir = "0.3.7"
 thiserror = "2.0.3"
 tokio = { version = "1.44.0", features = ["full"] }
