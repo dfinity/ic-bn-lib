@@ -1,11 +1,10 @@
 use std::{
     env,
-    net::{IpAddr, TcpStream},
+    net::IpAddr,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus},
     sync::Arc,
-    thread::sleep,
     time::Duration,
 };
 
@@ -30,15 +29,20 @@ const VER: &str = "2.8.0";
 const PEBBLE_KEY: &str = "pebble-key.pem";
 const PEBBLE_CERT: &str = "pebble-cert.pem";
 
-/// Extracts given file from the .tar.gz archive represented by Bytes
-fn untar(arch: Bytes, file: &str) -> Result<Bytes, Error> {
-    let gzip = flate2::read::GzDecoder::new(arch.reader());
-    let mut arch = tar::Archive::new(gzip);
+/// Extracts given file from the .tar.gz archive represented by targz Bytes
+fn untar(targz: Bytes, file: &str) -> Result<Bytes, Error> {
+    let gzip = flate2::read::GzDecoder::new(targz.reader());
+    let mut tar = tar::Archive::new(gzip);
 
-    for f in arch.entries().context("unable to get TAR entries")? {
+    for f in tar.entries().context("unable to get TAR entries")? {
         let mut f = f.context("unable to get file from TAR")?;
         let p = f.path().context("unable to get file path")?;
-        if p.file_name().unwrap_or_default().to_string_lossy() == file {
+
+        if p.file_name()
+            .context("unable to get file name")?
+            .to_string_lossy()
+            == file
+        {
             let buf = BytesMut::with_capacity(f.size() as usize);
             let mut writer = buf.writer();
             std::io::copy(&mut f, &mut writer).context("unable to copy file to buffer")?;
@@ -86,6 +90,7 @@ pub async fn download(path: &Path) -> Result<(), Error> {
             return Ok(());
         }
 
+        // Download the .tar.gz and check hash
         let buf = download_url_async(urls[name][os]["url"].as_str().unwrap())
             .await
             .context(format!("unable to download {name}"))?;
@@ -93,10 +98,14 @@ pub async fn download(path: &Path) -> Result<(), Error> {
         if hash[..] != hex::decode(urls[name][os]["sha"].as_str().unwrap()).unwrap()[..] {
             return Err(anyhow!("{name} hash mismatch"));
         }
+
+        // Extract the binary & store it
         let binary = untar(buf, name).context(format!("unable to extract {name}"))?;
         fs::write(&path, binary)
             .await
             .context(format!("unable to write {name}"))?;
+
+        // Make executable
         let mut perms = fs::metadata(&path)
             .await
             .context("unable to get perms")?
@@ -126,13 +135,13 @@ fn stop_process(p: &mut Child) -> ExitStatus {
 }
 
 /// Waits until socket becomes connectable
-fn wait_for_server(addr: &str) {
+async fn wait_for_server(addr: &str) {
     for i in 0..20 {
-        if TcpStream::connect(addr).is_ok() {
+        if tokio::net::TcpStream::connect(addr).await.is_ok() {
             return;
         }
 
-        sleep(Duration::from_millis(i * 100))
+        tokio::time::sleep(Duration::from_millis(i * 100)).await;
     }
 
     panic!("failed to connect to {addr:?} after 20 tries");
@@ -183,7 +192,7 @@ impl Dns {
 
         // Try to download the binaries if they don't exist
         if !fs::try_exists(&opts.path).await.unwrap() {
-            download(&opts.path.parent().unwrap())
+            download(opts.path.parent().unwrap())
                 .await
                 .expect("unable to download binaries");
         }
@@ -204,7 +213,7 @@ impl Dns {
         cmd.arg("");
 
         let process = cmd.spawn().expect("failed to start DNS service");
-        wait_for_server(&format!("{}:{}", opts.ip, opts.port_man));
+        wait_for_server(&format!("{}:{}", opts.ip, opts.port_man)).await;
 
         println!("DNS service started");
 
@@ -251,7 +260,7 @@ impl Pebble {
 
         // Try to download the binaries if they don't exist
         if !fs::try_exists(&opts.path).await.unwrap() {
-            download(&opts.path.parent().unwrap())
+            download(opts.path.parent().unwrap())
                 .await
                 .expect("unable to download binaries");
         }
@@ -268,7 +277,7 @@ impl Pebble {
         cmd.env("PEBBLE_WFE_NONCEREJECT", "1");
 
         let process = cmd.spawn().expect("failed to start Pebble");
-        wait_for_server(&format!("{}:{}", opts.ip, opts.port_dir));
+        wait_for_server(&format!("{}:{}", opts.ip, opts.port_dir)).await;
         println!("Pebble started");
 
         Self {
