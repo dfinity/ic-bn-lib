@@ -7,7 +7,7 @@ use std::{
     task::Poll,
 };
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use hickory_proto::rr::RecordType;
 use hickory_resolver::{
@@ -18,7 +18,6 @@ use hickory_resolver::{
 };
 use hyper_util::client::legacy::connect::dns::Name as HyperName;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
-use strum_macros::EnumString;
 use tower::Service;
 
 use super::{
@@ -26,12 +25,32 @@ use super::{
     client::{CloneableDnsResolver, CloneableHyperDnsResolver},
 };
 
-#[derive(Clone, Copy, Debug, EnumString)]
-#[strum(serialize_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Protocol {
-    Clear,
-    Tls,
-    Https,
+    Clear(u16),
+    Tls(u16),
+    Https(u16),
+}
+
+impl FromStr for Protocol {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut iter = s.split(":");
+        let (proto, port) = (iter.next().unwrap(), iter.next());
+        let port = if let Some(v) = port {
+            Some(v.parse::<u16>().context("unable to parse port")?)
+        } else {
+            None
+        };
+
+        match proto {
+            "clear" => Ok(Self::Clear(port.unwrap_or(53))),
+            "tls" => Ok(Self::Tls(port.unwrap_or(853))),
+            "https" => Ok(Self::Https(port.unwrap_or(443))),
+            _ => Err(anyhow!("unknown DNS protocol: {proto}").into()),
+        }
+    }
 }
 
 #[async_trait]
@@ -50,7 +69,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            protocol: Protocol::Clear,
+            protocol: Protocol::Clear(53),
             servers: CLOUDFLARE_IPS.into(),
             tls_name: "cloudflare-dns.com".into(),
             cache_size: 1024,
@@ -68,10 +87,12 @@ impl Resolver {
     /// It must be called in Tokio context.
     pub fn new(o: Options) -> Self {
         let name_servers = match o.protocol {
-            Protocol::Clear => NameServerConfigGroup::from_ips_clear(&o.servers, 53, true),
-            Protocol::Tls => NameServerConfigGroup::from_ips_tls(&o.servers, 853, o.tls_name, true),
-            Protocol::Https => {
-                NameServerConfigGroup::from_ips_https(&o.servers, 443, o.tls_name, true)
+            Protocol::Clear(p) => NameServerConfigGroup::from_ips_clear(&o.servers, p, true),
+            Protocol::Tls(p) => {
+                NameServerConfigGroup::from_ips_tls(&o.servers, p, o.tls_name, true)
+            }
+            Protocol::Https(p) => {
+                NameServerConfigGroup::from_ips_https(&o.servers, p, o.tls_name, true)
             }
         };
 
@@ -172,5 +193,32 @@ impl Service<HyperName> for Resolver {
 
             Ok(SocketAddrs { iter: addresses })
         })
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_dns_protocol() {
+        assert_eq!(Protocol::from_str("clear").unwrap(), Protocol::Clear(53));
+        assert_eq!(Protocol::from_str("tls").unwrap(), Protocol::Tls(853));
+        assert_eq!(Protocol::from_str("https").unwrap(), Protocol::Https(443));
+
+        assert_eq!(
+            Protocol::from_str("clear:8053").unwrap(),
+            Protocol::Clear(8053)
+        );
+        assert_eq!(Protocol::from_str("tls:8853").unwrap(), Protocol::Tls(8853));
+        assert_eq!(
+            Protocol::from_str("https:8443").unwrap(),
+            Protocol::Https(8443)
+        );
+
+        assert!(Protocol::from_str("clear:").is_err(),);
+        assert!(Protocol::from_str("clear:x").is_err(),);
+        assert!(Protocol::from_str("clear:-1").is_err(),);
+        assert!(Protocol::from_str("clear:65537").is_err(),);
     }
 }

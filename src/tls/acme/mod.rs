@@ -1,19 +1,20 @@
-#[cfg(feature = "acme_dns")]
-pub mod acme;
 #[cfg(feature = "acme_alpn")]
 pub mod alpn;
+#[cfg(feature = "acme")]
+pub mod client;
 #[cfg(feature = "acme_dns")]
 pub mod dns;
 
-use std::path::PathBuf;
+use std::{fmt::Display, str::FromStr};
 
-use anyhow::Error;
+use anyhow::{Context, Error};
 use async_trait::async_trait;
-use derive_new::new;
+use instant_acme::LetsEncrypt;
 use strum_macros::{Display, EnumString};
 
-#[cfg(feature = "acme_dns")]
+#[cfg(feature = "acme")]
 pub use instant_acme;
+use url::Url;
 
 #[derive(Clone, Display, EnumString, PartialEq, Eq)]
 #[strum(serialize_all = "snake_case")]
@@ -29,14 +30,55 @@ pub trait TokenManager: Sync + Send {
     async fn verify(&self, id: &str, token: &str) -> Result<(), Error>;
 }
 
-#[derive(new)]
-pub struct AcmeOptions {
-    domains: Vec<String>,
-    cache_path: PathBuf,
-    #[cfg(feature = "acme_dns")]
-    renew_before: std::time::Duration,
-    #[cfg(feature = "acme_dns")]
-    wildcard: bool,
-    staging: bool,
-    contact: String,
+/// Type of ACME server.
+/// Can be either Prod or Staging LetsEncrypt or a custom one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcmeUrl {
+    LetsEncryptStaging,
+    LetsEncryptProduction,
+    Custom(Url),
+}
+
+impl Display for AcmeUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LetsEncryptStaging => write!(f, "{}", LetsEncrypt::Staging.url()),
+            Self::LetsEncryptProduction => write!(f, "{}", LetsEncrypt::Production.url()),
+            Self::Custom(v) => write!(f, "{}", v),
+        }
+    }
+}
+
+impl FromStr for AcmeUrl {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "le_prod" => Ok(Self::LetsEncryptProduction),
+            "le_stag" => Ok(Self::LetsEncryptStaging),
+            _ => Ok(Self::Custom(Url::parse(s).context("unable to parse URL")?)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_acme_url() {
+        assert_eq!(
+            AcmeUrl::from_str("le_prod").unwrap(),
+            AcmeUrl::LetsEncryptProduction
+        );
+        assert_eq!(
+            AcmeUrl::from_str("le_stag").unwrap(),
+            AcmeUrl::LetsEncryptStaging
+        );
+        assert_eq!(
+            AcmeUrl::from_str("https://foo.bar/dir").unwrap(),
+            AcmeUrl::Custom("https://foo.bar/dir".parse().unwrap())
+        );
+        assert!(AcmeUrl::from_str("123#3##!").is_err());
+    }
 }
