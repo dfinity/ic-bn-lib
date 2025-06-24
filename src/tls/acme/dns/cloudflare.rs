@@ -2,14 +2,16 @@ use anyhow::{Context, Error, anyhow};
 use async_trait::async_trait;
 use cloudflare::{
     endpoints::{
-        dns::{
+        dns::dns::{
             CreateDnsRecord, CreateDnsRecordParams, DeleteDnsRecord, DnsContent, DnsRecord,
             ListDnsRecords, ListDnsRecordsParams,
         },
-        zone::{ListZones, ListZonesParams, Zone},
+        zones::zone::{ListZones, ListZonesParams, Zone},
     },
     framework::{
-        Environment, HttpApiClientConfig, async_api::Client, auth::Credentials,
+        Environment,
+        auth::Credentials,
+        client::{ClientConfig, async_api::Client},
         response::ApiSuccess,
     },
 };
@@ -38,8 +40,8 @@ impl Cloudflare {
 
         let client = Client::new(
             credentials,
-            HttpApiClientConfig::default(),
-            Environment::Custom(url),
+            ClientConfig::default(),
+            Environment::Custom(url.to_string()),
         )
         .context("failed to initialize cloudflare api client")?;
 
