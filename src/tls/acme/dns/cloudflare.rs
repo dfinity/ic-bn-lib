@@ -15,6 +15,7 @@ use cloudflare::{
         response::ApiSuccess,
     },
 };
+use tracing::debug;
 use url::Url;
 
 use super::{DnsManager, Record};
@@ -140,14 +141,19 @@ impl DnsManager for Cloudflare {
             .await
             .context("unable to find records")?;
 
-        // Delete all matching records
+        // Delete all matching TXT records
         for record in resp.result {
-            self.client
-                .request(&DeleteDnsRecord {
-                    zone_identifier: &zone_id,
-                    identifier: &record.id,
-                })
-                .await?;
+            if let DnsContent::TXT { .. } = &record.content {
+                if record.name.starts_with("_acme-challenge") {
+                    debug!("deleting dns TXT record {} in cloudflare", record.name);
+                    self.client
+                        .request(&DeleteDnsRecord {
+                            zone_identifier: &zone_id,
+                            identifier: &record.id,
+                        })
+                        .await?;
+                }
+            }
         }
 
         Ok(())
