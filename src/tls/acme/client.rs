@@ -333,19 +333,21 @@ impl Client {
         names: &Vec<String>,
         private_key: Option<Vec<u8>>,
     ) -> Result<Cert, Error> {
-        // Perform the issuance
+        // Pre-cleanup: attempt to remove all existing TXT _acme-challenge records for the given names.
+        // This ensures a clean state before issuance begins.
+        // Treat cleanup failures as non-critical.
+        let _ = self.cleanup(names).await;
+
+        // Try to issue the certificate using the ACME protocol
         let res = self.issue_inner(names, private_key).await;
 
-        // Cleanup the tokens
         debug!("ACME: Cleaning up");
 
-        // Treat it as non-critical for now.
-        // TODO fail?
-        if let Ok((v, _)) = &res {
-            let _ = self.cleanup(v).await;
-        }
+        // Post-cleanup
+        // Treat cleanup failures as non-critical.
+        let _ = self.cleanup(names).await;
 
-        res.map(|(_, v)| v)
+        res.map(|(_, cert)| cert)
     }
 
     async fn issue_inner(
