@@ -15,6 +15,7 @@ use cloudflare::{
         response::ApiSuccess,
     },
 };
+use tracing::debug;
 use url::Url;
 
 use super::{DnsManager, Record};
@@ -140,8 +141,13 @@ impl DnsManager for Cloudflare {
             .await
             .context("unable to find records")?;
 
-        // Delete all matching records
-        for record in resp.result {
+        // Delete all matching TXT records
+        for record in resp
+            .result
+            .into_iter()
+            .filter(|r| matches!(&r.content, DnsContent::TXT { .. }))
+        {
+            debug!("deleting record {} in cloudflare", record.name);
             self.client
                 .request(&DeleteDnsRecord {
                     zone_identifier: &zone_id,
