@@ -143,17 +143,16 @@ impl DnsManager for Cloudflare {
 
         // Delete all matching TXT records
         for record in resp.result {
-            if let DnsContent::TXT { .. } = &record.content {
-                if record.name.starts_with("_acme-challenge") {
-                    debug!("deleting dns TXT record {} in cloudflare", record.name);
-                    self.client
-                        .request(&DeleteDnsRecord {
-                            zone_identifier: &zone_id,
-                            identifier: &record.id,
-                        })
-                        .await?;
-                }
+            if !matches!(&record.content, DnsContent::TXT { .. }) {
+                continue;
             }
+            debug!("deleting record {} in cloudflare", record.name);
+            self.client
+                .request(&DeleteDnsRecord {
+                    zone_identifier: &zone_id,
+                    identifier: &record.id,
+                })
+                .await?;
         }
 
         Ok(())

@@ -317,8 +317,8 @@ impl Client {
         Ok(challenges.into_iter().map(|x| x.0).collect())
     }
 
-    /// Cleans up dns TXT records related to dns-01 acme challenge
-    async fn cleanup_txt_acme_records(&self, names: &Vec<String>) -> Result<(), Error> {
+    /// Cleans up the tokens after issuance
+    async fn cleanup(&self, names: &Vec<String>) -> Result<(), Error> {
         for id in names {
             self.token_manager.unset(id).await?;
         }
@@ -336,7 +336,7 @@ impl Client {
         // Pre-cleanup: attempt to remove all existing TXT _acme-challenge records for the given names.
         // This ensures a clean state before issuance begins.
         // Treat cleanup failures as non-critical.
-        let _ = self.cleanup_txt_acme_records(names).await;
+        let _ = self.cleanup(names).await;
 
         // Try to issue the certificate using the ACME protocol
         let res = self.issue_inner(names, private_key).await;
@@ -345,7 +345,7 @@ impl Client {
 
         // Post-cleanup
         // Treat cleanup failures as non-critical.
-        let _ = self.cleanup_txt_acme_records(names).await;
+        let _ = self.cleanup(names).await;
 
         res.map(|(_, cert)| cert)
     }
