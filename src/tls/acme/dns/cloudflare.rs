@@ -142,10 +142,11 @@ impl DnsManager for Cloudflare {
             .context("unable to find records")?;
 
         // Delete all matching TXT records
-        for record in resp.result {
-            if !matches!(&record.content, DnsContent::TXT { .. }) {
-                continue;
-            }
+        for record in resp
+            .result
+            .into_iter()
+            .filter(|r| matches!(&r.content, DnsContent::TXT { .. }))
+        {
             debug!("deleting record {} in cloudflare", record.name);
             self.client
                 .request(&DeleteDnsRecord {
