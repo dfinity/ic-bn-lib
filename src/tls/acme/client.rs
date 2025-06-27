@@ -333,7 +333,7 @@ impl Client {
         names: &Vec<String>,
         private_key: Option<Vec<u8>>,
     ) -> Result<Cert, Error> {
-        // Pre-cleanup: attempt to remove all existing TXT _acme-challenge records for the given names.
+        // Pre-cleanup: attempt to remove all existing tokens for the given names.
         // This ensures a clean state before issuance begins.
         // Treat cleanup failures as non-critical.
         let _ = self.cleanup(names).await;
