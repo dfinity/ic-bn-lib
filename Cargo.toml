@@ -140,3 +140,4 @@ rand_regex = "0.17.0"
 [[bench]]
 name = "vector"
 harness = false
+required_features = ["vector"]
