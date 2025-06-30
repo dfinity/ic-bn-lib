@@ -319,4 +319,14 @@ mod test {
         let res = pem_convert_to_rustls(TEST_KEY.as_bytes(), TEST_CERT.as_bytes()).unwrap();
         assert!(res.cert.len() == 1);
     }
+
+    #[test]
+    fn test_prepare_client_config() {
+        // Install crypto-provider
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .unwrap();
+
+        prepare_client_config(&[&rustls::version::TLS13, &rustls::version::TLS12]);
+    }
 }
