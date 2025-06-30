@@ -254,6 +254,8 @@ pub fn prepare_client_config(tls_versions: &[&'static SupportedProtocolVersion])
     // It also checks OCSP revocation, though OCSP support for Linux platform for now seems be no-op.
     // https://github.com/rustls/rustls-platform-verifier/issues/99
 
+    let cfg = ClientConfig::builder_with_protocol_versions(tls_versions);
+
     let crypto_provider = rustls::crypto::CryptoProvider::get_default()
         .unwrap()
         .clone();
@@ -264,7 +266,7 @@ pub fn prepare_client_config(tls_versions: &[&'static SupportedProtocolVersion])
     )
     .unwrap();
 
-    let mut cfg = ClientConfig::builder_with_protocol_versions(tls_versions)
+    let mut cfg = cfg
         .dangerous() // Nothing really dangerous here
         .with_custom_certificate_verifier(Arc::new(verifier))
         .with_no_client_auth();
@@ -322,11 +324,6 @@ mod test {
 
     #[test]
     fn test_prepare_client_config() {
-        // Install crypto-provider
-        rustls::crypto::ring::default_provider()
-            .install_default()
-            .unwrap();
-
         prepare_client_config(&[&rustls::version::TLS13, &rustls::version::TLS12]);
     }
 }
