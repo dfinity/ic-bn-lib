@@ -92,12 +92,13 @@ rustls = { version = "0.23.18", default-features = false, features = [
     "std",
     "brotli",
 ] }
-rustls-acme = { version = "0.13.0", default-features = false, features = [
+rustls-acme = { version = "0.14.0", default-features = false, features = [
+    "webpki-roots",
     "tls12",
     "ring",
 ], optional = true }
 rustls-pemfile = "2.2.0"
-rustls-platform-verifier = "0.5.0"
+rustls-platform-verifier = "0.6.0"
 scopeguard = "1.2.0"
 serde = { version = "1.0.214", features = ["derive"] }
 serde_json = "1.0.132"
@@ -124,10 +125,10 @@ url = "2.5.3"
 # DO NOT upgrade, this breaks monorepo compatibility
 # Read https://github.com/uuid-rs/uuid/releases/tag/1.13.0
 uuid = { version = "=1.12.1", features = ["v7"] }
-vrl = { version = "0.23.0", default-features = false, features = [
+vrl = { version = "0.25.0", default-features = false, features = [
     "value",
 ], optional = true }
-webpki-root-certs = "0.26.6"
+webpki-root-certs = "1.0.1"
 x509-parser = "0.17.0"
 zeroize = { version = "1.8.1", features = ["derive"] }
 
