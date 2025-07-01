@@ -254,11 +254,19 @@ pub fn prepare_client_config(tls_versions: &[&'static SupportedProtocolVersion])
     // It also checks OCSP revocation, though OCSP support for Linux platform for now seems be no-op.
     // https://github.com/rustls/rustls-platform-verifier/issues/99
 
-    let verifier =
-        Verifier::new_with_extra_roots(webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().cloned())
-            .unwrap();
+    let cfg = ClientConfig::builder_with_protocol_versions(tls_versions);
 
-    let mut cfg = ClientConfig::builder_with_protocol_versions(tls_versions)
+    let crypto_provider = rustls::crypto::CryptoProvider::get_default()
+        .unwrap()
+        .clone();
+
+    let verifier = Verifier::new_with_extra_roots(
+        webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().cloned(),
+        crypto_provider,
+    )
+    .unwrap();
+
+    let mut cfg = cfg
         .dangerous() // Nothing really dangerous here
         .with_custom_certificate_verifier(Arc::new(verifier))
         .with_no_client_auth();
@@ -280,6 +288,7 @@ mod test {
     use super::*;
 
     #[test]
+    #[allow(clippy::cognitive_complexity)]
     fn test_sni_matches() {
         let domains = vec![fqdn!("foo1.bar"), fqdn!("foo2.bar"), fqdn!("foo3.bar")];
 
@@ -311,5 +320,10 @@ mod test {
     fn test_pem_convert_to_rustls() {
         let res = pem_convert_to_rustls(TEST_KEY.as_bytes(), TEST_CERT.as_bytes()).unwrap();
         assert!(res.cert.len() == 1);
+    }
+
+    #[test]
+    fn test_prepare_client_config() {
+        prepare_client_config(&[&rustls::version::TLS13, &rustls::version::TLS12]);
     }
 }

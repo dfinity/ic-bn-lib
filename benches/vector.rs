@@ -1,11 +1,10 @@
 use bytes::BytesMut;
 use criterion::{Criterion, criterion_group, criterion_main};
-use ic_bn_lib::vector::{encode_event, encode_value, prepare_event};
+use ic_bn_lib::vector::encode_event;
 use rand::{Rng, prelude::Distribution, rngs::ThreadRng, seq::SliceRandom, thread_rng};
 use serde_json::json;
 
 use uuid::Uuid;
-use vrl::value::Value;
 
 fn create_event(
     rng: &mut ThreadRng,
@@ -64,6 +63,7 @@ fn create_event(
     })
 }
 
+#[allow(dead_code)]
 fn create_batch(
     size: usize,
     rng: &mut ThreadRng,

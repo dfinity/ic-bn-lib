@@ -278,6 +278,7 @@ pub enum Listener {
 }
 
 impl Listener {
+    /// Create a new Listener
     pub fn new(addr: Addr, backlog: u32) -> Result<Self, Error> {
         Ok(match addr {
             Addr::Tcp(v) => Self::Tcp(listen_tcp_backlog(v, backlog)?),
@@ -308,6 +309,20 @@ impl Listener {
             Self::Tcp(v) => v.local_addr().ok(),
             Self::Unix(_) => None,
         }
+    }
+}
+
+impl From<TcpListener> for Listener {
+    /// Creates a Listener from TcpListener
+    fn from(v: TcpListener) -> Self {
+        Self::Tcp(v)
+    }
+}
+
+impl From<UnixListener> for Listener {
+    /// Creates a Listener from UnixListener
+    fn from(v: UnixListener) -> Self {
+        Self::Unix(v)
     }
 }
 
