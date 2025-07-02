@@ -129,7 +129,7 @@ fn stop_process(p: &mut Child) -> ExitStatus {
     let pid = p.id() as i32;
     match kill(Pid::from_raw(pid), Signal::SIGTERM) {
         Ok(_) => println!("Sent SIGTERM to process {pid}"),
-        Err(e) => println!("Failed to send SIGTERM: {}", e),
+        Err(e) => println!("Failed to send SIGTERM: {e}"),
     }
     p.wait().expect("failed to wait on child process")
 }

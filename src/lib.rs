@@ -2,6 +2,7 @@
 #![recursion_limit = "256"]
 #![warn(clippy::nursery)]
 #![warn(tail_expr_drop_order)]
+#![allow(clippy::cognitive_complexity)]
 
 pub mod http;
 pub mod pubsub;

@@ -18,7 +18,7 @@ type Key = Vec<u8>;
 #[derive(Debug, PartialEq, Eq, Hash, Clone, ZeroizeOnDrop)]
 struct Val(Vec<u8>);
 
-fn weigher(k: &Key, v: &Val) -> u32 {
+const fn weigher(k: &Key, v: &Val) -> u32 {
     (k.len() + v.0.len()) as u32
 }
 

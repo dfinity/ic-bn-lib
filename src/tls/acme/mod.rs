@@ -44,7 +44,7 @@ impl Display for AcmeUrl {
         match self {
             Self::LetsEncryptStaging => write!(f, "{}", LetsEncrypt::Staging.url()),
             Self::LetsEncryptProduction => write!(f, "{}", LetsEncrypt::Production.url()),
-            Self::Custom(v) => write!(f, "{}", v),
+            Self::Custom(v) => write!(f, "{v}"),
         }
     }
 }

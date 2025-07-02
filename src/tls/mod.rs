@@ -288,7 +288,6 @@ mod test {
     use super::*;
 
     #[test]
-    #[allow(clippy::cognitive_complexity)]
     fn test_sni_matches() {
         let domains = vec![fqdn!("foo1.bar"), fqdn!("foo2.bar"), fqdn!("foo3.bar")];
 
