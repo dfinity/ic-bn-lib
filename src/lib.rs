@@ -2,13 +2,17 @@
 #![recursion_limit = "256"]
 #![warn(clippy::nursery)]
 #![warn(tail_expr_drop_order)]
+#![allow(clippy::cognitive_complexity)]
 
+#[cfg(feature = "custom_domains")]
+pub mod custom_domains;
 pub mod http;
 pub mod pubsub;
 pub mod tasks;
 pub mod tests;
 pub mod tls;
 pub mod types;
+pub mod utils;
 #[cfg(feature = "vector")]
 pub mod vector;
 

@@ -22,14 +22,14 @@ use tokio::fs;
 use crate::{
     download_url_async,
     http::dns::{Options, Protocol, Resolver, Resolves},
-    tests::{TEST_CERT, TEST_KEY},
+    tests::{TEST_CERT_1, TEST_KEY_1},
 };
 
 const VER: &str = "2.8.0";
 const PEBBLE_KEY: &str = "pebble-key.pem";
 const PEBBLE_CERT: &str = "pebble-cert.pem";
 
-/// Extracts given file from the .tar.gz archive represented by targz Bytes
+/// Extracts given file from the .tar.gz archive represented by `targz` Bytes
 fn untar(targz: Bytes, file: &str) -> Result<Bytes, Error> {
     let gzip = flate2::read::GzDecoder::new(targz.reader());
     let mut tar = tar::Archive::new(gzip);
@@ -50,7 +50,7 @@ fn untar(targz: Bytes, file: &str) -> Result<Bytes, Error> {
         }
     }
 
-    Err(anyhow!("File not found in archive"))
+    Err(anyhow!("File not found in the archive"))
 }
 
 /// Downloads pebble & pebble-challtestsrv to the given directory, checks hashes & extracts the binaries.
@@ -129,7 +129,7 @@ fn stop_process(p: &mut Child) -> ExitStatus {
     let pid = p.id() as i32;
     match kill(Pid::from_raw(pid), Signal::SIGTERM) {
         Ok(_) => println!("Sent SIGTERM to process {pid}"),
-        Err(e) => println!("Failed to send SIGTERM: {}", e),
+        Err(e) => println!("Failed to send SIGTERM: {e}"),
     }
     p.wait().expect("failed to wait on child process")
 }
@@ -250,11 +250,11 @@ impl Pebble {
         .await
         .expect("unable to write Pebble config");
 
-        fs::write(dir.path().join("pebble-cert.pem"), TEST_CERT.as_bytes())
+        fs::write(dir.path().join("pebble-cert.pem"), TEST_CERT_1.as_bytes())
             .await
             .expect("unable to write Pebble cert");
 
-        fs::write(dir.path().join("pebble-key.pem"), TEST_KEY.as_bytes())
+        fs::write(dir.path().join("pebble-key.pem"), TEST_KEY_1.as_bytes())
             .await
             .expect("unable to write Pebble key");
 

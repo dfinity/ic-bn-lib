@@ -126,7 +126,7 @@ impl Entry {
         }
 
         let rnd = rand::random::<f64>();
-        let xfetch = self.delta * beta * rnd.ln() * -1.0;
+        let xfetch = -(self.delta * beta * rnd.ln());
         let ttl_left = (self.expires - now).as_secs_f64();
 
         xfetch > ttl_left
