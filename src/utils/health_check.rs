@@ -56,6 +56,7 @@ impl<T: Send + Sync + 'static> Actor<T> {
     }
 }
 
+/// Director takes care of managing Actors and receives health messages from them
 struct Director<T> {
     targets: Vec<Arc<T>>,
     targets_healthy: Arc<ArcSwapOption<Vec<Arc<T>>>>,
@@ -135,6 +136,8 @@ impl<T: Send + Sync + 'static> Director<T> {
     }
 }
 
+/// Generic health-checker that runs health checks against its targets
+/// in parallel using actors.
 pub struct Checker<T> {
     targets_healthy: Arc<ArcSwapOption<Vec<Arc<T>>>>,
     token: CancellationToken,
@@ -142,6 +145,7 @@ pub struct Checker<T> {
 }
 
 impl<T: Send + Sync + 'static> Checker<T> {
+    /// Create a new Checker
     pub fn new(
         targets: Vec<Arc<T>>,
         target_checker: Arc<dyn ChecksTarget<Target = T>>,
@@ -165,10 +169,12 @@ impl<T: Send + Sync + 'static> Checker<T> {
         }
     }
 
+    /// Returns a list of healthy targets
     pub fn get_healthy_targets(&self) -> Option<Arc<Vec<Arc<T>>>> {
         self.targets_healthy.load_full()
     }
 
+    /// Shuts down this instance of Checker
     pub async fn stop(&self) {
         self.token.cancel();
         self.tracker.close();
