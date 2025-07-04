@@ -1,5 +1,8 @@
 #[cfg(feature = "acme")]
 pub mod acme;
+#[cfg(feature = "cert_providers")]
+pub mod providers;
+pub mod resolver;
 pub mod sessions;
 pub mod tickets;
 pub mod verify;
@@ -14,7 +17,7 @@ use rustls::{
     client::{ClientSessionMemoryCache, Resumption},
     compress::CompressionCache,
     crypto::ring,
-    server::{ClientHello, ResolvesServerCert},
+    server::ResolvesServerCert,
     sign::CertifiedKey,
     version::{TLS12, TLS13},
 };
@@ -26,39 +29,6 @@ use std::{
 use x509_parser::prelude::{FromDer, GeneralName, ParsedExtension, X509Certificate};
 
 use crate::http::{ALPN_H1, ALPN_H2};
-
-/// Rustls certificate resolver that always provides a single certificate
-#[derive(Clone, Debug)]
-pub struct StubResolver(Arc<CertifiedKey>);
-
-impl StubResolver {
-    /// Creates `StubResolver` by parsing PEM-encoded cert & key from provided slices
-    pub fn new(cert: &[u8], key: &[u8]) -> Result<Self, Error> {
-        Ok(Self(Arc::new(
-            pem_convert_to_rustls(key, cert).context("unable to parse cert and/or key")?,
-        )))
-    }
-
-    /// Creates `StubResolver` by loading PEM-encoded cert & key from provided files
-    pub fn new_from_files(cert: PathBuf, key: PathBuf) -> Result<Self, Error> {
-        Ok(Self(Arc::new(
-            pem_load_rustls(key, cert).context("unable to load certificates")?,
-        )))
-    }
-
-    /// Creates `StubResolver` by loading PEM-encoded cert & key from provided concatenated file
-    pub fn new_from_file(pem: PathBuf) -> Result<Self, Error> {
-        Ok(Self(Arc::new(
-            pem_load_rustls_single(pem).context("unable to load certificates")?,
-        )))
-    }
-}
-
-impl ResolvesServerCert for StubResolver {
-    fn resolve(&self, _client_hello: ClientHello) -> Option<Arc<CertifiedKey>> {
-        Some(self.0.clone())
-    }
-}
 
 /// Generic error for now
 /// TODO improve
@@ -283,7 +253,7 @@ pub fn prepare_client_config(tls_versions: &[&'static SupportedProtocolVersion])
 mod test {
     use fqdn::fqdn;
 
-    use crate::tests::{TEST_CERT, TEST_KEY};
+    use crate::tests::{TEST_CERT_1, TEST_KEY_1};
 
     use super::*;
 
@@ -310,14 +280,14 @@ mod test {
 
     #[test]
     fn test_pem_convert_to_rustls_single() {
-        let pem = [TEST_KEY, TEST_CERT].concat();
+        let pem = [TEST_KEY_1, TEST_CERT_1].concat();
         let res = pem_convert_to_rustls_single(pem.as_bytes()).unwrap();
         assert!(res.cert.len() == 1);
     }
 
     #[test]
     fn test_pem_convert_to_rustls() {
-        let res = pem_convert_to_rustls(TEST_KEY.as_bytes(), TEST_CERT.as_bytes()).unwrap();
+        let res = pem_convert_to_rustls(TEST_KEY_1.as_bytes(), TEST_CERT_1.as_bytes()).unwrap();
         assert!(res.cert.len() == 1);
     }
 
