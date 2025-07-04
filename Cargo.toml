@@ -147,3 +147,7 @@ tempfile = "3.20.0"
 name = "vector"
 harness = false
 required-features = ["vector"]
+
+[package.metadata.cargo-all-features]
+# Limit feature combinations to reduce test duration
+max_combination_size = 4
