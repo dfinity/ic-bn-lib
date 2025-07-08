@@ -18,7 +18,7 @@ use std::{
 };
 
 use derive_new::new;
-use http::{HeaderMap, Method, Request, Version};
+use http::{HeaderMap, Method, Request, Uri, Version};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 #[cfg(feature = "clients-hyper")]
@@ -28,6 +28,7 @@ pub use client::clients_reqwest::{
 };
 pub use client::{Client, ClientHttp};
 pub use server::{ConnInfo, Server, ServerBuilder};
+use url::Url;
 
 pub const ALPN_H1: &[u8] = b"http/1.1";
 pub const ALPN_H2: &[u8] = b"h2";
@@ -202,6 +203,41 @@ impl<T: AsyncReadWrite> AsyncWrite for AsyncCounter<T> {
     }
 }
 
+/// Error that might happen during Url to Uri conversion
+#[derive(thiserror::Error, Debug)]
+pub enum UrlToUriError {
+    #[error("No Authority")]
+    NoAuthority,
+    #[error("No Host")]
+    NoHost,
+    #[error(transparent)]
+    Http(#[from] http::Error),
+}
+
+/// Converts Url to Uri
+pub fn url_to_uri(url: &Url) -> Result<Uri, UrlToUriError> {
+    if !url.has_authority() {
+        return Err(UrlToUriError::NoAuthority);
+    }
+
+    if !url.has_host() {
+        return Err(UrlToUriError::NoHost);
+    }
+
+    let scheme = url.scheme();
+    let authority = url.authority();
+
+    let authority_end = scheme.len() + "://".len() + authority.len();
+    let path_and_query = &url.as_str()[authority_end..];
+
+    Uri::builder()
+        .scheme(scheme)
+        .authority(authority)
+        .path_and_query(path_and_query)
+        .build()
+        .map_err(UrlToUriError::Http)
+}
+
 #[cfg(test)]
 mod test {
     use http::{Uri, header::HOST};
@@ -273,5 +309,18 @@ mod test {
             .unwrap();
         (*req.headers_mut()).insert(HOST, hval!("foo.baz"));
         assert_eq!(extract_authority(&req), Some("foo.bar"));
+    }
+
+    #[test]
+    fn test_url_to_uri() {
+        let url = "https://foo.bar/baz?dead=beef".parse().unwrap();
+
+        assert_eq!(
+            url_to_uri(&url).unwrap(),
+            Uri::from_static("https://foo.bar/baz?dead=beef")
+        );
+
+        let url = "unix:/foo/bar".parse().unwrap();
+        assert!(url_to_uri(&url).is_err());
     }
 }

@@ -1,5 +1,8 @@
+pub mod cli;
+
 use core::task;
 use std::{
+    fmt,
     net::{IpAddr, SocketAddr},
     pin::Pin,
     str::FromStr,
@@ -20,10 +23,7 @@ use hyper_util::client::legacy::connect::dns::Name as HyperName;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use tower::Service;
 
-use super::{
-    Error,
-    client::{CloneableDnsResolver, CloneableHyperDnsResolver},
-};
+use super::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Protocol {
@@ -59,6 +59,23 @@ pub trait Resolves: Send + Sync {
     fn flush_cache(&self);
 }
 
+pub trait HyperDnsResolver:
+    Service<
+        HyperName,
+        Response = SocketAddrs,
+        Error = Error,
+        Future = Pin<Box<dyn Future<Output = Result<SocketAddrs, Error>> + Send>>,
+    >
+{
+}
+
+pub trait CloneableDnsResolver: Resolve + Clone + fmt::Debug + 'static {}
+
+pub trait CloneableHyperDnsResolver:
+    HyperDnsResolver + Clone + fmt::Debug + Send + Sync + 'static
+{
+}
+
 pub struct Options {
     pub protocol: Protocol,
     pub servers: Vec<IpAddr>,
@@ -80,6 +97,7 @@ impl Default for Options {
 #[derive(Debug, Clone)]
 pub struct Resolver(Arc<TokioResolver>);
 impl CloneableDnsResolver for Resolver {}
+impl HyperDnsResolver for Resolver {}
 impl CloneableHyperDnsResolver for Resolver {}
 
 impl Resolver {
@@ -170,7 +188,7 @@ impl Resolves for Resolver {
     }
 }
 
-// Implement resolving for Hyper
+/// Implement resolving for Hyper
 impl Service<HyperName> for Resolver {
     type Response = SocketAddrs;
     type Error = Error;
@@ -193,6 +211,49 @@ impl Service<HyperName> for Resolver {
 
             Ok(SocketAddrs { iter: addresses })
         })
+    }
+}
+
+/// Resolver that always resolves the predefined hostname instead of provided one.
+/// Wraps `Resolver`.
+#[derive(Debug, Clone)]
+pub struct FixedResolver(Resolver, String, HyperName);
+impl CloneableDnsResolver for FixedResolver {}
+impl HyperDnsResolver for FixedResolver {}
+impl CloneableHyperDnsResolver for FixedResolver {}
+
+impl FixedResolver {
+    pub fn new(o: Options, name: String) -> Result<Self, Error> {
+        let resolver = Resolver::new(o);
+        let hyper_name = HyperName::from_str(&name).context("unable to parse name")?;
+
+        Ok(Self(resolver, name, hyper_name))
+    }
+}
+
+/// Implement resolving for Reqwest using Hickory
+impl Resolve for FixedResolver {
+    fn resolve(&self, _name: Name) -> Resolving {
+        // Name cannot be cloned so we have to parse it each time.
+        // If new() succeeded then this will always succeed too.
+        let name = Name::from_str(&self.1).unwrap();
+        reqwest::dns::Resolve::resolve(&self.0, name)
+    }
+}
+
+/// Implement resolving for Hyper
+impl Service<HyperName> for FixedResolver {
+    type Response = SocketAddrs;
+    type Error = Error;
+    #[allow(clippy::type_complexity)]
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut task::Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _name: HyperName) -> Self::Future {
+        self.0.call(self.2.clone())
     }
 }
 
