@@ -1,6 +1,6 @@
 use std::{fmt::Debug, sync::Arc, time::Duration};
 
-use arc_swap::ArcSwapOption;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use tokio::{select, sync::watch::Receiver};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -23,6 +23,7 @@ struct Actor<T, RQ = (), RS = (), E = ()> {
     strategy: Strategy,
     executor: Arc<dyn ExecutesRequest<T, Request = RQ, Response = RS, Error = E>>,
     distributor: Arc<ArcSwapOption<Distributor<T, RQ, RS, E>>>,
+    healthy: Arc<ArcSwap<Vec<T>>>,
 }
 
 impl<T, RQ, RS, E> Actor<T, RQ, RS, E>
@@ -35,7 +36,7 @@ where
     /// Create a new Distributor with a healthy node set
     async fn process(&self, backends: Arc<Vec<(T, TargetState)>>) {
         // Combine the nodes with their weights
-        // and filter out unealthy ones.
+        // and filter out unhealthy ones.
         let healthy = backends
             .iter()
             .zip(&self.weights)
@@ -51,6 +52,8 @@ where
 
         let distributor = Distributor::new(&healthy, self.strategy, self.executor.clone());
         self.distributor.store(Some(Arc::new(distributor)));
+        self.healthy
+            .store(Arc::new(healthy.into_iter().map(|x| x.0).collect()));
     }
 
     async fn run(&self, token: CancellationToken) {
@@ -85,6 +88,7 @@ pub struct BackendRouter<T, RQ = (), RS = (), E = ()> {
     tracker: TaskTracker,
     distributor: Arc<ArcSwapOption<Distributor<T, RQ, RS, E>>>,
     notify: Receiver<Arc<Vec<(T, TargetState)>>>,
+    healthy: Arc<ArcSwap<Vec<T>>>,
 }
 
 impl<T, RQ, RS, E> BackendRouter<T, RQ, RS, E>
@@ -111,6 +115,7 @@ where
         let notify = health_checker.subscribe();
 
         let distributor = Arc::new(ArcSwapOption::empty());
+        let healthy = Arc::new(ArcSwap::new(Arc::new(vec![])));
 
         let actor = Actor {
             weights,
@@ -118,6 +123,7 @@ where
             strategy,
             executor,
             distributor: distributor.clone(),
+            healthy: healthy.clone(),
         };
 
         let token = CancellationToken::new();
@@ -133,6 +139,7 @@ where
             tracker,
             distributor,
             notify,
+            healthy,
         }
     }
 
@@ -152,6 +159,11 @@ where
     /// Returns a channel which emits a new set of healthy nodes.
     pub fn subscribe(&self) -> Receiver<Arc<Vec<(T, TargetState)>>> {
         self.notify.clone()
+    }
+
+    /// Returns the current set of healthy targets
+    pub fn get_healthy(&self) -> Arc<Vec<T>> {
+        self.healthy.load_full()
     }
 
     /// Stops the router

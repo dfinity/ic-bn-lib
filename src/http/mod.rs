@@ -17,8 +17,13 @@ use std::{
     task::{Context, Poll},
 };
 
+use axum::{
+    extract::OriginalUri,
+    response::{IntoResponse, Redirect},
+};
+use axum_extra::extract::Host;
 use derive_new::new;
-use http::{HeaderMap, Method, Request, Uri, Version};
+use http::{HeaderMap, Method, Request, StatusCode, Uri, Version, uri::PathAndQuery};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 #[cfg(feature = "clients-hyper")]
@@ -236,6 +241,25 @@ pub fn url_to_uri(url: &Url) -> Result<Uri, UrlToUriError> {
         .path_and_query(path_and_query)
         .build()
         .map_err(UrlToUriError::Http)
+}
+
+/// Redirects any request to an HTTPS scheme
+pub async fn redirect_to_https(
+    Host(host): Host,
+    OriginalUri(uri): OriginalUri,
+) -> Result<impl IntoResponse, impl IntoResponse> {
+    let fallback_path = PathAndQuery::from_static("/");
+    let pq = uri.path_and_query().unwrap_or(&fallback_path).as_str();
+
+    Ok::<_, (_, _)>(Redirect::permanent(
+        &Uri::builder()
+            .scheme("https")
+            .authority(host)
+            .path_and_query(pq)
+            .build()
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Incorrect URL"))?
+            .to_string(),
+    ))
 }
 
 #[cfg(test)]
