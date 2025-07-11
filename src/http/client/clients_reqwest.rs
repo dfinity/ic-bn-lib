@@ -15,9 +15,9 @@ use reqwest::{Request, Response};
 use scopeguard::defer;
 use url::Url;
 
-use super::{
-    Client, ClientStats, ClientWithStats, CloneableDnsResolver, Error, Metrics, Options, Stats,
-};
+use crate::http::dns::CloneableDnsResolver;
+
+use super::{Client, ClientStats, ClientWithStats, Error, Metrics, Options, Stats};
 
 // Extracts host:port from the URL
 fn extract_host(url: &Url) -> String {
@@ -30,7 +30,10 @@ fn extract_host(url: &Url) -> String {
     )
 }
 
-pub fn new<R: CloneableDnsResolver>(opts: Options<R>) -> Result<reqwest::Client, Error> {
+pub fn new<R: CloneableDnsResolver>(
+    opts: Options,
+    resolver: Option<R>,
+) -> Result<reqwest::Client, Error> {
     let mut client = reqwest::Client::builder()
         .connect_timeout(opts.timeout_connect)
         .read_timeout(opts.timeout_read)
@@ -54,7 +57,7 @@ pub fn new<R: CloneableDnsResolver>(opts: Options<R>) -> Result<reqwest::Client,
         client = client.use_preconfigured_tls(v);
     }
 
-    if let Some(v) = opts.dns_resolver {
+    if let Some(v) = resolver {
         client = client.dns_resolver(Arc::new(v));
     }
 
@@ -65,8 +68,8 @@ pub fn new<R: CloneableDnsResolver>(opts: Options<R>) -> Result<reqwest::Client,
 pub struct ReqwestClient(reqwest::Client);
 
 impl ReqwestClient {
-    pub fn new<R: CloneableDnsResolver>(opts: Options<R>) -> Result<Self, Error> {
-        Ok(Self(new(opts)?))
+    pub fn new<R: CloneableDnsResolver>(opts: Options, resolver: Option<R>) -> Result<Self, Error> {
+        Ok(Self(new(opts, resolver)?))
     }
 }
 
@@ -89,10 +92,14 @@ struct ReqwestClientRoundRobinInner {
 }
 
 impl ReqwestClientRoundRobin {
-    pub fn new<R: CloneableDnsResolver>(opts: Options<R>, count: usize) -> Result<Self, Error> {
+    pub fn new<R: CloneableDnsResolver>(
+        opts: Options,
+        resolver: Option<R>,
+        count: usize,
+    ) -> Result<Self, Error> {
         let inner = ReqwestClientRoundRobinInner {
             cli: (0..count)
-                .map(|_| new(opts.clone()))
+                .map(|_| new(opts.clone(), resolver.clone()))
                 .collect::<Result<Vec<_>, _>>()?,
             next: AtomicUsize::new(0),
         };
@@ -125,14 +132,15 @@ struct ReqwestClientLeastLoadedInner {
 
 impl ReqwestClientLeastLoaded {
     pub fn new<R: CloneableDnsResolver>(
-        opts: Options<R>,
+        opts: Options,
+        resolver: Option<R>,
         count: usize,
         registry: Option<&Registry>,
     ) -> Result<Self, Error> {
         let inner = (0..count)
             .map(|_| -> Result<_, _> {
                 Ok::<_, Error>(ReqwestClientLeastLoadedInner {
-                    cli: new(opts.clone())?,
+                    cli: new(opts.clone(), resolver.clone())?,
                     // Creates a cache with some sensible max capacity to hold target hosts.
                     // If the host isn't contacted in 10min then we remove it.
                     // TODO should we make this configurable? Probably ok like this

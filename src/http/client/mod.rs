@@ -6,17 +6,13 @@ pub mod clients_reqwest;
 use std::{fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use http::HeaderValue;
-use http_body_util::Full;
 use hyper::body::Incoming;
-use hyper_util::client::legacy::connect::dns::Name as HyperName;
 use prometheus::{
     HistogramVec, IntCounterVec, IntGaugeVec, Registry, register_histogram_vec_with_registry,
     register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry,
 };
-use reqwest::{Request, Response, dns::Resolve};
-use tower::Service;
+use reqwest::{Request, Response};
 
 use super::Error;
 
@@ -29,11 +25,8 @@ pub trait Client: Send + Sync + fmt::Debug {
 
 /// Generic HTTP client trait that is using HTTP types
 #[async_trait]
-pub trait ClientHttp: Send + Sync + fmt::Debug {
-    async fn execute(
-        &self,
-        req: http::Request<Full<Bytes>>,
-    ) -> Result<http::Response<Incoming>, Error>;
+pub trait ClientHttp<B>: Send + Sync + fmt::Debug {
+    async fn execute(&self, req: http::Request<B>) -> Result<http::Response<Incoming>, Error>;
 }
 
 #[derive(Debug, Clone)]
@@ -49,10 +42,6 @@ pub trait Stats {
 pub trait ClientWithStats: Client + Stats {
     fn to_client(self: Arc<Self>) -> Arc<dyn Client>;
 }
-
-pub trait CloneableDnsResolver: Resolve + Clone + fmt::Debug + 'static {}
-
-pub trait CloneableHyperDnsResolver: Service<HyperName> + Clone + fmt::Debug + 'static {}
 
 #[derive(Clone, Debug)]
 struct Metrics {
@@ -96,7 +85,7 @@ impl Metrics {
 
 /// HTTP client options
 #[derive(Debug, Clone)]
-pub struct Options<R: CloneableDnsResolver> {
+pub struct Options {
     pub timeout_connect: Duration,
     pub timeout_read: Duration,
     pub timeout: Duration,
@@ -108,10 +97,10 @@ pub struct Options<R: CloneableDnsResolver> {
     pub http2_keepalive_idle: bool,
     pub user_agent: String,
     pub tls_config: Option<rustls::ClientConfig>,
-    pub dns_resolver: Option<R>,
+    pub tls_fixed_name: Option<String>,
 }
 
-impl<R: CloneableDnsResolver> Default for Options<R> {
+impl Default for Options {
     fn default() -> Self {
         Self {
             timeout_connect: Duration::from_secs(10),
@@ -125,7 +114,7 @@ impl<R: CloneableDnsResolver> Default for Options<R> {
             http2_keepalive_idle: false,
             user_agent: "Crab".into(),
             tls_config: None,
-            dns_resolver: None,
+            tls_fixed_name: None,
         }
     }
 }

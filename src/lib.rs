@@ -21,8 +21,11 @@ use std::{fs::File, path::Path};
 use anyhow::{Context, anyhow};
 use bytes::Bytes;
 use futures::StreamExt;
-pub use prometheus;
 use tokio::io::AsyncWriteExt;
+
+pub use prometheus;
+pub use reqwest;
+pub use rustls;
 
 /// Generic error
 #[derive(thiserror::Error, Debug)]
