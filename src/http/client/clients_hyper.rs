@@ -8,7 +8,7 @@ use std::{
 };
 
 use ahash::RandomState;
-use anyhow::{Context, anyhow};
+use anyhow::anyhow;
 use async_trait::async_trait;
 use http::uri::Scheme;
 use http_body::Body;
@@ -23,13 +23,24 @@ use prometheus::Registry;
 use rustls::pki_types::DnsName;
 use scopeguard::defer;
 
-use crate::http::dns::CloneableHyperDnsResolver;
+use crate::http::dns::{CloneableHyperDnsResolver, Resolver};
 
 use super::{ClientHttp, Error, Metrics, Options};
 
 #[derive(Debug)]
-pub struct HyperClient<B, R> {
+pub struct HyperClient<B, R = Resolver> {
     cli: ClientHyper<HttpsConnector<HttpConnector<R>>, B>,
+}
+
+impl<B> Default for HyperClient<B>
+where
+    B: Body + Send + 'static + Unpin,
+    B::Data: Send,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    fn default() -> Self {
+        Self::new(Options::default(), Resolver::default())
+    }
 }
 
 impl<B, R> HyperClient<B, R>
@@ -39,7 +50,7 @@ where
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     R: CloneableHyperDnsResolver,
 {
-    pub fn new(opts: Options, resolver: R) -> Result<Self, Error> {
+    pub fn new(opts: Options, resolver: R) -> Self {
         let mut http_conn = HttpConnector::new_with_resolver(resolver);
         http_conn.set_connect_timeout(Some(opts.timeout_connect));
         http_conn.set_keepalive(opts.tcp_keepalive);
@@ -57,7 +68,7 @@ where
         .https_or_http();
 
         let builder = if let Some(v) = opts.tls_fixed_name {
-            let name = DnsName::try_from(v).context("unable to parse as DNSName")?;
+            let name = DnsName::try_from(v).expect("able to parse as DNSName");
             builder.with_server_name_resolver(FixedServerNameResolver::new(
                 rustls::pki_types::ServerName::DnsName(name),
             ))
@@ -80,7 +91,7 @@ where
             .timer(TokioTimer::new())
             .build(https_conn);
 
-        Ok(Self { cli })
+        Self { cli }
     }
 }
 
@@ -119,29 +130,22 @@ where
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     R: CloneableHyperDnsResolver,
 {
-    pub fn new(
-        opts: Options,
-        resolver: R,
-        count: usize,
-        registry: Option<&Registry>,
-    ) -> Result<Self, Error> {
+    pub fn new(opts: Options, resolver: R, count: usize, registry: Option<&Registry>) -> Self {
         let inner = (0..count)
-            .map(|_| -> Result<_, _> {
-                Ok::<_, Error>(HyperClientLeastLoadedInner {
-                    cli: HyperClient::new(opts.clone(), resolver.clone())?,
-                    // Creates a cache with some sensible max capacity to hold target hosts.
-                    // If the host isn't contacted in 10min then we remove it.
-                    outstanding: CacheBuilder::new(16384)
-                        .time_to_idle(Duration::from_secs(600))
-                        .build_with_hasher(RandomState::default()),
-                })
+            .map(|_| HyperClientLeastLoadedInner {
+                cli: HyperClient::new(opts.clone(), resolver.clone()),
+                // Creates a cache with some sensible max capacity to hold target hosts.
+                // If the host isn't contacted in 10min then we remove it.
+                outstanding: CacheBuilder::new(16384)
+                    .time_to_idle(Duration::from_secs(600))
+                    .build_with_hasher(RandomState::default()),
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Vec<_>>();
 
-        Ok(Self {
+        Self {
             inner: Arc::new(inner),
             metrics: registry.map(Metrics::new),
-        })
+        }
     }
 }
 

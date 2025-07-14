@@ -5,6 +5,8 @@ use bytes::BytesMut;
 use prost::Message;
 use vrl::value::{ObjectMap, Value};
 
+pub mod cli;
+pub mod client;
 #[allow(warnings, clippy::all, clippy::pedantic)]
 mod event;
 
