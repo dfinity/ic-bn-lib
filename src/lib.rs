@@ -3,6 +3,7 @@
 #![warn(clippy::nursery)]
 #![warn(tail_expr_drop_order)]
 #![allow(clippy::cognitive_complexity)]
+#![allow(clippy::field_reassign_with_default)]
 
 #[cfg(feature = "custom_domains")]
 pub mod custom_domains;
@@ -21,8 +22,12 @@ use std::{fs::File, path::Path};
 use anyhow::{Context, anyhow};
 use bytes::Bytes;
 use futures::StreamExt;
-pub use prometheus;
 use tokio::io::AsyncWriteExt;
+
+pub use prometheus;
+pub use reqwest;
+pub use rustls;
+pub use uuid;
 
 /// Generic error
 #[derive(thiserror::Error, Debug)]

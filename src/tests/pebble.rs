@@ -341,12 +341,11 @@ impl Env {
 
     /// Returns a ready-to-use DNS resolver targeting pebble-challtestsrv
     pub fn resolver(&self) -> Arc<dyn Resolves> {
-        Arc::new(Resolver::new(Options {
-            protocol: Protocol::Clear(self.port_dns_cleartext()),
-            servers: vec![self.ip_dns_cleartext()],
-            tls_name: "".into(),
-            cache_size: 0,
-        }))
+        let mut opts = Options::default();
+        opts.protocol = Protocol::Clear(self.port_dns_cleartext());
+        opts.servers = vec![self.ip_dns_cleartext()];
+
+        Arc::new(Resolver::new(opts))
     }
 
     pub fn stop(&mut self) {

@@ -3,8 +3,6 @@ use std::time::Duration;
 use clap::Args;
 use humantime::parse_duration;
 
-use super::CloneableDnsResolver;
-
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
 pub struct HttpClient {
     /// Timeout for HTTP connection phase
@@ -37,7 +35,7 @@ pub struct HttpClient {
     pub http_client_http2_keepalive_timeout: Duration,
 }
 
-impl<R: CloneableDnsResolver> From<&HttpClient> for super::Options<R> {
+impl From<&HttpClient> for super::Options {
     fn from(c: &HttpClient) -> Self {
         Self {
             timeout_connect: c.http_client_timeout_connect,
@@ -51,7 +49,7 @@ impl<R: CloneableDnsResolver> From<&HttpClient> for super::Options<R> {
             http2_keepalive_idle: false,
             user_agent: "".into(),
             tls_config: None,
-            dns_resolver: None,
+            tls_fixed_name: None,
         }
     }
 }

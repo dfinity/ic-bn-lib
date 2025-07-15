@@ -17,8 +17,13 @@ use std::{
     task::{Context, Poll},
 };
 
+use axum::{
+    extract::OriginalUri,
+    response::{IntoResponse, Redirect},
+};
+use axum_extra::extract::Host;
 use derive_new::new;
-use http::{HeaderMap, Method, Request, Version};
+use http::{HeaderMap, Method, Request, StatusCode, Uri, Version, uri::PathAndQuery};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 #[cfg(feature = "clients-hyper")]
@@ -28,6 +33,9 @@ pub use client::clients_reqwest::{
 };
 pub use client::{Client, ClientHttp};
 pub use server::{ConnInfo, Server, ServerBuilder};
+use url::Url;
+
+use crate::http::headers::X_FORWARDED_HOST;
 
 pub const ALPN_H1: &[u8] = b"http/1.1";
 pub const ALPN_H2: &[u8] = b"h2";
@@ -108,17 +116,23 @@ pub fn extract_host(host_port: &str) -> Option<&str> {
     }
 }
 
-/// Attempts to extract host from HTTP2 "authority" pseudo-header or from HTTP/1.1 "Host" header
+/// Attempts to extract host from `X-Forwarded-Host` header, HTTP2 "authority" pseudo-header or from HTTP/1.1 `Host` header
 pub fn extract_authority<T>(request: &Request<T>) -> Option<&str> {
-    // Try HTTP2 first, then Host header
-    request.uri().authority().map(|x| x.host()).or_else(|| {
-        request
-            .headers()
-            .get(http::header::HOST)
-            .and_then(|x| x.to_str().ok())
-            // Extract host w/o port
-            .and_then(extract_host)
-    })
+    // Try `X-Forwarded-Host` header first
+    request
+        .headers()
+        .get(X_FORWARDED_HOST)
+        .and_then(|x| x.to_str().ok())
+        // Then URI authority
+        .or_else(|| request.uri().authority().map(|x| x.host()))
+        // THen `Host` header
+        .or_else(|| {
+            request
+                .headers()
+                .get(http::header::HOST)
+                .and_then(|x| x.to_str().ok())
+        }) // Extract host w/o port
+        .and_then(extract_host)
 }
 
 #[derive(new, Debug)]
@@ -202,6 +216,60 @@ impl<T: AsyncReadWrite> AsyncWrite for AsyncCounter<T> {
     }
 }
 
+/// Error that might happen during Url to Uri conversion
+#[derive(thiserror::Error, Debug)]
+pub enum UrlToUriError {
+    #[error("No Authority")]
+    NoAuthority,
+    #[error("No Host")]
+    NoHost,
+    #[error(transparent)]
+    Http(#[from] http::Error),
+}
+
+/// Converts Url to Uri
+pub fn url_to_uri(url: &Url) -> Result<Uri, UrlToUriError> {
+    if !url.has_authority() {
+        return Err(UrlToUriError::NoAuthority);
+    }
+
+    if !url.has_host() {
+        return Err(UrlToUriError::NoHost);
+    }
+
+    let scheme = url.scheme();
+    let authority = url.authority();
+
+    let authority_end = scheme.len() + "://".len() + authority.len();
+    let path_and_query = &url.as_str()[authority_end..];
+
+    Uri::builder()
+        .scheme(scheme)
+        .authority(authority)
+        .path_and_query(path_and_query)
+        .build()
+        .map_err(UrlToUriError::Http)
+}
+
+/// Redirects any request to an HTTPS scheme
+pub async fn redirect_to_https(
+    Host(host): Host,
+    OriginalUri(uri): OriginalUri,
+) -> Result<impl IntoResponse, impl IntoResponse> {
+    let fallback_path = PathAndQuery::from_static("/");
+    let pq = uri.path_and_query().unwrap_or(&fallback_path).as_str();
+
+    Ok::<_, (_, _)>(Redirect::permanent(
+        &Uri::builder()
+            .scheme("https")
+            .authority(host)
+            .path_and_query(pq)
+            .build()
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Incorrect URL"))?
+            .to_string(),
+    ))
+}
+
 #[cfg(test)]
 mod test {
     use http::{Uri, header::HOST};
@@ -248,7 +316,7 @@ mod test {
         let mut req = Request::new(());
         *req.uri_mut() = Uri::builder()
             .scheme("http")
-            .authority("foo.bar")
+            .authority("foo.bar:443")
             .path_and_query("/foo?bar=baz")
             .build()
             .unwrap();
@@ -260,18 +328,52 @@ mod test {
             .path_and_query("/foo?bar=baz")
             .build()
             .unwrap();
-        (*req.headers_mut()).insert(HOST, hval!("foo.baz"));
+        (*req.headers_mut()).insert(HOST, hval!("foo.baz:443"));
         assert_eq!(extract_authority(&req), Some("foo.baz"));
 
-        // Both: authority should take precedence (not a real world use case probably)
+        // XFH header
         let mut req = Request::new(());
         *req.uri_mut() = Uri::builder()
-            .scheme("http")
-            .authority("foo.bar")
             .path_and_query("/foo?bar=baz")
             .build()
             .unwrap();
-        (*req.headers_mut()).insert(HOST, hval!("foo.baz"));
+        (*req.headers_mut()).insert(X_FORWARDED_HOST, hval!("foo.baz:443"));
+        assert_eq!(extract_authority(&req), Some("foo.baz"));
+
+        // Host+Authority: authority should take precedence
+        let mut req = Request::new(());
+        *req.uri_mut() = Uri::builder()
+            .scheme("http")
+            .authority("foo.bar:443")
+            .path_and_query("/foo?bar=baz")
+            .build()
+            .unwrap();
+        (*req.headers_mut()).insert(HOST, hval!("foo.baz:443"));
         assert_eq!(extract_authority(&req), Some("foo.bar"));
+
+        // XFH+Host+Authority: XFH should take precedence
+        let mut req = Request::new(());
+        *req.uri_mut() = Uri::builder()
+            .scheme("http")
+            .authority("foo.bar:443")
+            .path_and_query("/foo?bar=baz")
+            .build()
+            .unwrap();
+        (*req.headers_mut()).insert(HOST, hval!("foo.baz:443"));
+        (*req.headers_mut()).insert(X_FORWARDED_HOST, hval!("dead.beef:443"));
+        assert_eq!(extract_authority(&req), Some("dead.beef"));
+    }
+
+    #[test]
+    fn test_url_to_uri() {
+        let url = "https://foo.bar/baz?dead=beef".parse().unwrap();
+
+        assert_eq!(
+            url_to_uri(&url).unwrap(),
+            Uri::from_static("https://foo.bar/baz?dead=beef")
+        );
+
+        let url = "unix:/foo/bar".parse().unwrap();
+        assert!(url_to_uri(&url).is_err());
     }
 }

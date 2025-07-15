@@ -30,8 +30,10 @@ vector = ["dep:vrl", "dep:prost", "dep:prost-types"]
 ahash = "0.8.11"
 anyhow = "1.0.93"
 arc-swap = "1.7.1"
+async-channel = "2.3.1"
 async-trait = "0.1.83"
 axum = "0.8.1"
+axum-extra = "0.10.0"
 base64 = "0.22.1"
 bytes = "1.10.0"
 candid = "0.10.10"
@@ -135,6 +137,7 @@ vrl = { version = "0.25.0", default-features = false, features = [
 webpki-root-certs = "1.0.1"
 x509-parser = "0.17.0"
 zeroize = { version = "1.8.1", features = ["derive"] }
+zstd = "0.13.2"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }

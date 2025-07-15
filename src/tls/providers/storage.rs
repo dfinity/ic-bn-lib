@@ -9,7 +9,7 @@ use prometheus::{IntGaugeVec, Registry, register_int_gauge_vec_with_registry};
 use rustls::{server::ClientHello, sign::CertifiedKey};
 
 use super::Cert;
-use crate::{http::ALPN_ACME, tls::resolver::ResolvesServerCert};
+use crate::tls::resolver::ResolvesServerCert;
 
 pub trait StoresCertificates<T: Clone + Send + Sync>: Send + Sync {
     fn store(&self, cert_list: Vec<Cert<T>>) -> Result<(), Error>;
@@ -144,14 +144,9 @@ impl<T: Clone + Send + Sync> StoresCertificates<T> for Storage<T> {
 // Implement certificate resolving for Rustls
 impl ResolvesServerCert for StorageKey {
     fn resolve(&self, ch: &ClientHello) -> Option<Arc<CertifiedKey>> {
-        // If the ALPN is ACME - don't return anything to make sure
-        // we don't break ACME challenge
-        if ch.alpn().is_some_and(|mut x| x.all(|x| x == ALPN_ACME)) {
-            return None;
-        }
-
         // See if client provided us with an SNI
         let sni = ch.server_name()?;
+
         // Try to parse SNI as FQDN
         let sni = FQDN::from_str(sni).ok()?;
         self.lookup_cert(&sni).map(|x| x.cert.clone())

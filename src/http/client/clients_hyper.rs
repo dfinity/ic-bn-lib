@@ -1,4 +1,5 @@
 use std::{
+    fmt::Debug,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -9,31 +10,48 @@ use std::{
 use ahash::RandomState;
 use anyhow::anyhow;
 use async_trait::async_trait;
-use bytes::Bytes;
 use http::uri::Scheme;
-use http_body_util::Full;
+use http_body::Body;
 use hyper::body::Incoming;
-use hyper_rustls::HttpsConnector;
+use hyper_rustls::{FixedServerNameResolver, HttpsConnector};
 use hyper_util::{
     client::legacy::{Client as ClientHyper, connect::HttpConnector},
     rt::{TokioExecutor, TokioTimer},
 };
 use moka::sync::{Cache, CacheBuilder};
 use prometheus::Registry;
+use rustls::pki_types::DnsName;
 use scopeguard::defer;
 
-use crate::http::dns::Resolver;
+use crate::http::dns::{CloneableHyperDnsResolver, Resolver};
 
 use super::{ClientHttp, Error, Metrics, Options};
 
 #[derive(Debug)]
-pub struct HyperClient {
-    cli: ClientHyper<HttpsConnector<HttpConnector<Resolver>>, Full<Bytes>>,
+pub struct HyperClient<B, R = Resolver> {
+    cli: ClientHyper<HttpsConnector<HttpConnector<R>>, B>,
 }
 
-impl HyperClient {
-    pub fn new(opts: Options<Resolver>) -> Self {
-        let mut http_conn = HttpConnector::new_with_resolver(opts.dns_resolver.unwrap());
+impl<B> Default for HyperClient<B>
+where
+    B: Body + Send + 'static + Unpin,
+    B::Data: Send,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    fn default() -> Self {
+        Self::new(Options::default(), Resolver::default())
+    }
+}
+
+impl<B, R> HyperClient<B, R>
+where
+    B: Body + Send + 'static + Unpin,
+    B::Data: Send,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    R: CloneableHyperDnsResolver,
+{
+    pub fn new(opts: Options, resolver: R) -> Self {
+        let mut http_conn = HttpConnector::new_with_resolver(resolver);
         http_conn.set_connect_timeout(Some(opts.timeout_connect));
         http_conn.set_keepalive(opts.tcp_keepalive);
         http_conn.enforce_http(false);
@@ -41,16 +59,24 @@ impl HyperClient {
 
         let builder = HttpsConnector::<HttpConnector>::builder();
         let builder = if let Some(mut v) = opts.tls_config {
+            // Hyper is sad when we set our ALPN
             v.alpn_protocols = vec![];
             builder.with_tls_config(v)
         } else {
             builder.with_webpki_roots()
+        }
+        .https_or_http();
+
+        let builder = if let Some(v) = opts.tls_fixed_name {
+            let name = DnsName::try_from(v).expect("able to parse as DNSName");
+            builder.with_server_name_resolver(FixedServerNameResolver::new(
+                rustls::pki_types::ServerName::DnsName(name),
+            ))
+        } else {
+            builder
         };
 
-        let https_conn = builder
-            .https_or_http()
-            .enable_all_versions()
-            .wrap_connector(http_conn);
+        let https_conn = builder.enable_all_versions().wrap_connector(http_conn);
 
         let mut builder = ClientHyper::builder(TokioExecutor::new());
         builder.http2_adaptive_window(true);
@@ -70,11 +96,14 @@ impl HyperClient {
 }
 
 #[async_trait]
-impl ClientHttp for HyperClient {
-    async fn execute(
-        &self,
-        req: http::Request<Full<Bytes>>,
-    ) -> Result<http::Response<Incoming>, Error> {
+impl<B, R> ClientHttp<B> for HyperClient<B, R>
+where
+    B: Body + Send + 'static + Unpin + Debug,
+    B::Data: Send,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    R: CloneableHyperDnsResolver,
+{
+    async fn execute(&self, req: http::Request<B>) -> Result<http::Response<Incoming>, Error> {
         self.cli
             .request(req)
             .await
@@ -83,49 +112,52 @@ impl ClientHttp for HyperClient {
 }
 
 #[derive(Clone, Debug)]
-pub struct HyperClientLeastLoaded {
-    inner: Arc<Vec<HyperClientLeastLoadedInner>>,
+pub struct HyperClientLeastLoaded<B, R> {
+    inner: Arc<Vec<HyperClientLeastLoadedInner<B, R>>>,
     metrics: Option<Metrics>,
 }
 
 #[derive(Debug)]
-struct HyperClientLeastLoadedInner {
-    cli: HyperClient,
+struct HyperClientLeastLoadedInner<B, R> {
+    cli: HyperClient<B, R>,
     outstanding: Cache<String, Arc<AtomicUsize>, RandomState>,
 }
 
-impl HyperClientLeastLoaded {
-    pub fn new(
-        opts: Options<Resolver>,
-        count: usize,
-        registry: Option<&Registry>,
-    ) -> Result<Self, Error> {
+impl<B, R> HyperClientLeastLoaded<B, R>
+where
+    B: Body + Send + 'static + Unpin,
+    B::Data: Send,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    R: CloneableHyperDnsResolver,
+{
+    pub fn new(opts: Options, resolver: R, count: usize, registry: Option<&Registry>) -> Self {
         let inner = (0..count)
-            .map(|_| -> Result<_, _> {
-                Ok::<_, Error>(HyperClientLeastLoadedInner {
-                    cli: HyperClient::new(opts.clone()),
-                    // Creates a cache with some sensible max capacity to hold target hosts.
-                    // If the host isn't contacted in 10min then we remove it.
-                    outstanding: CacheBuilder::new(16384)
-                        .time_to_idle(Duration::from_secs(600))
-                        .build_with_hasher(RandomState::default()),
-                })
+            .map(|_| HyperClientLeastLoadedInner {
+                cli: HyperClient::new(opts.clone(), resolver.clone()),
+                // Creates a cache with some sensible max capacity to hold target hosts.
+                // If the host isn't contacted in 10min then we remove it.
+                outstanding: CacheBuilder::new(16384)
+                    .time_to_idle(Duration::from_secs(600))
+                    .build_with_hasher(RandomState::default()),
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Vec<_>>();
 
-        Ok(Self {
+        Self {
             inner: Arc::new(inner),
             metrics: registry.map(Metrics::new),
-        })
+        }
     }
 }
 
 #[async_trait]
-impl ClientHttp for HyperClientLeastLoaded {
-    async fn execute(
-        &self,
-        req: http::Request<Full<Bytes>>,
-    ) -> Result<http::Response<Incoming>, Error> {
+impl<B, R> ClientHttp<B> for HyperClientLeastLoaded<B, R>
+where
+    B: Body + Send + 'static + Unpin + Debug,
+    B::Data: Send,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    R: CloneableHyperDnsResolver,
+{
+    async fn execute(&self, req: http::Request<B>) -> Result<http::Response<Incoming>, Error> {
         let uri = req.uri();
         let host = uri.host().unwrap_or_default();
         let port = uri.port_u16().unwrap_or_else(|| {

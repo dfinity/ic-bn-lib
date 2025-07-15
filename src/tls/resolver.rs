@@ -11,7 +11,10 @@ use rustls::{
 };
 use tracing::debug;
 
-use crate::tls::{pem_convert_to_rustls, pem_load_rustls, pem_load_rustls_single};
+use crate::{
+    http::ALPN_ACME,
+    tls::{pem_convert_to_rustls, pem_load_rustls, pem_load_rustls_single},
+};
 
 /// Custom `ResolvesServerCert` trait that borrows `ClientHello`.
 /// It's needed because Rustls' `ResolvesServerCert` consumes `ClientHello`
@@ -77,7 +80,7 @@ impl Metrics {
 /// Only one Rustls-compatible resolver can be used since it consumes ClientHello.
 #[derive(Debug, derive_new::new)]
 pub struct AggregatingResolver {
-    rustls: Option<Arc<dyn ResolvesServerCertRustls>>,
+    acme: Option<Arc<dyn ResolvesServerCertRustls>>,
     resolvers: Vec<Arc<dyn ResolvesServerCert>>,
     metrics: Metrics,
 }
@@ -86,6 +89,13 @@ impl AggregatingResolver {
     fn resolve_inner(&self, ch: ClientHello) -> Option<Arc<CertifiedKey>> {
         // Accept missing SNI e.g. for testing cases when we're accessed over IP directly
         let sni = ch.server_name().unwrap_or("").to_string();
+
+        // Check if we have an ACME ALPN and pass it to the ACME resolver (if we have one)
+        if ch.alpn().is_some_and(|mut x| x.all(|x| x == ALPN_ACME)) {
+            if let Some(acme) = &self.acme {
+                return acme.resolve(ch);
+            }
+        }
 
         let alpn = ch
             .alpn()
@@ -96,8 +106,8 @@ impl AggregatingResolver {
             .resolvers
             .iter()
             .find_map(|x| x.resolve(&ch))
-            // Otherwise try the Rustls-compatible resolver that consumes ClientHello.
-            .or_else(|| self.rustls.as_ref().and_then(|x| x.resolve(ch)));
+            // Otherwise try the ACME resolver that consumes ClientHello
+            .or_else(|| self.acme.as_ref().and_then(|x| x.resolve(ch)));
 
         if cert.is_some() {
             return cert;
