@@ -1,14 +1,24 @@
-use std::{fmt::Debug, sync::Arc, time::Duration};
+use std::{
+    fmt::{Debug, Display},
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
+use prometheus::{
+    HistogramVec, IntCounterVec, IntGaugeVec, Registry, register_histogram_vec_with_registry,
+    register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry,
+};
+use strum::IntoStaticStr;
 use tokio::{
     select,
     sync::{mpsc, watch},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum TargetState {
     Unknown,
     Degraded,
@@ -20,12 +30,52 @@ pub trait ChecksTarget<T: Clone + Debug>: Send + Sync + 'static {
     async fn check(&self, target: &T) -> TargetState;
 }
 
+#[derive(Clone, Debug)]
+pub struct Metrics {
+    state: IntGaugeVec,
+    checks: IntCounterVec,
+    duration: HistogramVec,
+}
+
+impl Metrics {
+    pub fn new(registry: &Registry) -> Self {
+        Self {
+            state: register_int_gauge_vec_with_registry!(
+                format!("health_checker_state"),
+                format!("Stores the current health state of targets"),
+                &["target"],
+                registry
+            )
+            .unwrap(),
+
+            checks: register_int_counter_vec_with_registry!(
+                format!("health_checker_checks"),
+                format!("Counts the number of health check results"),
+                &["target", "result"],
+                registry
+            )
+            .unwrap(),
+
+            duration: register_histogram_vec_with_registry!(
+                format!("health_checker_duration"),
+                format!("Records the duration of health checks in seconds"),
+                &["target"],
+                [0.01, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2].to_vec(),
+                registry
+            )
+            .unwrap(),
+        }
+    }
+}
+
 struct Actor<T> {
     idx: usize,
     target: T,
+    target_name: String,
     checker: Arc<dyn ChecksTarget<T>>,
     state: TargetState,
     tx: mpsc::Sender<(usize, TargetState)>,
+    metrics: Metrics,
 }
 
 impl<T> Actor<T>
@@ -33,7 +83,29 @@ where
     T: Clone + Debug + Send + Sync + 'static,
 {
     async fn check(&mut self) {
+        let start = Instant::now();
         let state = self.checker.check(&self.target).await;
+        self.metrics
+            .duration
+            .with_label_values(&[&self.target_name])
+            .observe(start.elapsed().as_secs_f64());
+
+        let state_num: i64 = match state {
+            TargetState::Unknown => -1,
+            TargetState::Degraded => 0,
+            TargetState::Healthy => 1,
+        };
+
+        self.metrics
+            .state
+            .with_label_values(&[&self.target_name])
+            .set(state_num);
+
+        let state_str: &'static str = state.into();
+        self.metrics
+            .checks
+            .with_label_values(&[self.target_name.as_str(), state_str])
+            .inc();
 
         if self.state != state {
             self.state = state;
@@ -74,7 +146,7 @@ struct Director<T> {
 
 impl<T> Director<T>
 where
-    T: Clone + Debug + Send + Sync + 'static,
+    T: Clone + Display + Debug + Send + Sync + 'static,
 {
     fn new(
         targets: Vec<T>,
@@ -82,6 +154,7 @@ where
         checker: Arc<dyn ChecksTarget<T>>,
         interval: Duration,
         notify_tx: watch::Sender<Arc<Vec<(T, TargetState)>>>,
+        metrics: Metrics,
     ) -> Self {
         let token = CancellationToken::new();
         let tracker = TaskTracker::new();
@@ -91,9 +164,11 @@ where
             let actor = Actor {
                 idx,
                 target: v.clone(),
+                target_name: v.to_string(),
                 checker: checker.clone(),
                 state: TargetState::Unknown,
                 tx: tx.clone(),
+                metrics: metrics.clone(),
             };
 
             let token = token.child_token();
@@ -170,13 +245,14 @@ pub struct HealthChecker<T> {
 
 impl<T> HealthChecker<T>
 where
-    T: Clone + Debug + Send + Sync + 'static,
+    T: Clone + Display + Debug + Send + Sync + 'static,
 {
     /// Create a new Checker
     pub fn new(
         targets: &[T],
         target_checker: Arc<dyn ChecksTarget<T>>,
         interval: Duration,
+        metrics: Metrics,
     ) -> Self {
         let targets = targets.to_vec();
 
@@ -191,6 +267,7 @@ where
             target_checker,
             interval,
             notify_tx,
+            metrics,
         );
 
         let child_token = token.child_token();
@@ -246,7 +323,14 @@ mod test {
     async fn test_health_checker() {
         // Some are healthy
         let target_checker = Arc::new(TestChecker);
-        let checker = HealthChecker::new(&[0, 1, 2, 3], target_checker, Duration::from_millis(1));
+        let metrics = Metrics::new(&Registry::new());
+
+        let checker = HealthChecker::new(
+            &[0, 1, 2, 3],
+            target_checker,
+            Duration::from_millis(1),
+            metrics.clone(),
+        );
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -269,7 +353,8 @@ mod test {
 
         // All are down
         let target_checker = Arc::new(TestChecker);
-        let checker = HealthChecker::new(&[0, 2], target_checker, Duration::from_millis(1));
+        let checker =
+            HealthChecker::new(&[0, 2], target_checker, Duration::from_millis(1), metrics);
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 

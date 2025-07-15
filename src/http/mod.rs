@@ -35,6 +35,8 @@ pub use client::{Client, ClientHttp};
 pub use server::{ConnInfo, Server, ServerBuilder};
 use url::Url;
 
+use crate::http::headers::X_FORWARDED_HOST;
+
 pub const ALPN_H1: &[u8] = b"http/1.1";
 pub const ALPN_H2: &[u8] = b"h2";
 pub const ALPN_ACME: &[u8] = b"acme-tls/1";
@@ -114,17 +116,23 @@ pub fn extract_host(host_port: &str) -> Option<&str> {
     }
 }
 
-/// Attempts to extract host from HTTP2 "authority" pseudo-header or from HTTP/1.1 "Host" header
+/// Attempts to extract host from `X-Forwarded-Host` header, HTTP2 "authority" pseudo-header or from HTTP/1.1 `Host` header
 pub fn extract_authority<T>(request: &Request<T>) -> Option<&str> {
-    // Try HTTP2 first, then Host header
-    request.uri().authority().map(|x| x.host()).or_else(|| {
-        request
-            .headers()
-            .get(http::header::HOST)
-            .and_then(|x| x.to_str().ok())
-            // Extract host w/o port
-            .and_then(extract_host)
-    })
+    // Try `X-Forwarded-Host` header first
+    request
+        .headers()
+        .get(X_FORWARDED_HOST)
+        .and_then(|x| x.to_str().ok())
+        // Then URI authority
+        .or_else(|| request.uri().authority().map(|x| x.host()))
+        // THen `Host` header
+        .or_else(|| {
+            request
+                .headers()
+                .get(http::header::HOST)
+                .and_then(|x| x.to_str().ok())
+        }) // Extract host w/o port
+        .and_then(extract_host)
 }
 
 #[derive(new, Debug)]
@@ -308,7 +316,7 @@ mod test {
         let mut req = Request::new(());
         *req.uri_mut() = Uri::builder()
             .scheme("http")
-            .authority("foo.bar")
+            .authority("foo.bar:443")
             .path_and_query("/foo?bar=baz")
             .build()
             .unwrap();
@@ -320,19 +328,40 @@ mod test {
             .path_and_query("/foo?bar=baz")
             .build()
             .unwrap();
-        (*req.headers_mut()).insert(HOST, hval!("foo.baz"));
+        (*req.headers_mut()).insert(HOST, hval!("foo.baz:443"));
         assert_eq!(extract_authority(&req), Some("foo.baz"));
 
-        // Both: authority should take precedence (not a real world use case probably)
+        // XFH header
         let mut req = Request::new(());
         *req.uri_mut() = Uri::builder()
-            .scheme("http")
-            .authority("foo.bar")
             .path_and_query("/foo?bar=baz")
             .build()
             .unwrap();
-        (*req.headers_mut()).insert(HOST, hval!("foo.baz"));
+        (*req.headers_mut()).insert(X_FORWARDED_HOST, hval!("foo.baz:443"));
+        assert_eq!(extract_authority(&req), Some("foo.baz"));
+
+        // Host+Authority: authority should take precedence
+        let mut req = Request::new(());
+        *req.uri_mut() = Uri::builder()
+            .scheme("http")
+            .authority("foo.bar:443")
+            .path_and_query("/foo?bar=baz")
+            .build()
+            .unwrap();
+        (*req.headers_mut()).insert(HOST, hval!("foo.baz:443"));
         assert_eq!(extract_authority(&req), Some("foo.bar"));
+
+        // XFH+Host+Authority: XFH should take precedence
+        let mut req = Request::new(());
+        *req.uri_mut() = Uri::builder()
+            .scheme("http")
+            .authority("foo.bar:443")
+            .path_and_query("/foo?bar=baz")
+            .build()
+            .unwrap();
+        (*req.headers_mut()).insert(HOST, hval!("foo.baz:443"));
+        (*req.headers_mut()).insert(X_FORWARDED_HOST, hval!("dead.beef:443"));
+        assert_eq!(extract_authority(&req), Some("dead.beef"));
     }
 
     #[test]

@@ -1,12 +1,16 @@
-use std::{fmt::Debug, sync::Arc, time::Duration};
+use std::{
+    fmt::{Debug, Display},
+    sync::Arc,
+    time::Duration,
+};
 
 use arc_swap::{ArcSwap, ArcSwapOption};
 use tokio::{select, sync::watch::Receiver};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::utils::{
-    distributor::{Distributor, ExecutesRequest, Strategy},
-    health_check::{ChecksTarget, HealthChecker, TargetState},
+    distributor::{self, Distributor, ExecutesRequest, Strategy},
+    health_check::{self, ChecksTarget, HealthChecker, TargetState},
 };
 
 #[derive(thiserror::Error)]
@@ -23,12 +27,13 @@ struct Actor<T, RQ = (), RS = (), E = ()> {
     strategy: Strategy,
     executor: Arc<dyn ExecutesRequest<T, Request = RQ, Response = RS, Error = E>>,
     distributor: Arc<ArcSwapOption<Distributor<T, RQ, RS, E>>>,
+    distributor_metrics: distributor::Metrics,
     healthy: Arc<ArcSwap<Vec<T>>>,
 }
 
 impl<T, RQ, RS, E> Actor<T, RQ, RS, E>
 where
-    T: Clone + Debug + Send + Sync + 'static,
+    T: Clone + Display + Debug + Send + Sync + 'static,
     RQ: Send + 'static,
     RS: Send + 'static,
     E: Send + 'static,
@@ -50,7 +55,12 @@ where
             return;
         }
 
-        let distributor = Distributor::new(&healthy, self.strategy, self.executor.clone());
+        let distributor = Distributor::new(
+            &healthy,
+            self.strategy,
+            self.executor.clone(),
+            self.distributor_metrics.clone(),
+        );
         self.distributor.store(Some(Arc::new(distributor)));
         self.healthy
             .store(Arc::new(healthy.into_iter().map(|x| x.0).collect()));
@@ -93,7 +103,7 @@ pub struct BackendRouter<T, RQ = (), RS = (), E = ()> {
 
 impl<T, RQ, RS, E> BackendRouter<T, RQ, RS, E>
 where
-    T: Clone + Debug + Send + Sync + 'static,
+    T: Clone + Display + Debug + Send + Sync + 'static,
     RQ: Send + 'static,
     RS: Send + 'static,
     E: Send + 'static,
@@ -105,13 +115,20 @@ where
         checker: Arc<dyn ChecksTarget<T>>,
         strategy: Strategy,
         check_interval: Duration,
+        health_check_metrics: health_check::Metrics,
+        distributor_metrics: distributor::Metrics,
     ) -> Self {
         // Collect the weights for the Actor
         let weights = backends.iter().map(|x| x.1).collect();
         // Collect backends w/o weights for the HealthChecker
         let backends = backends.iter().map(|x| x.0.clone()).collect::<Vec<_>>();
 
-        let health_checker = Arc::new(HealthChecker::new(&backends, checker, check_interval));
+        let health_checker = Arc::new(HealthChecker::new(
+            &backends,
+            checker,
+            check_interval,
+            health_check_metrics,
+        ));
         let notify = health_checker.subscribe();
 
         let distributor = Arc::new(ArcSwapOption::empty());
@@ -123,6 +140,7 @@ where
             strategy,
             executor,
             distributor: distributor.clone(),
+            distributor_metrics,
             healthy: healthy.clone(),
         };
 
@@ -179,6 +197,7 @@ mod test {
     use std::{collections::HashMap, sync::Mutex};
 
     use async_trait::async_trait;
+    use prometheus::Registry;
 
     use crate::utils::distributor::test::TestExecutor;
 
@@ -211,6 +230,8 @@ mod test {
             Arc::new(TestChecker),
             Strategy::WeightedRoundRobin,
             Duration::from_millis(1),
+            health_check::Metrics::new(&Registry::new()),
+            distributor::Metrics::new(&Registry::new()),
         );
 
         // Wait a bit for health checks to run
@@ -240,6 +261,8 @@ mod test {
             Arc::new(TestChecker),
             Strategy::WeightedRoundRobin,
             Duration::from_millis(1),
+            health_check::Metrics::new(&Registry::new()),
+            distributor::Metrics::new(&Registry::new()),
         );
 
         // Wait a bit for health checks to run

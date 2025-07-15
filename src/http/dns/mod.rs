@@ -2,12 +2,13 @@ pub mod cli;
 
 use core::task;
 use std::{
-    fmt,
+    fmt::Debug,
     net::{IpAddr, SocketAddr},
     pin::Pin,
     str::FromStr,
     sync::Arc,
     task::Poll,
+    time::Duration,
 };
 
 use anyhow::{Context, anyhow};
@@ -69,18 +70,19 @@ pub trait HyperDnsResolver:
 {
 }
 
-pub trait CloneableDnsResolver: Resolve + Clone + fmt::Debug + 'static {}
+pub trait CloneableDnsResolver: Resolve + Clone + Debug + 'static {}
 
 pub trait CloneableHyperDnsResolver:
-    HyperDnsResolver + Clone + fmt::Debug + Send + Sync + 'static
+    HyperDnsResolver + Clone + Debug + Send + Sync + 'static
 {
 }
 
 pub struct Options {
     pub protocol: Protocol,
     pub servers: Vec<IpAddr>,
-    pub tls_name: String,
     pub cache_size: usize,
+    pub timeout: Duration,
+    pub tls_name: String,
 }
 
 impl Default for Options {
@@ -88,8 +90,9 @@ impl Default for Options {
         Self {
             protocol: Protocol::Clear(53),
             servers: CLOUDFLARE_IPS.into(),
-            tls_name: "cloudflare-dns.com".into(),
             cache_size: 1024,
+            timeout: Duration::from_secs(3),
+            tls_name: "cloudflare-dns.com".into(),
         }
     }
 }
@@ -118,6 +121,7 @@ impl Resolver {
 
         let mut opts = ResolverOpts::default();
         opts.cache_size = o.cache_size;
+        opts.timeout = o.timeout;
         opts.use_hosts_file = ResolveHosts::Never;
         opts.preserve_intermediates = false;
         opts.try_tcp_on_error = true;

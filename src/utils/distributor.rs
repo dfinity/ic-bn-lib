@@ -1,12 +1,17 @@
 use std::{
-    fmt::Debug,
+    fmt::{Debug, Display},
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Instant,
 };
 
 use async_trait::async_trait;
+use prometheus::{
+    HistogramVec, IntCounterVec, IntGaugeVec, Registry, register_histogram_vec_with_registry,
+    register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry,
+};
 use scopeguard::defer;
 use strum::{Display, EnumString};
 
@@ -27,6 +32,44 @@ const fn calc_gcd(x: isize, y: isize) -> isize {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct Metrics {
+    inflight: IntGaugeVec,
+    requests: IntCounterVec,
+    duration: HistogramVec,
+}
+
+impl Metrics {
+    pub fn new(registry: &Registry) -> Self {
+        Self {
+            inflight: register_int_gauge_vec_with_registry!(
+                format!("distributor_inflight"),
+                format!("Stores the current number of in-flight requests"),
+                &["target"],
+                registry
+            )
+            .unwrap(),
+
+            requests: register_int_counter_vec_with_registry!(
+                format!("distributor_requests"),
+                format!("Counts the number of requests and results"),
+                &["target", "result"],
+                registry
+            )
+            .unwrap(),
+
+            duration: register_histogram_vec_with_registry!(
+                format!("distributor_duration"),
+                format!("Records the duration of requests in seconds"),
+                &["target"],
+                [0.01, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2].to_vec(),
+                registry
+            )
+            .unwrap(),
+        }
+    }
+}
+
 /// Distribution strategy to use
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Display, EnumString)]
 pub enum Strategy {
@@ -40,13 +83,15 @@ pub enum Strategy {
 #[derive(Debug)]
 pub struct Backend<T> {
     backend: T,
+    name: String,
     weight: usize,
     inflight: AtomicUsize,
 }
 
-impl<T: Send + Sync> Backend<T> {
-    pub const fn new(backend: T, weight: usize) -> Self {
+impl<T: Display + Send + Sync> Backend<T> {
+    pub fn new(backend: T, weight: usize) -> Self {
         Self {
+            name: backend.to_string(),
             backend,
             weight,
             inflight: AtomicUsize::new(0),
@@ -104,11 +149,12 @@ pub struct Distributor<T, RQ = (), RS = (), E = ()> {
     strategy: Strategy,
     executor: Arc<dyn ExecutesRequest<T, Request = RQ, Response = RS, Error = E>>,
     wrr: Mutex<Wrr>,
+    metrics: Metrics,
 }
 
 impl<T, RQ, RS, E> Distributor<T, RQ, RS, E>
 where
-    T: Clone + Send + Sync,
+    T: Clone + Display + Send + Sync,
     RQ: Send,
     RS: Send,
     E: Send,
@@ -117,6 +163,7 @@ where
         backends: &[(T, usize)],
         strategy: Strategy,
         executor: Arc<dyn ExecutesRequest<T, Request = RQ, Response = RS, Error = E>>,
+        metrics: Metrics,
     ) -> Self {
         if backends.is_empty() {
             panic!("There must be at least one backend");
@@ -133,6 +180,7 @@ where
             strategy,
             executor,
             wrr: Mutex::new(wrr),
+            metrics,
         }
     }
 
@@ -172,11 +220,32 @@ where
         };
 
         backend.inflight.fetch_add(1, Ordering::SeqCst);
+        self.metrics
+            .inflight
+            .with_label_values(&[&backend.name])
+            .inc();
+
         defer! {
             backend.inflight.fetch_sub(1, Ordering::SeqCst);
+            self.metrics.inflight.with_label_values(&[&backend.name]).dec();
         }
 
-        self.executor.execute(&backend.backend, request).await
+        let start = Instant::now();
+        let res = self.executor.execute(&backend.backend, request).await;
+        self.metrics
+            .duration
+            .with_label_values(&[&backend.name])
+            .observe(start.elapsed().as_secs_f64());
+
+        self.metrics
+            .requests
+            .with_label_values(&[
+                backend.name.as_str(),
+                if res.is_ok() { "ok" } else { "fail" },
+            ])
+            .inc();
+
+        res
     }
 }
 
@@ -219,8 +288,13 @@ pub(crate) mod test {
         ];
 
         let executor = Arc::new(TestExecutor(Duration::ZERO, Mutex::new(HashMap::new())));
-
-        let d = Distributor::new(&backends, Strategy::WeightedRoundRobin, executor.clone());
+        let metrics = Metrics::new(&Registry::new());
+        let d = Distributor::new(
+            &backends,
+            Strategy::WeightedRoundRobin,
+            executor.clone(),
+            metrics,
+        );
 
         // Do 1k backend selections
         for _ in 0..1000 {
@@ -248,10 +322,12 @@ pub(crate) mod test {
             Mutex::new(HashMap::new()),
         ));
 
+        let metrics = Metrics::new(&Registry::new());
         let d = Arc::new(Distributor::new(
             &backends,
             Strategy::LeastOutstandingRequests,
             executor.clone(),
+            metrics,
         ));
 
         let mut js = JoinSet::new();
