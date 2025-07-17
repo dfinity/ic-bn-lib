@@ -1,6 +1,6 @@
 #[cfg(feature = "acme")]
 pub mod acme;
-#[cfg(feature = "cert_providers")]
+#[cfg(feature = "cert-providers")]
 pub mod providers;
 pub mod resolver;
 pub mod sessions;

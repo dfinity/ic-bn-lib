@@ -19,11 +19,11 @@ acme = [
     "dep:hex",
     "dep:sha2",
 ]
-acme_dns = ["acme", "dep:cloudflare"]
-acme_alpn = ["acme", "dep:rustls-acme"]
+acme-dns = ["acme", "dep:cloudflare"]
+acme-alpn = ["acme", "dep:rustls-acme"]
 clients-hyper = ["dep:hyper-rustls"]
-custom_domains = []
-cert_providers = ["custom_domains"]
+custom-domains = []
+cert-providers = ["custom-domains"]
 vector = ["dep:vrl", "dep:prost", "dep:prost-types"]
 
 [dependencies]

@@ -5,7 +5,7 @@
 #![allow(clippy::cognitive_complexity)]
 #![allow(clippy::field_reassign_with_default)]
 
-#[cfg(feature = "custom_domains")]
+#[cfg(feature = "custom-domains")]
 pub mod custom_domains;
 pub mod http;
 pub mod pubsub;

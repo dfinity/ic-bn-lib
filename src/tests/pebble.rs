@@ -387,7 +387,7 @@ pub mod dns {
 
     use crate::tls::acme::TokenManager;
 
-    #[cfg(feature = "acme_dns")]
+    #[cfg(feature = "acme-dns")]
     use crate::tls::acme::dns::{DnsManager, Record};
 
     /// Manages ACME tokens using Pebble Challenge Test Server.
@@ -448,7 +448,7 @@ pub mod dns {
         }
     }
 
-    #[cfg(feature = "acme_dns")]
+    #[cfg(feature = "acme-dns")]
     #[async_trait]
     impl DnsManager for TokenManagerPebble {
         async fn create(
@@ -495,7 +495,7 @@ pub mod dns {
             let r = resolver.resolve("_acme-challenge.foo", "TXT").await;
             assert!(r.is_err());
 
-            #[cfg(feature = "acme_dns")]
+            #[cfg(feature = "acme-dns")]
             {
                 tm.create("baz", "txt", Record::Txt("deadbeef".into()), 0)
                     .await

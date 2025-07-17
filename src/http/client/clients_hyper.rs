@@ -27,7 +27,7 @@ use crate::http::dns::{CloneableHyperDnsResolver, Resolver};
 
 use super::{ClientHttp, Error, Metrics, Options};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HyperClient<B, R = Resolver> {
     cli: ClientHyper<HttpsConnector<HttpConnector<R>>, B>,
 }
@@ -56,9 +56,10 @@ where
         http_conn.set_keepalive(opts.tcp_keepalive);
         http_conn.enforce_http(false);
         http_conn.set_nodelay(true);
+        http_conn.set_reuse_address(true);
 
         let builder = HttpsConnector::<HttpConnector>::builder();
-        let builder = if let Some(mut v) = opts.tls_config {
+        let mut builder = if let Some(mut v) = opts.tls_config {
             // Hyper is sad when we set our ALPN
             v.alpn_protocols = vec![];
             builder.with_tls_config(v)
@@ -67,29 +68,30 @@ where
         }
         .https_or_http();
 
-        let builder = if let Some(v) = opts.tls_fixed_name {
+        if let Some(v) = opts.tls_fixed_name {
             let name = DnsName::try_from(v).expect("able to parse as DNSName");
-            builder.with_server_name_resolver(FixedServerNameResolver::new(
+            builder = builder.with_server_name_resolver(FixedServerNameResolver::new(
                 rustls::pki_types::ServerName::DnsName(name),
             ))
-        } else {
-            builder
-        };
+        }
 
         let https_conn = builder.enable_all_versions().wrap_connector(http_conn);
 
         let mut builder = ClientHyper::builder(TokioExecutor::new());
-        builder.http2_adaptive_window(true);
-        builder.pool_idle_timeout(opts.pool_idle_timeout);
+        builder
+            .pool_max_idle_per_host(opts.pool_idle_max.unwrap_or(usize::MAX))
+            .http2_adaptive_window(true)
+            .http2_only(opts.http2_only)
+            .pool_idle_timeout(opts.pool_idle_timeout)
+            .pool_timer(TokioTimer::new())
+            .timer(TokioTimer::new())
+            .retry_canceled_requests(true);
 
         if let Some(v) = opts.pool_idle_max {
             builder.pool_max_idle_per_host(v);
         }
 
-        let cli = builder
-            .pool_timer(TokioTimer::new())
-            .timer(TokioTimer::new())
-            .build(https_conn);
+        let cli = builder.build(https_conn);
 
         Self { cli }
     }
@@ -111,14 +113,14 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct HyperClientLeastLoaded<B, R> {
+#[derive(Debug, Clone)]
+pub struct HyperClientLeastLoaded<B, R = Resolver> {
     inner: Arc<Vec<HyperClientLeastLoadedInner<B, R>>>,
     metrics: Option<Metrics>,
 }
 
-#[derive(Debug)]
-struct HyperClientLeastLoadedInner<B, R> {
+#[derive(Debug, Clone)]
+struct HyperClientLeastLoadedInner<B, R = Resolver> {
     cli: HyperClient<B, R>,
     outstanding: Cache<String, Arc<AtomicUsize>, RandomState>,
 }
