@@ -13,6 +13,7 @@ use prometheus::{
     register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry,
 };
 use scopeguard::defer;
+use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString};
 
 /// Calculates Greatest Common Denominator
@@ -71,11 +72,14 @@ impl Metrics {
 }
 
 /// Distribution strategy to use
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, EnumString)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, EnumString, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Strategy {
     #[strum(serialize = "wrr")]
+    #[serde(alias = "wrr")]
     WeightedRoundRobin,
     #[strum(serialize = "lor")]
+    #[serde(alias = "lor")]
     LeastOutstandingRequests,
 }
 
