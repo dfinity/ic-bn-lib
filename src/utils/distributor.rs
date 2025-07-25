@@ -2,7 +2,7 @@ use std::{
     fmt::{Debug, Display},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Instant,
 };
@@ -13,6 +13,7 @@ use prometheus::{
     register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry,
 };
 use scopeguard::defer;
+use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString};
 
 /// Calculates Greatest Common Denominator
@@ -71,11 +72,14 @@ impl Metrics {
 }
 
 /// Distribution strategy to use
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, EnumString)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, EnumString, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Strategy {
     #[strum(serialize = "wrr")]
+    #[serde(alias = "wrr")]
     WeightedRoundRobin,
     #[strum(serialize = "lor")]
+    #[serde(alias = "lor")]
     LeastOutstandingRequests,
 }
 
@@ -225,26 +229,29 @@ where
             .with_label_values(&[&backend.name])
             .inc();
 
+        let start = Instant::now();
+        let ok = Arc::new(AtomicBool::new(false));
+        let ok_clone = ok.clone();
+
+        // Record metrics under defer to make sure they're recorded in case of future cancellation
         defer! {
             backend.inflight.fetch_sub(1, Ordering::SeqCst);
             self.metrics.inflight.with_label_values(&[&backend.name]).dec();
+            self.metrics
+                .duration
+                .with_label_values(&[&backend.name])
+                .observe(start.elapsed().as_secs_f64());
+            self.metrics
+                .requests
+                .with_label_values(&[
+                    backend.name.as_str(),
+                    if ok_clone.load(Ordering::SeqCst) { "ok" } else { "fail" },
+                ])
+                .inc();
         }
 
-        let start = Instant::now();
         let res = self.executor.execute(&backend.backend, request).await;
-        self.metrics
-            .duration
-            .with_label_values(&[&backend.name])
-            .observe(start.elapsed().as_secs_f64());
-
-        self.metrics
-            .requests
-            .with_label_values(&[
-                backend.name.as_str(),
-                if res.is_ok() { "ok" } else { "fail" },
-            ])
-            .inc();
-
+        ok.store(res.is_ok(), Ordering::SeqCst);
         res
     }
 }

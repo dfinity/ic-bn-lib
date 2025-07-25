@@ -49,6 +49,10 @@ pub fn new<R: CloneableDnsResolver>(
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy();
 
+    if opts.http2_only {
+        client = client.http2_prior_knowledge();
+    }
+
     if let Some(v) = opts.pool_idle_max {
         client = client.pool_max_idle_per_host(v);
     }

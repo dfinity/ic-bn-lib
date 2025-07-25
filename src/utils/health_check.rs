@@ -10,14 +10,15 @@ use prometheus::{
     HistogramVec, IntCounterVec, IntGaugeVec, Registry, register_histogram_vec_with_registry,
     register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry,
 };
-use strum::IntoStaticStr;
+use strum::{Display, IntoStaticStr};
 use tokio::{
     select,
     sync::{mpsc, watch},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tracing::warn;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, Display)]
 #[strum(serialize_all = "snake_case")]
 pub enum TargetState {
     Unknown,
@@ -26,7 +27,7 @@ pub enum TargetState {
 }
 
 #[async_trait]
-pub trait ChecksTarget<T: Clone + Debug>: Send + Sync + 'static {
+pub trait ChecksTarget<T: Clone + Display + Debug>: Send + Sync + 'static {
     async fn check(&self, target: &T) -> TargetState;
 }
 
@@ -80,7 +81,7 @@ struct Actor<T> {
 
 impl<T> Actor<T>
 where
-    T: Clone + Debug + Send + Sync + 'static,
+    T: Clone + Display + Debug + Send + Sync + 'static,
 {
     async fn check(&mut self) {
         let start = Instant::now();
@@ -108,6 +109,11 @@ where
             .inc();
 
         if self.state != state {
+            warn!(
+                "Target {} state changed: {} -> {}",
+                self.target, self.state, state
+            );
+
             self.state = state;
             let _ = self.tx.send((self.idx, state)).await;
         }

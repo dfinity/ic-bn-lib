@@ -1,8 +1,8 @@
-#[cfg(feature = "acme_alpn")]
+#[cfg(feature = "acme-alpn")]
 pub mod alpn;
 #[cfg(feature = "acme")]
 pub mod client;
-#[cfg(feature = "acme_dns")]
+#[cfg(feature = "acme-dns")]
 pub mod dns;
 
 use std::{fmt::Display, str::FromStr};
