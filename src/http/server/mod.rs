@@ -618,9 +618,6 @@ impl Conn {
             // Notify that we have started processing the request
             let _ = state_tx.try_send(RequestState::Start);
 
-            // Increase the global inflight requests counter
-            requests_inflight.inc();
-
             // Inject connection information
             request.extensions_mut().insert(conn_info.clone());
             if let Some(v) = &tls_info {
@@ -636,6 +633,9 @@ impl Conn {
 
             // Return the future
             async move {
+                // Increase the global inflight requests counter
+                requests_inflight.inc();
+
                 // Since the future can be cancelled we need defer to decrease the counter in any case
                 // to avoid leaking the inflight requests
                 defer! {
@@ -666,6 +666,7 @@ impl Conn {
         let conn = self
             .builder
             .serve_connection_with_upgrades(Box::pin(stream), service);
+
         // Using mutable future reference requires pinning
         pin!(conn);
 
