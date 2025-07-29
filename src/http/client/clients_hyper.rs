@@ -27,6 +27,7 @@ use crate::http::dns::{CloneableHyperDnsResolver, Resolver};
 
 use super::{ClientHttp, Error, Metrics, Options};
 
+/// Hyper-based client with a generic body and resolver
 #[derive(Debug, Clone)]
 pub struct HyperClient<B, R = Resolver> {
     cli: ClientHyper<HttpsConnector<HttpConnector<R>>, B>,
@@ -113,6 +114,7 @@ where
     }
 }
 
+/// Client that pools a defined number of `HyperClient`s and picks the least loaded one for the next request.
 #[derive(Debug, Clone)]
 pub struct HyperClientLeastLoaded<B, R = Resolver> {
     inner: Arc<Vec<HyperClientLeastLoadedInner<B, R>>>,
@@ -163,6 +165,7 @@ where
         let uri = req.uri();
         let host = uri.host().unwrap_or_default();
         let port = uri.port_u16().unwrap_or_else(|| {
+            // match doesn't work here
             if uri.scheme() == Some(&Scheme::HTTPS) {
                 443
             } else if uri.scheme() == Some(&Scheme::HTTP) {

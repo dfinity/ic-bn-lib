@@ -22,6 +22,8 @@ pub struct Opts {
     pub cache_path: PathBuf,
 }
 
+/// ACME client that obtains certificates using TLS-ALPN-01 challenge.
+/// Must be used as a rustls certificate resolver.
 #[derive(Debug)]
 pub struct AcmeAlpn(
     Mutex<AcmeState<io::Error, io::Error>>,

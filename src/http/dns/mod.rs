@@ -97,6 +97,7 @@ impl Default for Options {
     }
 }
 
+/// DNS-resolver based on Hickory
 #[derive(Debug, Clone)]
 pub struct Resolver(Arc<TokioResolver>);
 impl CloneableDnsResolver for Resolver {}

@@ -16,6 +16,7 @@ use strum_macros::{Display, EnumString};
 pub use instant_acme;
 use url::Url;
 
+/// Challenge type
 #[derive(Clone, Display, EnumString, PartialEq, Eq)]
 #[strum(serialize_all = "snake_case")]
 pub enum Challenge {
@@ -23,6 +24,7 @@ pub enum Challenge {
     Dns,
 }
 
+/// ACME token manager trait to set challenges
 #[async_trait]
 pub trait TokenManager: Sync + Send {
     async fn set(&self, id: &str, token: &str) -> Result<(), Error>;
