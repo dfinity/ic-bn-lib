@@ -3,6 +3,7 @@ pub mod cache;
 pub mod client;
 pub mod dns;
 pub mod headers;
+pub mod middleware;
 pub mod proxy;
 pub mod server;
 pub mod shed;
@@ -23,7 +24,7 @@ use axum::{
 };
 use axum_extra::extract::Host;
 use derive_new::new;
-use http::{HeaderMap, Method, Request, StatusCode, Uri, Version, uri::PathAndQuery};
+use http::{HeaderMap, Method, Request, StatusCode, Uri, Version, header::HOST, uri::PathAndQuery};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 #[cfg(feature = "clients-hyper")]
@@ -74,7 +75,7 @@ pub fn calc_headers_size(h: &HeaderMap) -> usize {
     h.iter().map(|(k, v)| k.as_str().len() + v.len() + 2).sum()
 }
 
-/// Some non-allocating functions to get static str
+/// Get a static string representing given HTTP version
 pub const fn http_version(v: Version) -> &'static str {
     match v {
         Version::HTTP_09 => "0.9",
@@ -86,6 +87,7 @@ pub const fn http_version(v: Version) -> &'static str {
     }
 }
 
+/// Get a static string representing given HTTP method
 pub const fn http_method(v: &Method) -> &'static str {
     match *v {
         Method::OPTIONS => "OPTIONS",
@@ -117,6 +119,7 @@ pub fn extract_host(host_port: &str) -> Option<&str> {
 }
 
 /// Attempts to extract host from `X-Forwarded-Host` header, HTTP2 "authority" pseudo-header or from HTTP/1.1 `Host` header
+/// (in this order of preference)
 pub fn extract_authority<T>(request: &Request<T>) -> Option<&str> {
     // Try `X-Forwarded-Host` header first
     request
@@ -126,15 +129,12 @@ pub fn extract_authority<T>(request: &Request<T>) -> Option<&str> {
         // Then URI authority
         .or_else(|| request.uri().authority().map(|x| x.host()))
         // THen `Host` header
-        .or_else(|| {
-            request
-                .headers()
-                .get(http::header::HOST)
-                .and_then(|x| x.to_str().ok())
-        }) // Extract host w/o port
+        .or_else(|| request.headers().get(HOST).and_then(|x| x.to_str().ok()))
+        // Extract host w/o port
         .and_then(extract_host)
 }
 
+/// Atomic counters for `AsyncCounter`
 #[derive(new, Debug)]
 pub struct Stats {
     #[new(default)]
@@ -227,7 +227,7 @@ pub enum UrlToUriError {
     Http(#[from] http::Error),
 }
 
-/// Converts Url to Uri
+/// Converts `Url` to `Uri`
 pub fn url_to_uri(url: &Url) -> Result<Uri, UrlToUriError> {
     if !url.has_authority() {
         return Err(UrlToUriError::NoAuthority);

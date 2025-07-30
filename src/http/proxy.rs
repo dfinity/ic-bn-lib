@@ -5,7 +5,7 @@ use url::Url;
 
 use super::{Client, Error, body::SyncBody, client::ClientHttp, headers::strip_connection_headers};
 
-/// Proxies provided Axum request to a given URL using Client trait object and returns Axum response
+/// Proxies provided Axum request to a given URL using `Client` trait object and returns Axum response
 pub async fn proxy(
     url: Url,
     request: Request,
@@ -33,7 +33,7 @@ pub async fn proxy(
     Ok(Response::from_parts(parts, Body::new(body)))
 }
 
-/// Proxies provided request to a given URL using ClientHttp trait object and returns Axum response
+/// Proxies provided request to a given URL using `ClientHttp` trait object and returns Axum response
 pub async fn proxy_http<B>(
     mut request: Request<B>,
     http_client: &Arc<dyn ClientHttp<B>>,

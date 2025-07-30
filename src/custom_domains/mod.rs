@@ -20,19 +20,20 @@ use tracing::{info, warn};
 
 use crate::http;
 
+/// Represents a custom domain with a corresponding canister ID
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CustomDomain {
     pub name: FQDN,
     pub canister_id: Principal,
 }
 
-// Provides a list of custom domains
+/// Provides a list of custom domains
 #[async_trait]
 pub trait ProvidesCustomDomains: Sync + Send + std::fmt::Debug {
     async fn get_custom_domains(&self) -> Result<Vec<CustomDomain>, Error>;
 }
 
-// Gets the body of the given URL
+/// Gets the body of the given URL
 async fn get_url_body(
     cli: &Arc<dyn http::Client>,
     url: &Url,
@@ -56,7 +57,7 @@ async fn get_url_body(
         .context("failed to fetch response body")
 }
 
-// Fetches a list of custom domains from the given URL in JSON format
+/// Fetches a list of custom domains from the given URL in JSON format
 async fn get_custom_domains_from_url(
     cli: &Arc<dyn http::Client>,
     url: &Url,
@@ -78,6 +79,7 @@ async fn get_custom_domains_from_url(
         .collect::<Vec<_>>())
 }
 
+/// Generic custom domain provider that fetches a JSON-serialized list from the given URL
 #[derive(new)]
 pub struct GenericProvider {
     http_client: Arc<dyn http::Client>,
@@ -104,6 +106,9 @@ struct TimestampedResponse {
     url: String,
 }
 
+/// Generic custom domain provider that fetches a JSON-serialized `TimestampedResponse` from the given URL and remembers the timestamp.
+///
+/// If it changes, then it fetches a JSON-serialized list from the embedded URL (it can be relative or absolute).
 #[derive(new)]
 pub struct GenericProviderTimestamped {
     http_client: Arc<dyn http::Client>,

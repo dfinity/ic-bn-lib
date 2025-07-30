@@ -67,18 +67,20 @@ pub struct TaskManager {
 }
 
 impl TaskManager {
-    /// Runs a given task once
+    /// Add a task to run only once.
+    /// It needs to implement its own internal repeat logic if need be.
     pub fn add(&mut self, name: &str, task: Arc<dyn Run>) {
         self.tasks.push(Task(name.into(), task));
     }
 
-    /// Runs the given task with a given interval.
-    /// Errors are printed and ignored.
+    /// Add a task to run with a given interval.
+    /// Errors are printed with a WARN level and then ignored.
     pub fn add_interval(&mut self, name: &str, task: Arc<dyn Run>, interval: Duration) {
         let runner = IntervalRunner(interval, Task(name.into(), task));
         self.tasks.push(Task(name.into(), Arc::new(runner)));
     }
 
+    /// Start the tasks
     pub fn start(&self) {
         warn!("TaskManager: starting {} tasks", self.tasks.len());
 
@@ -92,6 +94,8 @@ impl TaskManager {
         }
     }
 
+    /// Signal the tasks to stop and wait until they do.
+    /// If one or more tasks aren't acting on the token cancellation signal then this will hang forever.
     pub async fn stop(&self) {
         warn!("TaskManager: stopping {} tasks", self.tasks.len());
         self.token.cancel();
@@ -99,6 +103,7 @@ impl TaskManager {
         self.tracker.wait().await;
     }
 
+    /// Return a cancellation token that can be used to signal external tasks when `TaskManager` is stopping.
     pub fn token(&self) -> CancellationToken {
         self.token.child_token()
     }

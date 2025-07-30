@@ -161,26 +161,31 @@ impl ClientBuilder {
         Ok(Client::new(self.opts, account, token_manager))
     }
 
+    /// Use the provided token manager
     pub fn with_token_manager(mut self, token_manager: Arc<dyn TokenManager>) -> Self {
         self.token_manager = Some(token_manager);
         self
     }
 
+    /// Set the order timeout. Default is 60s.
     pub const fn with_order_timeout(mut self, order_timeout: Duration) -> Self {
         self.opts.order_timeout = order_timeout;
         self
     }
 
+    /// Set the token timeout. Default is 60s.
     pub const fn with_token_timeout(mut self, token_timeout: Duration) -> Self {
         self.opts.token_timeout = token_timeout;
         self
     }
 
+    /// Set the ACME URL. Default is LetsEncrypt Staging.
     pub fn with_acme_url(mut self, url: AcmeUrl) -> Self {
         self.opts.url = url;
         self
     }
 
+    /// Set the challenge type. Default is DNS-01.
     pub fn with_challenge(mut self, challenge: ChallengeType) -> Self {
         self.opts.challenge = challenge;
         self
@@ -218,41 +223,45 @@ impl Client {
     /// Poll the token manager to verify if the token was correctly set
     async fn poll_token(&self, id: &str, token: &str) -> Result<(), Error> {
         retry_async! {
-        async {
-            self.token_manager
-                .verify(id, token)
-                .await
-                .map_err(RetryError::Transient)
-        }, self.opts.token_timeout}
+            async {
+                self.token_manager
+                    .verify(id, token)
+                    .await
+                    .map_err(RetryError::Transient)
+            },
+            self.opts.token_timeout
+        }
     }
 
     /// Poll the order with increasing intervals until it reaches some expected state
     async fn poll_order(&self, order: &mut Order, expect: OrderStatus) -> Result<(), Error> {
         retry_async! {
-        async {
-            match order.refresh().await {
-                Ok(v) => {
-                    if v.status == expect {
-                        return Ok(());
+            async {
+                match order.refresh().await {
+                    Ok(v) => {
+                        if v.status == expect {
+                            return Ok(());
+                        }
+
+                        if v.status == OrderStatus::Invalid {
+                            return Err(RetryError::Permanent(anyhow!(
+                                "Order status is 'Invalid'"
+                            )));
+                        }
+
+                        Err(RetryError::Transient(anyhow!(
+                            "Order status is '{:?}'",
+                            v.status
+                        )))
                     }
 
-                    if v.status == OrderStatus::Invalid {
-                        return Err(RetryError::Permanent(anyhow!(
-                            "Order status is 'Invalid'"
-                        )));
-                    }
-
-                    Err(RetryError::Transient(anyhow!(
-                        "Order status is '{:?}'",
-                        v.status
-                    )))
+                    Err(e) => Err(RetryError::Transient(anyhow!(
+                        "Unable to get order state: {e:#}"
+                    ))),
                 }
-
-                Err(e) => Err(RetryError::Transient(anyhow!(
-                    "Unable to get order state: {e:#}"
-                ))),
-            }
-        }, self.opts.order_timeout}
+            },
+            self.opts.order_timeout
+        }
     }
 
     /// Iterates over authorizations in the order and tries to fulfill them.

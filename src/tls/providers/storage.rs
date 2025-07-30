@@ -105,11 +105,9 @@ impl<T: Clone + Send + Sync> StoresCertificates<T> for Storage<T> {
             for san in &cert.san {
                 // Insert wildcards into a separate tree while stripping the prefix.
                 // It makes the lookups more efficient.
-                let (key, tree) = if san.starts_with("*.") {
-                    (san.strip_prefix("*.").unwrap(), &mut certs_wildcard)
-                } else {
-                    (san.as_str(), &mut certs)
-                };
+                let (key, tree) = san
+                    .strip_prefix("*.")
+                    .map_or((san.as_str(), &mut certs), |v| (v, &mut certs_wildcard));
 
                 let key =
                     FQDN::from_str(key).context(format!("unable to parse '{san}' as FQDN"))?;
