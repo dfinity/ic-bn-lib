@@ -42,7 +42,7 @@ pub struct Dns {
 
     /// IP Lookup strategy to use. Can be one of `ipv4_only`, `ipv6_only`, `ipv4_and_ipv6`, `ipv4_then_ipv6` or `ipv6_then_ipv4`.
     /// Default is to look up IPv4 and IPv6 in parallel.
-    #[clap(env, long, default_value = "ipv4_then_ipv6")]
+    #[clap(env, long, default_value = "ipv4_and_ipv6")]
     pub dns_lookup_strategy: LookupStrategy,
 }
 
