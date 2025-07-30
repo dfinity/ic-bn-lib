@@ -16,15 +16,47 @@ use async_trait::async_trait;
 use hickory_proto::rr::RecordType;
 use hickory_resolver::{
     TokioResolver,
-    config::{CLOUDFLARE_IPS, NameServerConfigGroup, ResolveHosts, ResolverConfig, ResolverOpts},
+    config::{
+        CLOUDFLARE_IPS, LookupIpStrategy, NameServerConfigGroup, ResolveHosts, ResolverConfig,
+        ResolverOpts,
+    },
     lookup_ip::LookupIpIntoIter,
     name_server::TokioConnectionProvider,
 };
 use hyper_util::client::legacy::connect::dns::Name as HyperName;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
+use strum::EnumString;
 use tower::Service;
 
 use super::Error;
+
+/// Copycat of Hickory `LookupIpStrategy` but with `FromStr` derived for CLI
+#[derive(Clone, Copy, Debug, PartialEq, Eq, EnumString)]
+#[strum(serialize_all = "snake_case")]
+pub enum LookupStrategy {
+    /// Only query for A (Ipv4) records
+    Ipv4Only,
+    /// Only query for AAAA (Ipv6) records
+    Ipv6Only,
+    /// Query for A and AAAA in parallel
+    Ipv4AndIpv6,
+    /// Query for Ipv6 if that fails, query for Ipv4
+    Ipv6thenIpv4,
+    /// Query for Ipv4 if that fails, query for Ipv6 (default)
+    Ipv4thenIpv6,
+}
+
+impl From<LookupStrategy> for LookupIpStrategy {
+    fn from(value: LookupStrategy) -> Self {
+        match value {
+            LookupStrategy::Ipv4Only => Self::Ipv4Only,
+            LookupStrategy::Ipv6Only => Self::Ipv6Only,
+            LookupStrategy::Ipv4AndIpv6 => Self::Ipv4AndIpv6,
+            LookupStrategy::Ipv6thenIpv4 => Self::Ipv6thenIpv4,
+            LookupStrategy::Ipv4thenIpv6 => Self::Ipv4thenIpv6,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Protocol {
@@ -80,6 +112,7 @@ pub trait CloneableHyperDnsResolver:
 pub struct Options {
     pub protocol: Protocol,
     pub servers: Vec<IpAddr>,
+    pub lookup_ip_strategy: LookupIpStrategy,
     pub cache_size: usize,
     pub timeout: Duration,
     pub tls_name: String,
@@ -90,6 +123,7 @@ impl Default for Options {
         Self {
             protocol: Protocol::Clear(53),
             servers: CLOUDFLARE_IPS.into(),
+            lookup_ip_strategy: LookupIpStrategy::Ipv4AndIpv6,
             cache_size: 1024,
             timeout: Duration::from_secs(3),
             tls_name: "cloudflare-dns.com".into(),
@@ -123,6 +157,7 @@ impl Resolver {
         let mut opts = ResolverOpts::default();
         opts.cache_size = o.cache_size;
         opts.timeout = o.timeout;
+        opts.ip_strategy = o.lookup_ip_strategy;
         opts.use_hosts_file = ResolveHosts::Never;
         opts.preserve_intermediates = false;
         opts.try_tcp_on_error = true;

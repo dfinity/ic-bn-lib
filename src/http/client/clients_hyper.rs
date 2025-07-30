@@ -58,6 +58,7 @@ where
         http_conn.enforce_http(false);
         http_conn.set_nodelay(true);
         http_conn.set_reuse_address(true);
+        http_conn.set_happy_eyeballs_timeout(Some(Duration::from_millis(200)));
 
         let builder = HttpsConnector::<HttpConnector>::builder();
         let mut builder = if let Some(mut v) = opts.tls_config {
