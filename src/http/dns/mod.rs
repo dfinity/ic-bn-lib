@@ -41,9 +41,9 @@ pub enum LookupStrategy {
     /// Query for A and AAAA in parallel
     Ipv4AndIpv6,
     /// Query for Ipv6 if that fails, query for Ipv4
-    Ipv6thenIpv4,
+    Ipv6ThenIpv4,
     /// Query for Ipv4 if that fails, query for Ipv6 (default)
-    Ipv4thenIpv6,
+    Ipv4ThenIpv6,
 }
 
 impl From<LookupStrategy> for LookupIpStrategy {
@@ -52,8 +52,8 @@ impl From<LookupStrategy> for LookupIpStrategy {
             LookupStrategy::Ipv4Only => Self::Ipv4Only,
             LookupStrategy::Ipv6Only => Self::Ipv6Only,
             LookupStrategy::Ipv4AndIpv6 => Self::Ipv4AndIpv6,
-            LookupStrategy::Ipv6thenIpv4 => Self::Ipv6thenIpv4,
-            LookupStrategy::Ipv4thenIpv6 => Self::Ipv4thenIpv6,
+            LookupStrategy::Ipv6ThenIpv4 => Self::Ipv6thenIpv4,
+            LookupStrategy::Ipv4ThenIpv6 => Self::Ipv4thenIpv6,
         }
     }
 }
