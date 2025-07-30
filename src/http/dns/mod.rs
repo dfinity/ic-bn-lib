@@ -162,9 +162,8 @@ impl Resolver {
         opts.preserve_intermediates = false;
         opts.try_tcp_on_error = true;
 
-        let mut builder =
-            TokioResolver::builder_with_config(cfg, TokioConnectionProvider::default());
-        *builder.options_mut() = opts;
+        let builder = TokioResolver::builder_with_config(cfg, TokioConnectionProvider::default())
+            .with_options(opts);
 
         Self(Arc::new(builder.build()))
     }
