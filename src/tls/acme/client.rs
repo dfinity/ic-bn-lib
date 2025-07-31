@@ -1,6 +1,6 @@
 use std::{pin::Pin, sync::Arc, time::Duration};
 
-use anyhow::{Context, Error, anyhow};
+use anyhow::{Context, anyhow};
 use bytes::Bytes;
 use http::Request;
 use http_body_util::Full;
@@ -10,8 +10,8 @@ use hyper_util::{
 };
 use instant_acme::{
     Account, AccountCredentials, AuthorizationStatus, BytesResponse, ChallengeType,
-    HttpClient as HttpClientTrait, Identifier, NewAccount, NewOrder, Order, OrderStatus,
-    RevocationRequest,
+    Error as AcmeError, HttpClient as HttpClientTrait, Identifier, NewAccount, NewOrder, Order,
+    OrderStatus, RevocationRequest,
 };
 use rcgen::{CertificateParams, DistinguishedName, KeyPair};
 use tracing::debug;
@@ -22,6 +22,43 @@ use crate::{
 };
 
 use super::TokenManager;
+
+/// Error thet ACME client returns
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error("Unexpected authorization status: {0:?}")]
+    UnexpectedAuthorizationStatus(AuthorizationStatus),
+    #[error("Unexpected order status: {0:?}")]
+    UnexpectedOrderStatus(OrderStatus),
+    #[error("Unable to set challenge token: {0}")]
+    UnableToSetChallengeToken(anyhow::Error),
+    #[error("Unable to verify challenge token: {0}")]
+    UnableToVerifyChallengeToken(anyhow::Error),
+    #[error("Unable to create order: {0}")]
+    UnableToCreateOrder(AcmeError),
+    #[error("Unable to get authorizations: {0}")]
+    UnableToGetAuthorizations(AcmeError),
+    #[error("Unable to set challenge as ready: {0}")]
+    UnableToSetChallengeReady(AcmeError),
+    #[error("Unable to finalize order: {0}")]
+    UnableToFinalizeOrder(AcmeError),
+    #[error("Unable to get certificate: {0}")]
+    UnableToGetCertificate(AcmeError),
+    #[error("Unable to generate certificate params: {0}")]
+    UnableToGenerateCertificateParams(rcgen::Error),
+    #[error("Unable to generate private key: {0}")]
+    UnableToGeneratePrivateKey(rcgen::Error),
+    #[error("Unable to parse private key: {0}")]
+    UnableToParsePrivateKey(rcgen::Error),
+    #[error("Unable to create CSR: {0}")]
+    UnableToCreateCSR(rcgen::Error),
+    #[error("No challenge found: {0:?}")]
+    NoChallengeFound(ChallengeType),
+    #[error("Order unable to reach status {0:?}: {1}")]
+    OrderUnableToReachStatus(OrderStatus, anyhow::Error),
+    #[error(transparent)]
+    Generic(#[from] anyhow::Error),
+}
 
 /// Certificate and private key pair
 pub struct Cert {
@@ -120,7 +157,7 @@ impl ClientBuilder {
     pub async fn create_account(
         mut self,
         contact: &str,
-    ) -> Result<(Self, AccountCredentials), Error> {
+    ) -> Result<(Self, AccountCredentials), AcmeError> {
         let (account, creds) = Account::create_with_http(
             &NewAccount {
                 contact: &[contact],
@@ -131,21 +168,22 @@ impl ClientBuilder {
             None,
             Box::new(HttpClient::new(self.insecure_tls)),
         )
-        .await
-        .context("unable to create account")?;
+        .await?;
 
         self.account = Some(account);
         Ok((self, creds))
     }
 
     /// Restore the account from the provided credentials
-    pub async fn load_account(mut self, credentials: AccountCredentials) -> Result<Self, Error> {
+    pub async fn load_account(
+        mut self,
+        credentials: AccountCredentials,
+    ) -> Result<Self, AcmeError> {
         let account = Account::from_credentials_and_http(
             credentials,
             Box::new(HttpClient::new(self.insecure_tls)),
         )
-        .await
-        .context("unable to restore account from credentials")?;
+        .await?;
 
         self.account = Some(account);
         Ok(self)
@@ -209,19 +247,19 @@ impl Client {
             .account
             .new_order(&NewOrder { identifiers: &ids })
             .await
-            .context("unable to create ACME order")?;
+            .map_err(Error::UnableToCreateOrder)?;
 
         let status = order.state().status;
 
         if ![OrderStatus::Pending, OrderStatus::Ready].contains(&status) {
-            return Err(anyhow!("Order status is not expected: {status:?}",));
+            return Err(Error::UnexpectedOrderStatus(status));
         }
 
         Ok(order)
     }
 
     /// Poll the token manager to verify if the token was correctly set
-    async fn poll_token(&self, id: &str, token: &str) -> Result<(), Error> {
+    async fn poll_token(&self, id: &str, token: &str) -> Result<(), anyhow::Error> {
         retry_async! {
             async {
                 self.token_manager
@@ -234,7 +272,11 @@ impl Client {
     }
 
     /// Poll the order with increasing intervals until it reaches some expected state
-    async fn poll_order(&self, order: &mut Order, expect: OrderStatus) -> Result<(), Error> {
+    async fn poll_order(
+        &self,
+        order: &mut Order,
+        expect: OrderStatus,
+    ) -> Result<(), anyhow::Error> {
         retry_async! {
             async {
                 match order.refresh().await {
@@ -270,7 +312,7 @@ impl Client {
         let authorizations = order
             .authorizations()
             .await
-            .context("unable to get ACME authorizations from order")?;
+            .map_err(Error::UnableToGetAuthorizations)?;
 
         let mut challenges = vec![];
         for authz in authorizations {
@@ -284,10 +326,7 @@ impl Client {
                 }
                 AuthorizationStatus::Pending => {}
                 _ => {
-                    return Err(anyhow!(
-                        "unexpected authorization status: {:?}",
-                        authz.status
-                    ));
+                    return Err(Error::UnexpectedAuthorizationStatus(authz.status));
                 }
             }
 
@@ -295,7 +334,7 @@ impl Client {
                 .challenges
                 .iter()
                 .find(|c| c.r#type == self.opts.challenge)
-                .ok_or_else(|| anyhow!("no challenge with type {:?} found", self.opts.challenge))?;
+                .ok_or_else(|| Error::NoChallengeFound(self.opts.challenge.clone()))?;
 
             let token = order.key_authorization(challenge).dns_value();
 
@@ -303,7 +342,7 @@ impl Client {
             self.token_manager
                 .set(&id, &token)
                 .await
-                .context("unable to set challenge token")?;
+                .map_err(Error::UnableToSetChallengeToken)?;
 
             debug!("ACME: token '{token}' for challenge id '{id}' set");
             challenges.push((id, token, challenge.url.clone()));
@@ -313,14 +352,14 @@ impl Client {
         for (id, token, url) in &challenges {
             self.poll_token(id, token)
                 .await
-                .context("unable to verify that the token is set")?;
+                .map_err(Error::UnableToVerifyChallengeToken)?;
 
             debug!("ACME: token '{token}' for challenge id '{id}' verified, marking it as ready");
 
             order
                 .set_challenge_ready(url)
                 .await
-                .context("unable to set challenge as ready")?;
+                .map_err(Error::UnableToSetChallengeReady)?;
         }
 
         Ok(challenges.into_iter().map(|x| x.0).collect())
@@ -371,10 +410,7 @@ impl Client {
             .collect::<Vec<_>>();
 
         // Prepare the order
-        let mut order = self
-            .prepare_order(ids)
-            .await
-            .context("unable to prepare ACME order")?;
+        let mut order = self.prepare_order(ids).await?;
 
         debug!(
             "ACME: Order for names [{}] obtained (status: '{:?}')",
@@ -383,10 +419,7 @@ impl Client {
         );
 
         // Process authorizations and fulfill their challenges
-        let auth_ids = self
-            .process_authorizations(&mut order)
-            .await
-            .context("unable to process authorizations")?;
+        let auth_ids = self.process_authorizations(&mut order).await?;
 
         debug!("ACME: Authorizations processed");
 
@@ -394,7 +427,7 @@ impl Client {
         if order.state().status != OrderStatus::Ready {
             self.poll_order(&mut order, OrderStatus::Ready)
                 .await
-                .context("order is unable to reach 'Ready' status")?;
+                .map_err(|e| Error::OrderUnableToReachStatus(OrderStatus::Ready, e))?;
         }
 
         debug!("ACME: Order has 'Ready' status");
@@ -402,30 +435,33 @@ impl Client {
         // Prepare the signing request
         debug!("ACME: Creating CSR with SANs: {:?}", names);
 
-        let mut params = CertificateParams::new(names.clone())?;
+        let mut params = CertificateParams::new(names.clone())
+            .map_err(Error::UnableToGenerateCertificateParams)?;
         params.distinguished_name = DistinguishedName::new();
 
         // Parse or create the private key
         let key_pair = if let Some(v) = private_key {
             KeyPair::from_pem(&String::from_utf8_lossy(&v))
-                .context("unable to parse private key")?
+                .map_err(Error::UnableToParsePrivateKey)?
         } else {
-            KeyPair::generate().context("unable to generate private key")?
+            KeyPair::generate().map_err(Error::UnableToGeneratePrivateKey)?
         };
 
-        let csr = params.serialize_request(&key_pair)?;
+        let csr = params
+            .serialize_request(&key_pair)
+            .map_err(Error::UnableToCreateCSR)?;
 
         // Issue the certificate
         debug!("ACME: Finalizing order");
         order
             .finalize(csr.der())
             .await
-            .context("unable to finalize order")?;
+            .map_err(Error::UnableToFinalizeOrder)?;
 
         // Poll until Valid or timeout
         self.poll_order(&mut order, OrderStatus::Valid)
             .await
-            .context("order unable to reach Valid state")?;
+            .map_err(|e| Error::OrderUnableToReachStatus(OrderStatus::Valid, e))?;
 
         debug!("ACME: Order is Valid");
 
@@ -433,7 +469,8 @@ impl Client {
         let cert = order
             .certificate()
             .await
-            .context("unable to retrieve the certificate")?
+            .map_err(Error::UnableToGetCertificate)?
+            // This should really never happen because we make sure order is Valid
             .ok_or_else(|| anyhow!("certificate not found"))?;
 
         Ok((
@@ -446,11 +483,8 @@ impl Client {
     }
 
     /// Revokes the certificate according to the provided request
-    pub async fn revoke(&self, req: RevocationRequest<'_>) -> Result<(), Error> {
-        self.account
-            .revoke(&req)
-            .await
-            .context("unable to revoke the certificate")
+    pub async fn revoke(&self, req: RevocationRequest<'_>) -> Result<(), AcmeError> {
+        self.account.revoke(&req).await
     }
 }
 
