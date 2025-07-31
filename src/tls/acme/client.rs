@@ -72,7 +72,7 @@ impl Error {
         };
 
         if let AcmeError::Api(v) = acme_error {
-            return v.r#type.as_ref().map(|x| x == "rateLimited") == Some(true);
+            return v.r#type.as_deref() == Some("rateLimited");
         }
 
         false
