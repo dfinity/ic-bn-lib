@@ -60,6 +60,25 @@ pub enum Error {
     Generic(#[from] anyhow::Error),
 }
 
+impl Error {
+    pub fn rate_limited(&self) -> bool {
+        let acme_error = match self {
+            Self::UnableToCreateOrder(v) => v,
+            Self::UnableToGetAuthorizations(v) => v,
+            Self::UnableToSetChallengeReady(v) => v,
+            Self::UnableToFinalizeOrder(v) => v,
+            Self::UnableToGetCertificate(v) => v,
+            _ => return false,
+        };
+
+        if let AcmeError::Api(v) = acme_error {
+            return v.r#type.as_ref().map(|x| x == "rateLimited") == Some(true);
+        }
+
+        false
+    }
+}
+
 /// Certificate and private key pair
 pub struct Cert {
     pub cert: Vec<u8>,
