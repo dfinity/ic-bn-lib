@@ -8,7 +8,6 @@ use std::{
 };
 
 use ahash::RandomState;
-use anyhow::anyhow;
 use async_trait::async_trait;
 use http::uri::Scheme;
 use http_body::Body;
@@ -110,10 +109,7 @@ where
     R: CloneableHyperDnsResolver,
 {
     async fn execute(&self, req: http::Request<B>) -> Result<http::Response<Incoming>, Error> {
-        self.cli
-            .request(req)
-            .await
-            .map_err(|e| Error::Generic(anyhow!("error executing HTTP request: {e:#}")))
+        self.cli.request(req).await.map_err(Error::HyperError)
     }
 }
 
