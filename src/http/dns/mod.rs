@@ -13,8 +13,9 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use fqdn::FQDN;
+use candid::Principal;
 use hickory_proto::rr::RecordType;
 use hickory_resolver::{
     TokioResolver,
@@ -25,9 +26,13 @@ use hickory_resolver::{
     name_server::TokioConnectionProvider,
 };
 use hyper_util::client::legacy::connect::dns::Name as HyperName;
+use ic_agent::Agent;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use strum::EnumString;
+use tokio_util::sync::CancellationToken;
 use tower::Service;
+
+use crate::{principal, tasks::Run};
 
 use super::Error;
 
@@ -307,20 +312,21 @@ impl HyperDnsResolver for StaticResolver {}
 impl CloneableHyperDnsResolver for StaticResolver {}
 
 impl StaticResolver {
-    pub fn new(items: impl IntoIterator<Item = (FQDN, Vec<IpAddr>)>) -> Result<Self, Error> {
-        let items = items.into_iter().map(|x| (x.0.to_string(), x.1));
+    pub fn new(items: impl IntoIterator<Item = (String, Vec<IpAddr>)>) -> Self {
+        Self(Arc::new(BTreeMap::from_iter(items)))
+    }
 
-        Ok(Self(Arc::new(BTreeMap::from_iter(items))))
+    pub fn get_addrs(&self, name: &str) -> Vec<IpAddr> {
+        self.0.get(name).cloned().unwrap_or(vec![])
     }
 }
 
 /// Implement resolving for Reqwest using Hickory
 impl Resolve for StaticResolver {
     fn resolve(&self, name: Name) -> Resolving {
-        let map = self.0.clone();
+        let addrs = self.get_addrs(name.as_str());
 
         Box::pin(async move {
-            let addrs = map.get(name.as_str()).cloned().unwrap_or(vec![]);
             Ok(Box::new(SocketAddrs {
                 iter: Box::new(addrs.into_iter()),
             }) as Addrs)
@@ -340,14 +346,104 @@ impl Service<HyperName> for StaticResolver {
     }
 
     fn call(&mut self, name: HyperName) -> Self::Future {
-        let map = self.0.clone();
+        let addrs = self.get_addrs(name.as_str());
 
         Box::pin(async move {
-            let addrs = map.get(name.as_str()).cloned().unwrap_or(vec![]);
             Ok(SocketAddrs {
                 iter: Box::new(addrs.into_iter()),
             })
         })
+    }
+}
+
+/// Resolver that resolves the API BN IPs using the registry
+#[derive(Debug, Clone)]
+pub struct ApiBnResolver {
+    agent: Agent,
+    subnet: Principal,
+    resolver: Arc<ArcSwap<StaticResolver>>,
+}
+impl CloneableDnsResolver for ApiBnResolver {}
+impl HyperDnsResolver for ApiBnResolver {}
+impl CloneableHyperDnsResolver for ApiBnResolver {}
+
+impl ApiBnResolver {
+    pub fn new(agent: Agent) -> Result<Self, Error> {
+        let resolver = Arc::new(ArcSwap::new(Arc::new(StaticResolver::new(vec![]))));
+        let subnet = principal!("tdb26-jop6k-aogll-7ltgs-eruif-6kk7m-qpktf-gdiqx-mxtrf-vb5e6-eqe");
+
+        Ok(Self {
+            agent,
+            subnet,
+            resolver,
+        })
+    }
+
+    /// Gets a list of API BN domains and their IP addresses from the registry
+    async fn get_api_bns(&self) -> Result<Vec<(String, Vec<IpAddr>)>, Error> {
+        let api_bns = self
+            .agent
+            .fetch_api_boundary_nodes_by_subnet_id(self.subnet)
+            .await
+            .context("unable to get API BNs from IC")?;
+
+        let mut r = Vec::with_capacity(api_bns.len());
+        for n in api_bns {
+            let ipv6 = IpAddr::from_str(&n.ipv6_address)
+                .context(format!("unable to parse IPv6 address for {}", n.domain))?;
+            let mut addrs = vec![ipv6];
+
+            // See if there's an IPv4 too
+            if let Some(v) = n.ipv4_address {
+                let ipv4 = IpAddr::from_str(&v)
+                    .context(format!("unable to parse IPv4 address for {}", n.domain))?;
+                addrs.push(ipv4);
+            }
+
+            r.push((n.domain, addrs))
+        }
+
+        Ok(r)
+    }
+}
+
+/// Implement resolving for Reqwest using Hickory
+impl Resolve for ApiBnResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        self.resolver.load_full().resolve(name)
+    }
+}
+
+/// Implement resolving for Hyper
+impl Service<HyperName> for ApiBnResolver {
+    type Response = SocketAddrs;
+    type Error = Error;
+    #[allow(clippy::type_complexity)]
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut task::Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, name: HyperName) -> Self::Future {
+        let addrs = self.resolver.load_full().get_addrs(name.as_str());
+
+        Box::pin(async move {
+            Ok(SocketAddrs {
+                iter: Box::new(addrs.into_iter()),
+            })
+        })
+    }
+}
+
+#[async_trait]
+impl Run for ApiBnResolver {
+    async fn run(&self, _token: CancellationToken) -> Result<(), anyhow::Error> {
+        let api_bns = self.get_api_bns().await?;
+        let resolver = StaticResolver::new(api_bns);
+        self.resolver.store(Arc::new(resolver));
+
+        Ok(())
     }
 }
 
