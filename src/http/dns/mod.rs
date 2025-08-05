@@ -2,6 +2,7 @@ pub mod cli;
 
 use core::task;
 use std::{
+    collections::BTreeMap,
     fmt::Debug,
     net::{IpAddr, SocketAddr},
     pin::Pin,
@@ -13,6 +14,7 @@ use std::{
 
 use anyhow::{Context, anyhow};
 use async_trait::async_trait;
+use fqdn::FQDN;
 use hickory_proto::rr::RecordType;
 use hickory_resolver::{
     TokioResolver,
@@ -20,7 +22,6 @@ use hickory_resolver::{
         CLOUDFLARE_IPS, LookupIpStrategy, NameServerConfigGroup, ResolveHosts, ResolverConfig,
         ResolverOpts,
     },
-    lookup_ip::LookupIpIntoIter,
     name_server::TokioConnectionProvider,
 };
 use hyper_util::client::legacy::connect::dns::Name as HyperName;
@@ -176,7 +177,7 @@ impl Default for Resolver {
 }
 
 pub struct SocketAddrs {
-    iter: LookupIpIntoIter,
+    iter: Box<dyn Iterator<Item = IpAddr> + Send>,
 }
 
 impl Iterator for SocketAddrs {
@@ -195,7 +196,7 @@ impl Resolve for Resolver {
         Box::pin(async move {
             let lookup = resolver.0.lookup_ip(name.as_str()).await?;
             let addrs: Addrs = Box::new(SocketAddrs {
-                iter: lookup.into_iter(),
+                iter: Box::new(lookup.into_iter()),
             });
 
             Ok(addrs)
@@ -248,7 +249,9 @@ impl Service<HyperName> for Resolver {
                 .map_err(|e| Error::DnsError(e.to_string()))?;
             let addresses = response.into_iter();
 
-            Ok(SocketAddrs { iter: addresses })
+            Ok(SocketAddrs {
+                iter: Box::new(addresses),
+            })
         })
     }
 }
@@ -293,6 +296,58 @@ impl Service<HyperName> for FixedResolver {
 
     fn call(&mut self, _name: HyperName) -> Self::Future {
         self.0.call(self.2.clone())
+    }
+}
+
+/// Resolver that resolves from the provided mappings
+#[derive(Debug, Clone)]
+pub struct StaticResolver(Arc<BTreeMap<String, Vec<IpAddr>>>);
+impl CloneableDnsResolver for StaticResolver {}
+impl HyperDnsResolver for StaticResolver {}
+impl CloneableHyperDnsResolver for StaticResolver {}
+
+impl StaticResolver {
+    pub fn new(items: impl IntoIterator<Item = (FQDN, Vec<IpAddr>)>) -> Result<Self, Error> {
+        let items = items.into_iter().map(|x| (x.0.to_string(), x.1));
+
+        Ok(Self(Arc::new(BTreeMap::from_iter(items))))
+    }
+}
+
+/// Implement resolving for Reqwest using Hickory
+impl Resolve for StaticResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let map = self.0.clone();
+
+        Box::pin(async move {
+            let addrs = map.get(name.as_str()).cloned().unwrap_or(vec![]);
+            Ok(Box::new(SocketAddrs {
+                iter: Box::new(addrs.into_iter()),
+            }) as Addrs)
+        })
+    }
+}
+
+/// Implement resolving for Hyper
+impl Service<HyperName> for StaticResolver {
+    type Response = SocketAddrs;
+    type Error = Error;
+    #[allow(clippy::type_complexity)]
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut task::Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, name: HyperName) -> Self::Future {
+        let map = self.0.clone();
+
+        Box::pin(async move {
+            let addrs = map.get(name.as_str()).cloned().unwrap_or(vec![]);
+            Ok(SocketAddrs {
+                iter: Box::new(addrs.into_iter()),
+            })
+        })
     }
 }
 
