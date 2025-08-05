@@ -193,7 +193,7 @@ impl Iterator for SocketAddrs {
     }
 }
 
-// Implement resolving for Reqwest using Hickory
+// Implement resolving for Reqwest
 impl Resolve for Resolver {
     fn resolve(&self, name: Name) -> Resolving {
         let resolver = self.clone();
@@ -278,7 +278,7 @@ impl FixedResolver {
     }
 }
 
-/// Implement resolving for Reqwest using Hickory
+/// Implement resolving for Reqwest
 impl Resolve for FixedResolver {
     fn resolve(&self, _name: Name) -> Resolving {
         // Name cannot be cloned so we have to parse it each time.
@@ -321,7 +321,7 @@ impl StaticResolver {
     }
 }
 
-/// Implement resolving for Reqwest using Hickory
+/// Implement resolving for Reqwest
 impl Resolve for StaticResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let addrs = self.get_addrs(name.as_str());
@@ -407,7 +407,7 @@ impl ApiBnResolver {
     }
 }
 
-/// Implement resolving for Reqwest using Hickory
+/// Implement resolving for Reqwest
 impl Resolve for ApiBnResolver {
     fn resolve(&self, name: Name) -> Resolving {
         self.resolver.load_full().resolve(name)
