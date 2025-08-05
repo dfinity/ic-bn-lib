@@ -64,6 +64,8 @@ pub enum Error {
     DnsError(String),
     #[error("Generic HTTP failure: {0}")]
     HttpError(#[from] http::Error),
+    #[error("{0}")]
+    HyperError(#[from] hyper_util::client::legacy::Error),
     #[error(transparent)]
     Generic(#[from] anyhow::Error),
 }
