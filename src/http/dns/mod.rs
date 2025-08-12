@@ -400,7 +400,7 @@ impl ApiBnResolver {
                 addrs.push(ipv4);
             }
 
-            r.push((n.domain, addrs))
+            r.push((n.domain, addrs));
         }
 
         Ok(r)
