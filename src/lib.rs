@@ -24,6 +24,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use tokio::io::AsyncWriteExt;
 
+pub use ic_agent;
 pub use prometheus;
 pub use reqwest;
 pub use rustls;

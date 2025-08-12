@@ -72,6 +72,10 @@ hyper-rustls = { version = "0.27.5", optional = true, default-features = false, 
     "webpki-roots",
 ] }
 hyper-util = { version = "0.1.10", features = ["full"] }
+ic-agent = { version = "0.40.0", features = [
+    "ring",
+    "_internal_dynamic-routing",
+] }
 indoc = "2.0.6"
 instant-acme = { version = "0.7.2", default-features = false, features = [
     "ring",
