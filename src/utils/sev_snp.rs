@@ -7,11 +7,15 @@ use http::StatusCode;
 use sev::firmware::guest::Firmware;
 
 #[derive(Clone)]
-pub struct SevSnpState(Arc<Mutex<Firmware>>);
+pub struct SevSnpState {
+    fw: Arc<Mutex<Firmware>>,
+}
 
 impl SevSnpState {
-    pub fn new() -> Result<Self, Error> {
-        Ok(Self(Arc::new(Mutex::new(Firmware::open()?))))
+    pub fn new(cache_ttl: Duration) -> Result<Self, Error> {
+        Ok(Self {
+            fw: Arc::new(Mutex::new(Firmware::open()?)),
+        })
     }
 }
 
@@ -29,7 +33,7 @@ pub async fn handler(
     let data: [u8; 64] = body.as_ref().try_into().unwrap();
 
     let report = state
-        .0
+        .fw
         .lock()
         .unwrap()
         .get_report(None, Some(data), Some(1))
