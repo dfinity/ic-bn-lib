@@ -65,7 +65,9 @@ pub enum Error {
     #[error("Generic HTTP failure: {0}")]
     HttpError(#[from] http::Error),
     #[error("{0}")]
-    HyperError(#[from] hyper_util::client::legacy::Error),
+    HyperClientError(#[from] hyper_util::client::legacy::Error),
+    #[error("{0}")]
+    HyperError(#[from] hyper::Error),
     #[error(transparent)]
     Generic(#[from] anyhow::Error),
 }
