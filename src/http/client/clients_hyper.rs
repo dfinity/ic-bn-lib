@@ -9,10 +9,9 @@ use std::{
 
 use ahash::RandomState;
 use async_trait::async_trait;
-use bytes::Bytes;
+use axum::body::Body as AxumBody;
 use http::{Request, Response, uri::Scheme};
 use http_body::Body;
-use http_body_util::{BodyExt, combinators::UnsyncBoxBody};
 use hyper_rustls::{FixedServerNameResolver, HttpsConnector};
 use hyper_util::{
     client::legacy::{Client as ClientHyper, connect::HttpConnector},
@@ -26,8 +25,6 @@ use scopeguard::defer;
 use crate::http::dns::{CloneableHyperDnsResolver, Resolver};
 
 use super::{ClientHttp, Error, Metrics, Options};
-
-pub type BoxedBody = UnsyncBoxBody<Bytes, Error>;
 
 /// Hyper-based client with a generic body and resolver
 #[derive(Debug, Clone)]
@@ -111,16 +108,15 @@ where
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     R: CloneableHyperDnsResolver,
 {
-    async fn execute(&self, req: Request<B>) -> Result<Response<BoxedBody>, Error> {
+    async fn execute(&self, req: Request<B>) -> Result<Response<AxumBody>, Error> {
         let resp = self
             .cli
             .request(req)
             .await
             .map_err(Error::HyperClientError)?;
+
         let (parts, body) = resp.into_parts();
-        let body = UnsyncBoxBody::new(body)
-            .map_err(Error::HyperError)
-            .boxed_unsync();
+        let body = AxumBody::new(body);
         Ok(Response::from_parts(parts, body))
     }
 }
@@ -172,7 +168,7 @@ where
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     R: CloneableHyperDnsResolver,
 {
-    async fn execute(&self, req: http::Request<B>) -> Result<Response<BoxedBody>, Error> {
+    async fn execute(&self, req: http::Request<B>) -> Result<Response<AxumBody>, Error> {
         let uri = req.uri();
         let host = uri.host().unwrap_or_default();
         let port = uri.port_u16().unwrap_or_else(|| {

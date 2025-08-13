@@ -6,9 +6,8 @@ pub mod clients_reqwest;
 use std::{fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use bytes::Bytes;
+use axum::body::Body as AxumBody;
 use http::HeaderValue;
-use http_body_util::combinators::UnsyncBoxBody;
 use prometheus::{
     HistogramVec, IntCounterVec, IntGaugeVec, Registry, register_histogram_vec_with_registry,
     register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry,
@@ -26,7 +25,7 @@ pub trait Client: Send + Sync + fmt::Debug {
 
 /// Generic HTTP client trait that is using HTTP types
 #[async_trait]
-pub trait ClientHttp<B1, B2 = UnsyncBoxBody<Bytes, Error>>: Send + Sync + fmt::Debug {
+pub trait ClientHttp<B1, B2 = AxumBody>: Send + Sync + fmt::Debug {
     async fn execute(&self, req: http::Request<B1>) -> Result<http::Response<B2>, Error>;
 }
 
