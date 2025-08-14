@@ -9,9 +9,9 @@ use std::{
 
 use ahash::RandomState;
 use async_trait::async_trait;
-use http::uri::Scheme;
+use axum::body::Body as AxumBody;
+use http::{Request, Response, uri::Scheme};
 use http_body::Body;
-use hyper::body::Incoming;
 use hyper_rustls::{FixedServerNameResolver, HttpsConnector};
 use hyper_util::{
     client::legacy::{Client as ClientHyper, connect::HttpConnector},
@@ -108,8 +108,16 @@ where
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     R: CloneableHyperDnsResolver,
 {
-    async fn execute(&self, req: http::Request<B>) -> Result<http::Response<Incoming>, Error> {
-        self.cli.request(req).await.map_err(Error::HyperError)
+    async fn execute(&self, req: Request<B>) -> Result<Response<AxumBody>, Error> {
+        let resp = self
+            .cli
+            .request(req)
+            .await
+            .map_err(Error::HyperClientError)?;
+
+        let (parts, body) = resp.into_parts();
+        let body = AxumBody::new(body);
+        Ok(Response::from_parts(parts, body))
     }
 }
 
@@ -160,7 +168,7 @@ where
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     R: CloneableHyperDnsResolver,
 {
-    async fn execute(&self, req: http::Request<B>) -> Result<http::Response<Incoming>, Error> {
+    async fn execute(&self, req: http::Request<B>) -> Result<Response<AxumBody>, Error> {
         let uri = req.uri();
         let host = uri.host().unwrap_or_default();
         let port = uri.port_u16().unwrap_or_else(|| {

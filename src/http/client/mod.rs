@@ -6,8 +6,8 @@ pub mod clients_reqwest;
 use std::{fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use axum::body::Body as AxumBody;
 use http::HeaderValue;
-use hyper::body::Incoming;
 use prometheus::{
     HistogramVec, IntCounterVec, IntGaugeVec, Registry, register_histogram_vec_with_registry,
     register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry,
@@ -25,8 +25,8 @@ pub trait Client: Send + Sync + fmt::Debug {
 
 /// Generic HTTP client trait that is using HTTP types
 #[async_trait]
-pub trait ClientHttp<B>: Send + Sync + fmt::Debug {
-    async fn execute(&self, req: http::Request<B>) -> Result<http::Response<Incoming>, Error>;
+pub trait ClientHttp<B1, B2 = AxumBody>: Send + Sync + fmt::Debug {
+    async fn execute(&self, req: http::Request<B1>) -> Result<http::Response<B2>, Error>;
 }
 
 #[derive(Debug, Clone)]
