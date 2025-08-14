@@ -72,7 +72,7 @@ hyper-rustls = { version = "0.27.5", optional = true, default-features = false, 
     "webpki-roots",
 ] }
 hyper-util = { version = "0.1.10", features = ["full"] }
-ic-agent = { version = "0.40.0", features = [
+ic-agent = { git = "https://github.com/dfinity/agent-rs", rev = "f34acedb5539838ffdbd4cf49a0832303977293f", features = [
     "ring",
     "_internal_dynamic-routing",
 ] }
