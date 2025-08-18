@@ -369,7 +369,7 @@ impl Display for Addr {
             f,
             "{}",
             match self {
-                Self::Tcp(v) => v.to_string(),
+                Self::Tcp(v) => v.ip().to_canonical().to_string(),
                 Self::Unix(v) => v.to_string_lossy().to_string(),
             }
         )
