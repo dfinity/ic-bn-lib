@@ -7,9 +7,13 @@ use ahash::RandomState;
 use anyhow::Error;
 use axum::{extract::State, response::IntoResponse};
 use bytes::Bytes;
+use clap::Args;
 use http::StatusCode;
+use humantime::parse_duration;
 use moka::sync::{Cache, CacheBuilder};
 use sev::firmware::guest::Firmware;
+
+use crate::parse_size;
 
 #[derive(Clone)]
 pub struct SevSnpState {
@@ -19,6 +23,21 @@ pub struct SevSnpState {
 
 const fn weigh_entry(k: &Bytes, v: &Bytes) -> u32 {
     (k.len() + v.len()) as u32
+}
+
+#[derive(Args)]
+pub struct Cli {
+    /// Enable SEV-SNP measurement reporting
+    #[clap(env, long)]
+    pub sev_snp_enable: bool,
+
+    /// Cache TTL for SEV-SNP reports
+    #[clap(env, long, default_value = "30s", value_parser = parse_duration)]
+    pub sev_snp_cache_ttl: Duration,
+
+    /// Max cache size for SEV-SNP reports
+    #[clap(env, long, default_value = "10m", value_parser = parse_size)]
+    pub sev_snp_cache_size: u64,
 }
 
 impl SevSnpState {
