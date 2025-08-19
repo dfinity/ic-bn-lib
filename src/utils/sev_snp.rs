@@ -16,7 +16,7 @@ use sev::firmware::guest::Firmware;
 use crate::parse_size;
 
 #[derive(Args)]
-pub struct Cli {
+pub struct SevSnp {
     /// Enable SEV-SNP measurement reporting
     #[clap(env, long)]
     pub sev_snp_enable: bool,
