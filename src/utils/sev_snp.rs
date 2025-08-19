@@ -15,16 +15,6 @@ use sev::firmware::guest::Firmware;
 
 use crate::parse_size;
 
-#[derive(Clone)]
-pub struct SevSnpState {
-    fw: Arc<Mutex<Firmware>>,
-    cache: Cache<Bytes, Bytes, RandomState>,
-}
-
-const fn weigh_entry(k: &Bytes, v: &Bytes) -> u32 {
-    (k.len() + v.len()) as u32
-}
-
 #[derive(Args)]
 pub struct Cli {
     /// Enable SEV-SNP measurement reporting
@@ -38,6 +28,16 @@ pub struct Cli {
     /// Max cache size for SEV-SNP reports
     #[clap(env, long, default_value = "10m", value_parser = parse_size)]
     pub sev_snp_cache_size: u64,
+}
+
+#[derive(Clone)]
+pub struct SevSnpState {
+    fw: Arc<Mutex<Firmware>>,
+    cache: Cache<Bytes, Bytes, RandomState>,
+}
+
+const fn weigh_entry(k: &Bytes, v: &Bytes) -> u32 {
+    (k.len() + v.len()) as u32
 }
 
 impl SevSnpState {
