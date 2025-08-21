@@ -206,7 +206,7 @@ impl Default for Options {
     }
 }
 
-// TLS information about the connection
+/// TLS information about the connection
 #[derive(Clone, Debug)]
 pub struct TlsInfo {
     pub sni: Option<String>,
@@ -237,6 +237,7 @@ impl TryFrom<&ServerConnection> for TlsInfo {
     }
 }
 
+/// Connection information
 #[derive(Debug)]
 pub struct ConnInfo {
     pub id: Uuid,
@@ -251,7 +252,7 @@ pub struct ConnInfo {
 impl Default for ConnInfo {
     fn default() -> Self {
         Self {
-            id: Uuid::new_v4(),
+            id: Uuid::now_v7(),
             accepted_at: Instant::now(),
             local_addr: Addr::default(),
             remote_addr: Addr::default(),
@@ -272,6 +273,7 @@ impl ConnInfo {
     }
 }
 
+/// Connection listener
 pub enum Listener {
     Tcp(TcpListener),
     Unix(UnixListener),
@@ -286,6 +288,7 @@ impl Listener {
         })
     }
 
+    /// Accept the connection
     async fn accept(&self) -> Result<(Box<dyn AsyncReadWrite>, Addr), io::Error> {
         Ok(match self {
             Self::Tcp(v) => {
@@ -326,6 +329,7 @@ impl From<UnixListener> for Listener {
     }
 }
 
+/// Connection endpoint address
 #[derive(Debug, Clone)]
 pub enum Addr {
     Tcp(SocketAddr),
@@ -418,7 +422,7 @@ struct Conn {
 
 impl Display for Conn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Server {}: {}", self.addr, self.remote_addr)
+        write!(f, "[{}] <- [{}]", self.addr, self.remote_addr)
     }
 }
 
@@ -488,7 +492,7 @@ impl Conn {
             .context("TLS handshake failed")?;
 
             debug!(
-                "{}: handshake finished in {}ms (server: {:?}, proto: {:?}, cipher: {:?}, ALPN: {:?})",
+                "{}: handshake finished in {}ms (SNI: {:?}, proto: {:?}, cipher: {:?}, ALPN: {:?})",
                 self,
                 tls_info.handshake_dur.as_millis(),
                 tls_info.sni,
@@ -697,7 +701,7 @@ impl Conn {
                     match v {
                         RequestState::Start => {
                             let reqs = self.requests.fetch_add(1, Ordering::SeqCst) + 1;
-                            debug!("{self}: Request started, stopping idle timer (now: {reqs})");
+                            debug!("{self}: request started, stopping idle timer (now: {reqs})");
 
                             // Effectively disable the timer by setting it to 1 year into the future.
                             // TODO improve?
@@ -706,11 +710,11 @@ impl Conn {
 
                         RequestState::End => {
                             let reqs = self.requests.fetch_sub(1, Ordering::SeqCst) - 1;
-                            debug!("{self}: Request finished (now: {reqs})");
+                            debug!("{self}: request finished (now: {reqs})");
 
                             // Check if the number of outstanding requests is now zero
                             if reqs == 0 {
-                                debug!("{self}: No outstanding requests, starting timer");
+                                debug!("{self}: no outstanding requests, starting timer");
                                 // Enable the idle timer
                                 idle_timer.as_mut().reset(tokio::time::Instant::now() + self.options.idle_timeout);
                             }
@@ -846,6 +850,12 @@ pub struct Server {
     rustls_cfg: Option<Arc<rustls::ServerConfig>>,
 }
 
+impl Display for Server {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}]", self.addr)
+    }
+}
+
 impl Server {
     pub fn new(
         addr: Addr,
@@ -912,12 +922,12 @@ impl Server {
         self.tracker.spawn(async move {
             if let Err(e) = conn.handle(stream).await {
                 info!(
-                    "Server {}: {}: failed to handle connection: {e:#}",
-                    conn.addr, remote_addr
+                    "[{}] <- [{remote_addr}]: failed to handle connection: {e:#}",
+                    conn.addr
                 );
             }
 
-            debug!("Server {}: {}: connection finished", conn.addr, remote_addr);
+            debug!("[{}] <- [{remote_addr}]: connection finished", conn.addr);
         });
     }
 
@@ -926,11 +936,7 @@ impl Server {
         listener: Listener,
         token: CancellationToken,
     ) -> Result<(), Error> {
-        warn!(
-            "Server {}: running (TLS: {})",
-            self.addr,
-            self.rustls_cfg.is_some()
-        );
+        warn!("{self}: running (TLS: {})", self.rustls_cfg.is_some());
 
         loop {
             select! {
@@ -940,17 +946,17 @@ impl Server {
                     // Stop accepting new connections
                     drop(listener);
 
-                    warn!("Server {}: shutting down, waiting for the active connections to close for {}s", self.addr, self.options.grace_period.as_secs());
+                    warn!("{self}: shutting down, waiting for the active connections to close for {}s", self.options.grace_period.as_secs());
                     self.tracker.close();
 
                     select! {
                         () = sleep(self.options.grace_period + Duration::from_secs(5)) => {
-                            warn!("Server {}: connections didn't close in time, shutting down anyway", self.addr);
+                            warn!("{self}: connections didn't close in time, shutting down anyway");
                         },
                         () = self.tracker.wait() => {},
                     }
 
-                    warn!("Server {}: shut down", self.addr);
+                    warn!("{self}: shut down");
 
                     // Remove the socket
                     if let Addr::Unix(v) = &self.addr {
@@ -965,7 +971,7 @@ impl Server {
                     let (stream, remote_addr) = match v {
                         Ok(v) => v,
                         Err(e) => {
-                            warn!("Unable to accept connection: {e:#}");
+                            warn!("{self}: unable to accept connection: {e:#}");
                             // Wait few ms just in case that there's an overflown backlog
                             // so that we don't run into infinite error loop
                             sleep(Duration::from_millis(10)).await;
