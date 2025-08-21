@@ -2,7 +2,7 @@ use std::{
     fmt::{Debug, Display},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicU8, AtomicUsize, Ordering},
     },
     time::Instant,
 };
@@ -230,7 +230,7 @@ where
             .inc();
 
         let start = Instant::now();
-        let ok = Arc::new(AtomicBool::new(false));
+        let ok = Arc::new(AtomicU8::new(0));
         let ok_clone = ok.clone();
 
         // Record metrics under defer to make sure they're recorded in case of future cancellation
@@ -245,13 +245,16 @@ where
                 .requests
                 .with_label_values(&[
                     backend.name.as_str(),
-                    if ok_clone.load(Ordering::SeqCst) { "ok" } else { "fail" },
-                ])
+                    match ok_clone.load(Ordering::SeqCst) {
+                        1 => "ok",
+                        2 => "fail",
+                        _ => "cancel"
+                    }])
                 .inc();
         }
 
         let res = self.executor.execute(&backend.backend, request).await;
-        ok.store(res.is_ok(), Ordering::SeqCst);
+        ok.store(if res.is_ok() { 1 } else { 2 }, Ordering::SeqCst);
         res
     }
 }
