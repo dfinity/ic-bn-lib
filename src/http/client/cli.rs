@@ -3,6 +3,8 @@ use std::time::Duration;
 use clap::Args;
 use humantime::parse_duration;
 
+use crate::http::client::HttpVersion;
+
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
 pub struct HttpClient {
     /// Timeout for HTTP connection phase
@@ -34,9 +36,10 @@ pub struct HttpClient {
     #[clap(env, long, default_value = "5s", value_parser = parse_duration)]
     pub http_client_http2_keepalive_timeout: Duration,
 
-    /// HTTP2 Only. Disables HTTP/1.1
-    #[clap(env, long)]
-    pub http_client_http2_only: bool,
+    /// Which HTTP versions to use.
+    /// Can be "http1", "http2" or "all". Defaults to "all".
+    #[clap(env, long, default_value = "all")]
+    pub http_client_http_version: HttpVersion,
 
     /// Fixed name to use when checking TLS certificates, instead of the host name.
     #[clap(env, long)]
@@ -55,7 +58,7 @@ impl From<&HttpClient> for super::Options {
             http2_keepalive: Some(c.http_client_http2_keepalive),
             http2_keepalive_timeout: c.http_client_http2_keepalive_timeout,
             http2_keepalive_idle: false,
-            http2_only: c.http_client_http2_only,
+            http_version: c.http_client_http_version,
             user_agent: "".into(),
             tls_config: None,
             tls_fixed_name: c.http_client_tls_fixed_name.clone(),
