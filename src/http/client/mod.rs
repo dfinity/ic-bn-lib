@@ -13,6 +13,7 @@ use prometheus::{
     register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry,
 };
 use reqwest::{Request, Response};
+use strum::{Display, EnumString};
 
 use super::Error;
 
@@ -83,6 +84,14 @@ impl Metrics {
     }
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Display, EnumString)]
+#[strum(serialize_all = "snake_case")]
+pub enum HttpVersion {
+    Http1,
+    Http2,
+    All,
+}
+
 /// HTTP client options
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -95,7 +104,7 @@ pub struct Options {
     pub http2_keepalive: Option<Duration>,
     pub http2_keepalive_timeout: Duration,
     pub http2_keepalive_idle: bool,
-    pub http2_only: bool,
+    pub http_version: HttpVersion,
     pub user_agent: String,
     pub tls_config: Option<rustls::ClientConfig>,
     pub tls_fixed_name: Option<String>,
@@ -113,7 +122,7 @@ impl Default for Options {
             http2_keepalive: None,
             http2_keepalive_timeout: Duration::from_secs(30),
             http2_keepalive_idle: false,
-            http2_only: false,
+            http_version: HttpVersion::All,
             user_agent: "Crab".into(),
             tls_config: None,
             tls_fixed_name: None,

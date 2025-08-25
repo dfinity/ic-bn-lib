@@ -15,7 +15,7 @@ use reqwest::{Request, Response};
 use scopeguard::defer;
 use url::Url;
 
-use crate::http::dns::CloneableDnsResolver;
+use crate::http::{client::HttpVersion, dns::CloneableDnsResolver};
 
 use super::{Client, ClientStats, ClientWithStats, Error, Metrics, Options, Stats};
 
@@ -49,8 +49,14 @@ pub fn new<R: CloneableDnsResolver>(
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy();
 
-    if opts.http2_only {
-        client = client.http2_prior_knowledge();
+    match opts.http_version {
+        HttpVersion::Http1 => {
+            client = client.http1_only();
+        }
+        HttpVersion::Http2 => {
+            client = client.http2_prior_knowledge();
+        }
+        _ => {}
     }
 
     if let Some(v) = opts.pool_idle_max {

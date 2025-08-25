@@ -77,7 +77,7 @@ ic-agent = { git = "https://github.com/dfinity/agent-rs", rev = "f34acedb5539838
     "_internal_dynamic-routing",
 ] }
 indoc = "2.0.6"
-instant-acme = { version = "0.7.2", default-features = false, features = [
+instant-acme = { version = "0.8.2", default-features = false, features = [
     "ring",
     "hyper-rustls",
 ], optional = true }
@@ -162,4 +162,4 @@ required-features = ["vector"]
 
 [package.metadata.cargo-all-features]
 # Limit feature combinations to reduce test duration
-max_combination_size = 3
+max_combination_size = 2

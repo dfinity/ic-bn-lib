@@ -22,7 +22,10 @@ use prometheus::Registry;
 use rustls::pki_types::DnsName;
 use scopeguard::defer;
 
-use crate::http::dns::{CloneableHyperDnsResolver, Resolver};
+use crate::http::{
+    client::HttpVersion,
+    dns::{CloneableHyperDnsResolver, Resolver},
+};
 
 use super::{ClientHttp, Error, Metrics, Options};
 
@@ -78,13 +81,16 @@ where
             ))
         }
 
-        let https_conn = builder.enable_all_versions().wrap_connector(http_conn);
+        let https_conn = match opts.http_version {
+            HttpVersion::Http1 => builder.enable_http1().wrap_connector(http_conn),
+            HttpVersion::Http2 => builder.enable_http2().wrap_connector(http_conn),
+            HttpVersion::All => builder.enable_all_versions().wrap_connector(http_conn),
+        };
 
         let mut builder = ClientHyper::builder(TokioExecutor::new());
         builder
             .pool_max_idle_per_host(opts.pool_idle_max.unwrap_or(usize::MAX))
             .http2_adaptive_window(true)
-            .http2_only(opts.http2_only)
             .pool_idle_timeout(opts.pool_idle_timeout)
             .pool_timer(TokioTimer::new())
             .timer(TokioTimer::new())
