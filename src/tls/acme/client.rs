@@ -118,13 +118,13 @@ impl HttpClientTrait for HttpClient {
     fn request(
         &self,
         req: Request<BodyWrapper<Bytes>>,
-    ) -> Pin<Box<dyn Future<Output = Result<BytesResponse, instant_acme::Error>> + Send>> {
+    ) -> Pin<Box<dyn Future<Output = Result<BytesResponse, AcmeError>> + Send>> {
         let fut = self.0.request(req);
 
         Box::pin(async move {
             match fut.await {
                 Ok(rsp) => Ok(BytesResponse::from(rsp)),
-                Err(e) => Err(instant_acme::Error::Other(Box::new(e))),
+                Err(e) => Err(AcmeError::Other(Box::new(e))),
             }
         })
     }
