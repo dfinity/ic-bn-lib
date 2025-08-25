@@ -1,17 +1,16 @@
 use std::{pin::Pin, sync::Arc, time::Duration};
 
-use anyhow::{Context, anyhow};
+use anyhow::Context;
 use bytes::Bytes;
 use http::Request;
-use http_body_util::Full;
 use hyper_util::{
     client::legacy::{Client as HyperClient, connect::HttpConnector},
     rt::TokioExecutor,
 };
 use instant_acme::{
-    Account, AccountCredentials, AuthorizationStatus, BytesResponse, ChallengeType,
+    Account, AccountCredentials, AuthorizationStatus, BodyWrapper, BytesResponse, ChallengeType,
     Error as AcmeError, HttpClient as HttpClientTrait, Identifier, NewAccount, NewOrder, Order,
-    OrderStatus, RevocationRequest,
+    OrderStatus, RetryPolicy, RevocationRequest,
 };
 use rcgen::{CertificateParams, DistinguishedName, KeyPair};
 use tracing::debug;
@@ -54,8 +53,10 @@ pub enum Error {
     UnableToCreateCSR(rcgen::Error),
     #[error("No challenge found: {0:?}")]
     NoChallengeFound(ChallengeType),
-    #[error("Order unable to reach status {0:?}: {1}")]
-    OrderUnableToReachStatus(OrderStatus, anyhow::Error),
+    #[error("Unsupported identifier type: {0:?}")]
+    UnsupportedIdentifierType(Identifier),
+    #[error("Order unable to reach ready status: {0}")]
+    OrderUnableToReachReadyStatus(AcmeError),
     #[error(transparent)]
     Generic(#[from] anyhow::Error),
 }
@@ -85,7 +86,7 @@ pub struct Cert {
     pub key: Vec<u8>,
 }
 
-struct HttpClient(HyperClient<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>);
+struct HttpClient(HyperClient<hyper_rustls::HttpsConnector<HttpConnector>, BodyWrapper<Bytes>>);
 
 impl HttpClient {
     /// Create a new client
@@ -116,13 +117,14 @@ impl HttpClient {
 impl HttpClientTrait for HttpClient {
     fn request(
         &self,
-        req: Request<Full<Bytes>>,
+        req: Request<BodyWrapper<Bytes>>,
     ) -> Pin<Box<dyn Future<Output = Result<BytesResponse, instant_acme::Error>> + Send>> {
         let fut = self.0.request(req);
+
         Box::pin(async move {
             match fut.await {
                 Ok(rsp) => Ok(BytesResponse::from(rsp)),
-                Err(e) => Err(e.into()),
+                Err(e) => Err(instant_acme::Error::Other(Box::new(e))),
             }
         })
     }
@@ -177,17 +179,18 @@ impl ClientBuilder {
         mut self,
         contact: &str,
     ) -> Result<(Self, AccountCredentials), AcmeError> {
-        let (account, creds) = Account::create_with_http(
-            &NewAccount {
-                contact: &[contact],
-                terms_of_service_agreed: true,
-                only_return_existing: false,
-            },
-            &self.opts.url.to_string(),
-            None,
-            Box::new(HttpClient::new(self.insecure_tls)),
-        )
-        .await?;
+        let (account, creds) =
+            Account::builder_with_http(Box::new(HttpClient::new(self.insecure_tls)))
+                .create(
+                    &NewAccount {
+                        contact: &[contact],
+                        terms_of_service_agreed: true,
+                        only_return_existing: false,
+                    },
+                    self.opts.url.to_string(),
+                    None,
+                )
+                .await?;
 
         self.account = Some(account);
         Ok((self, creds))
@@ -198,11 +201,9 @@ impl ClientBuilder {
         mut self,
         credentials: AccountCredentials,
     ) -> Result<Self, AcmeError> {
-        let account = Account::from_credentials_and_http(
-            credentials,
-            Box::new(HttpClient::new(self.insecure_tls)),
-        )
-        .await?;
+        let account = Account::builder_with_http(Box::new(HttpClient::new(self.insecure_tls)))
+            .from_credentials(credentials)
+            .await?;
 
         self.account = Some(account);
         Ok(self)
@@ -264,7 +265,7 @@ impl Client {
 
         let mut order = self
             .account
-            .new_order(&NewOrder { identifiers: &ids })
+            .new_order(&NewOrder::new(&ids))
             .await
             .map_err(Error::UnableToCreateOrder)?;
 
@@ -290,56 +291,20 @@ impl Client {
         }
     }
 
-    /// Poll the order with increasing intervals until it reaches some expected state
-    async fn poll_order(
-        &self,
-        order: &mut Order,
-        expect: OrderStatus,
-    ) -> Result<(), anyhow::Error> {
-        retry_async! {
-            async {
-                match order.refresh().await {
-                    Ok(v) => {
-                        if v.status == expect {
-                            return Ok(());
-                        }
-
-                        if v.status == OrderStatus::Invalid {
-                            return Err(RetryError::Permanent(anyhow!(
-                                "Order status is 'Invalid'"
-                            )));
-                        }
-
-                        Err(RetryError::Transient(anyhow!(
-                            "Order status is '{:?}'",
-                            v.status
-                        )))
-                    }
-
-                    Err(e) => Err(RetryError::Transient(anyhow!(
-                        "Unable to get order state: {e:#}"
-                    ))),
-                }
-            },
-            self.opts.order_timeout
-        }
-    }
-
     /// Iterates over authorizations in the order and tries to fulfill them.
     /// Returns the list of IDs that are later used in the cleanup.
     async fn process_authorizations(&self, order: &mut Order) -> Result<Vec<String>, Error> {
-        let authorizations = order
-            .authorizations()
-            .await
-            .map_err(Error::UnableToGetAuthorizations)?;
+        let mut authorizations = order.authorizations();
 
-        let mut challenges = vec![];
-        for authz in authorizations {
+        let mut ids = vec![];
+        while let Some(authz) = authorizations.next().await {
+            let mut authz = authz.map_err(Error::UnableToGetAuthorizations)?;
+
             match authz.status {
                 AuthorizationStatus::Valid => {
                     debug!(
-                        "ACME: Authorization '{:?}' is already valid",
-                        authz.identifier
+                        "ACME: Authorization '{}' is already valid",
+                        authz.identifier()
                     );
                     continue;
                 }
@@ -349,39 +314,42 @@ impl Client {
                 }
             }
 
-            let challenge = authz
-                .challenges
-                .iter()
-                .find(|c| c.r#type == self.opts.challenge)
+            // Get the challenge
+            let mut challenge = authz
+                .challenge(self.opts.challenge.clone())
                 .ok_or_else(|| Error::NoChallengeFound(self.opts.challenge.clone()))?;
 
-            let token = order.key_authorization(challenge).dns_value();
+            // Get the identifier & token from the challenge
+            let identifier = challenge.identifier().identifier;
 
-            let Identifier::Dns(id) = authz.identifier;
+            let id = match identifier {
+                Identifier::Dns(v) => v.clone(),
+                _ => return Err(Error::UnsupportedIdentifierType(identifier.clone())),
+            };
+            let token = challenge.key_authorization().dns_value();
+
+            // Set id to the token
             self.token_manager
                 .set(&id, &token)
                 .await
                 .map_err(Error::UnableToSetChallengeToken)?;
 
-            debug!("ACME: token '{token}' for challenge id '{id}' set");
-            challenges.push((id, token, challenge.url.clone()));
-        }
-
-        // Verify that the tokens are set & mark challenges as ready
-        for (id, token, url) in &challenges {
-            self.poll_token(id, token)
+            // Verify that the token is correcly set
+            self.poll_token(&id, &token)
                 .await
                 .map_err(Error::UnableToVerifyChallengeToken)?;
 
-            debug!("ACME: token '{token}' for challenge id '{id}' verified, marking it as ready");
-
-            order
-                .set_challenge_ready(url)
+            // Set the challenge as ready
+            challenge
+                .set_ready()
                 .await
                 .map_err(Error::UnableToSetChallengeReady)?;
+
+            debug!("ACME: token '{token}' for challenge id '{id}' set");
+            ids.push(id);
         }
 
-        Ok(challenges.into_iter().map(|x| x.0).collect())
+        Ok(ids)
     }
 
     /// Cleans up the tokens after issuance
@@ -442,18 +410,20 @@ impl Client {
 
         debug!("ACME: Authorizations processed");
 
-        // Poll until Ready or timeout if it's not already in this status
-        if order.state().status != OrderStatus::Ready {
-            self.poll_order(&mut order, OrderStatus::Ready)
-                .await
-                .map_err(|e| Error::OrderUnableToReachStatus(OrderStatus::Ready, e))?;
-        }
+        let retry_policy = RetryPolicy::new().timeout(self.opts.order_timeout);
 
-        debug!("ACME: Order has 'Ready' status");
+        // Wait until the order reaches Ready state or becomes invalid
+        order
+            .poll_ready(&retry_policy)
+            .await
+            .map_err(Error::OrderUnableToReachReadyStatus)?;
+
+        debug!(
+            "ACME: Order reached 'Ready' status, creating CSR with SANs: {:?}",
+            names
+        );
 
         // Prepare the signing request
-        debug!("ACME: Creating CSR with SANs: {:?}", names);
-
         let mut params = CertificateParams::new(names.clone())
             .map_err(Error::UnableToGenerateCertificateParams)?;
         params.distinguished_name = DistinguishedName::new();
@@ -471,26 +441,22 @@ impl Client {
             .map_err(Error::UnableToCreateCSR)?;
 
         // Issue the certificate
-        debug!("ACME: Finalizing order");
+        debug!("ACME: Finalizing the order");
         order
-            .finalize(csr.der())
+            .finalize_csr(csr.der())
             .await
             .map_err(Error::UnableToFinalizeOrder)?;
 
-        // Poll until Valid or timeout
-        self.poll_order(&mut order, OrderStatus::Valid)
-            .await
-            .map_err(|e| Error::OrderUnableToReachStatus(OrderStatus::Valid, e))?;
+        debug!("ACME: Order is finalized, requesting the certificate");
 
-        debug!("ACME: Order is Valid");
-
-        // Retrieve the certificate
+        // Retrieve the certificate.
+        // It polls until the order is Valid, Invalid or times out.
         let cert = order
-            .certificate()
+            .poll_certificate(&retry_policy)
             .await
-            .map_err(Error::UnableToGetCertificate)?
-            // This should really never happen because we make sure order is Valid
-            .ok_or_else(|| anyhow!("certificate not found"))?;
+            .map_err(Error::UnableToGetCertificate)?;
+
+        debug!("ACME: Certificate obtained successfully");
 
         Ok((
             auth_ids,
