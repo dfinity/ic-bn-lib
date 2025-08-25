@@ -162,4 +162,4 @@ required-features = ["vector"]
 
 [package.metadata.cargo-all-features]
 # Limit feature combinations to reduce test duration
-max_combination_size = 3
+max_combination_size = 2
