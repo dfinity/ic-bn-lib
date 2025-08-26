@@ -374,7 +374,6 @@ impl ApiBnResolver {
     pub fn new(opts: Options, agent: Agent) -> Result<Self, Error> {
         let resolver_fallback = Resolver::new(opts);
         let resolver_static = Arc::new(ArcSwap::new(Arc::new(StaticResolver::new(vec![]))));
-        // Doesn't really matter it seems?
         let subnet = principal!("tdb26-jop6k-aogll-7ltgs-eruif-6kk7m-qpktf-gdiqx-mxtrf-vb5e6-eqe");
 
         Ok(Self {
@@ -440,12 +439,13 @@ impl Service<HyperName> for ApiBnResolver {
                 Some(v) => v,
                 None => {
                     // Look up using a fallback resolver if nothing was found in the static one
-                    let r = resolver_fallback
+                    resolver_fallback
                         .0
                         .lookup_ip(name.as_str())
                         .await
-                        .map_err(|e| Error::DnsError(e.to_string()))?;
-                    r.into_iter().collect()
+                        .map_err(|e| Error::DnsError(e.to_string()))?
+                        .into_iter()
+                        .collect()
                 }
             };
 
