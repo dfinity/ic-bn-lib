@@ -371,16 +371,16 @@ impl HyperDnsResolver for ApiBnResolver {}
 impl CloneableHyperDnsResolver for ApiBnResolver {}
 
 impl ApiBnResolver {
-    pub fn new(resolver_fallback: Resolver, agent: Agent) -> Result<Self, Error> {
+    pub fn new(resolver_fallback: Resolver, agent: Agent) -> Self {
         let resolver_static = Arc::new(ArcSwap::new(Arc::new(StaticResolver::new(vec![]))));
         let subnet = principal!("tdb26-jop6k-aogll-7ltgs-eruif-6kk7m-qpktf-gdiqx-mxtrf-vb5e6-eqe");
 
-        Ok(Self {
+        Self {
             agent,
             subnet,
             resolver_static,
             resolver_fallback,
-        })
+        }
     }
 
     /// Gets a list of API BN domains and their IP addresses from the registry
