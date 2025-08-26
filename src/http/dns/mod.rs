@@ -371,8 +371,7 @@ impl HyperDnsResolver for ApiBnResolver {}
 impl CloneableHyperDnsResolver for ApiBnResolver {}
 
 impl ApiBnResolver {
-    pub fn new(opts: Options, agent: Agent) -> Result<Self, Error> {
-        let resolver_fallback = Resolver::new(opts);
+    pub fn new(resolver_fallback: Resolver, agent: Agent) -> Result<Self, Error> {
         let resolver_static = Arc::new(ArcSwap::new(Arc::new(StaticResolver::new(vec![]))));
         let subnet = principal!("tdb26-jop6k-aogll-7ltgs-eruif-6kk7m-qpktf-gdiqx-mxtrf-vb5e6-eqe");
 
