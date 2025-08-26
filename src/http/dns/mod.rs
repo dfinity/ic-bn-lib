@@ -415,7 +415,28 @@ impl ApiBnResolver {
 /// Implement resolving for Reqwest
 impl Resolve for ApiBnResolver {
     fn resolve(&self, name: Name) -> Resolving {
-        self.resolver_static.load_full().resolve(name)
+        let api_bns = self.resolver_static.load_full().lookup(name.as_str());
+        let resolver_fallback = self.resolver_fallback.clone();
+
+        Box::pin(async move {
+            let addrs = match api_bns {
+                Some(v) => v,
+                None => {
+                    // Look up using a fallback resolver if nothing was found in the static one
+                    resolver_fallback
+                        .0
+                        .lookup_ip(name.as_str())
+                        .await
+                        .map_err(|e| Error::DnsError(e.to_string()))?
+                        .into_iter()
+                        .collect()
+                }
+            };
+
+            Ok(Box::new(SocketAddrs {
+                iter: Box::new(addrs.into_iter()),
+            }) as Addrs)
+        })
     }
 }
 
