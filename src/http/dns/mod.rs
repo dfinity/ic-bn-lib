@@ -316,15 +316,15 @@ impl StaticResolver {
         Self(Arc::new(BTreeMap::from_iter(items)))
     }
 
-    pub fn get_addrs(&self, name: &str) -> Vec<IpAddr> {
-        self.0.get(name).cloned().unwrap_or(vec![])
+    pub fn lookup(&self, name: &str) -> Option<Vec<IpAddr>> {
+        self.0.get(name).cloned()
     }
 }
 
 /// Implement resolving for Reqwest
 impl Resolve for StaticResolver {
     fn resolve(&self, name: Name) -> Resolving {
-        let addrs = self.get_addrs(name.as_str());
+        let addrs = self.lookup(name.as_str()).unwrap_or_default();
 
         Box::pin(async move {
             Ok(Box::new(SocketAddrs {
@@ -346,7 +346,7 @@ impl Service<HyperName> for StaticResolver {
     }
 
     fn call(&mut self, name: HyperName) -> Self::Future {
-        let addrs = self.get_addrs(name.as_str());
+        let addrs = self.lookup(name.as_str()).unwrap_or_default();
 
         Box::pin(async move {
             Ok(SocketAddrs {
@@ -356,26 +356,32 @@ impl Service<HyperName> for StaticResolver {
     }
 }
 
-/// Resolver that resolves the API BN IPs using the registry
+/// Resolver that resolves the API BN IPs using the registry.
+/// If the registry doesn't contain the requested host - use the normal fallback
+/// DNS resolver to look it up
 #[derive(Debug, Clone)]
 pub struct ApiBnResolver {
     agent: Agent,
     subnet: Principal,
-    resolver: Arc<ArcSwap<StaticResolver>>,
+    resolver_static: Arc<ArcSwap<StaticResolver>>,
+    resolver_fallback: Resolver,
 }
 impl CloneableDnsResolver for ApiBnResolver {}
 impl HyperDnsResolver for ApiBnResolver {}
 impl CloneableHyperDnsResolver for ApiBnResolver {}
 
 impl ApiBnResolver {
-    pub fn new(agent: Agent) -> Result<Self, Error> {
-        let resolver = Arc::new(ArcSwap::new(Arc::new(StaticResolver::new(vec![]))));
+    pub fn new(opts: Options, agent: Agent) -> Result<Self, Error> {
+        let resolver_fallback = Resolver::new(opts);
+        let resolver_static = Arc::new(ArcSwap::new(Arc::new(StaticResolver::new(vec![]))));
+        // Doesn't really matter it seems?
         let subnet = principal!("tdb26-jop6k-aogll-7ltgs-eruif-6kk7m-qpktf-gdiqx-mxtrf-vb5e6-eqe");
 
         Ok(Self {
             agent,
             subnet,
-            resolver,
+            resolver_static,
+            resolver_fallback,
         })
     }
 
@@ -410,7 +416,7 @@ impl ApiBnResolver {
 /// Implement resolving for Reqwest
 impl Resolve for ApiBnResolver {
     fn resolve(&self, name: Name) -> Resolving {
-        self.resolver.load_full().resolve(name)
+        self.resolver_static.load_full().resolve(name)
     }
 }
 
@@ -426,9 +432,23 @@ impl Service<HyperName> for ApiBnResolver {
     }
 
     fn call(&mut self, name: HyperName) -> Self::Future {
-        let addrs = self.resolver.load_full().get_addrs(name.as_str());
+        let api_bns = self.resolver_static.load_full().lookup(name.as_str());
+        let resolver_fallback = self.resolver_fallback.clone();
 
         Box::pin(async move {
+            let addrs = match api_bns {
+                Some(v) => v,
+                None => {
+                    // Look up using a fallback resolver if nothing was found in the static one
+                    let r = resolver_fallback
+                        .0
+                        .lookup_ip(name.as_str())
+                        .await
+                        .map_err(|e| Error::DnsError(e.to_string()))?;
+                    r.into_iter().collect()
+                }
+            };
+
             Ok(SocketAddrs {
                 iter: Box::new(addrs.into_iter()),
             })
@@ -441,7 +461,7 @@ impl Run for ApiBnResolver {
     async fn run(&self, _token: CancellationToken) -> Result<(), anyhow::Error> {
         let api_bns = self.get_api_bns().await?;
         let resolver = StaticResolver::new(api_bns);
-        self.resolver.store(Arc::new(resolver));
+        self.resolver_static.store(Arc::new(resolver));
 
         Ok(())
     }
