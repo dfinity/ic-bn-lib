@@ -32,7 +32,7 @@ use crate::{
     tls::{
         acme::{
             AcmeUrl,
-            client::{Client, ClientBuilder},
+            client::{AcmeClient, Client, ClientBuilder},
         },
         extract_sans, pem_convert_to_rustls_single, sni_matches,
     },

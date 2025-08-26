@@ -1,6 +1,7 @@
 use std::{pin::Pin, sync::Arc, time::Duration};
 
 use anyhow::Context;
+use async_trait::async_trait;
 use bytes::Bytes;
 use http::Request;
 use hyper_util::{
@@ -250,6 +251,48 @@ impl ClientBuilder {
     }
 }
 
+/// ACME client trait to issue and revoke certificates
+#[async_trait]
+pub trait AcmeCertificateClient {
+    /// Issue the certificate with provided names and an optional private key.
+    async fn issue(&self, names: &Vec<String>, private_key: Option<Vec<u8>>)
+    -> Result<Cert, Error>;
+    /// Revoke the certificate according to the provided request
+    async fn revoke(&self, req: RevocationRequest<'_>) -> Result<(), AcmeError>;
+}
+
+#[async_trait]
+impl AcmeCertificateClient for Client {
+    /// Issue the certificate with provided names and an optional private key.
+    /// Key must be in PEM format, if it's not provided - new one will be generated.
+    async fn issue(
+        &self,
+        names: &Vec<String>,
+        private_key: Option<Vec<u8>>,
+    ) -> Result<Cert, Error> {
+        // Pre-cleanup: attempt to remove all existing tokens for the given names.
+        // This ensures a clean state before issuance begins.
+        // Treat cleanup failures as non-critical.
+        let _ = self.cleanup(names).await;
+
+        // Try to issue the certificate using the ACME protocol
+        let res = self.issue_inner(names, private_key).await;
+
+        debug!("ACME: Cleaning up");
+
+        // Post-cleanup
+        // Treat cleanup failures as non-critical.
+        let _ = self.cleanup(names).await;
+
+        res.map(|(_, cert)| cert)
+    }
+
+    /// Revokes the certificate according to the provided request
+    async fn revoke(&self, req: RevocationRequest<'_>) -> Result<(), AcmeError> {
+        self.account.revoke(&req).await
+    }
+}
+
 /// Generic ACME client that is using TokenManager to set a challenge token
 #[derive(derive_new::new)]
 pub struct Client {
@@ -361,30 +404,6 @@ impl Client {
         Ok(())
     }
 
-    /// Issue the certificate with provided names and an optional private key.
-    /// Key must be in PEM format, if it's not provided - new one will be generated.
-    pub async fn issue(
-        &self,
-        names: &Vec<String>,
-        private_key: Option<Vec<u8>>,
-    ) -> Result<Cert, Error> {
-        // Pre-cleanup: attempt to remove all existing tokens for the given names.
-        // This ensures a clean state before issuance begins.
-        // Treat cleanup failures as non-critical.
-        let _ = self.cleanup(names).await;
-
-        // Try to issue the certificate using the ACME protocol
-        let res = self.issue_inner(names, private_key).await;
-
-        debug!("ACME: Cleaning up");
-
-        // Post-cleanup
-        // Treat cleanup failures as non-critical.
-        let _ = self.cleanup(names).await;
-
-        res.map(|(_, cert)| cert)
-    }
-
     async fn issue_inner(
         &self,
         names: &Vec<String>,
@@ -465,11 +484,6 @@ impl Client {
                 key: key_pair.serialize_pem().as_bytes().to_vec(),
             },
         ))
-    }
-
-    /// Revokes the certificate according to the provided request
-    pub async fn revoke(&self, req: RevocationRequest<'_>) -> Result<(), AcmeError> {
-        self.account.revoke(&req).await
     }
 }
 
