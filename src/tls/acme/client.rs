@@ -255,10 +255,14 @@ impl ClientBuilder {
 #[async_trait]
 pub trait AcmeCertificateClient {
     /// Issue the certificate with provided names and an optional private key.
-    async fn issue(&self, names: &Vec<String>, private_key: Option<Vec<u8>>)
-    -> Result<Cert, Error>;
+    async fn issue(
+        &self,
+        names: impl IntoIterator<Item = impl AsRef<str>> + Send,
+        private_key: Option<Vec<u8>>,
+    ) -> Result<Cert, Error>;
+
     /// Revoke the certificate according to the provided request
-    async fn revoke(&self, req: RevocationRequest<'_>) -> Result<(), AcmeError>;
+    async fn revoke(&self, request: &RevocationRequest<'_>) -> Result<(), Error>;
 }
 
 #[async_trait]
@@ -267,29 +271,34 @@ impl AcmeCertificateClient for Client {
     /// Key must be in PEM format, if it's not provided - new one will be generated.
     async fn issue(
         &self,
-        names: &Vec<String>,
+        names: impl IntoIterator<Item = impl AsRef<str>> + Send,
         private_key: Option<Vec<u8>>,
     ) -> Result<Cert, Error> {
+        // Convert to internal format
+        let names: Vec<String> = names.into_iter()
+            .map(|s| s.as_ref().to_string())
+            .collect();
+
         // Pre-cleanup: attempt to remove all existing tokens for the given names.
         // This ensures a clean state before issuance begins.
         // Treat cleanup failures as non-critical.
-        let _ = self.cleanup(names).await;
+        let _ = self.cleanup(&names).await;
 
         // Try to issue the certificate using the ACME protocol
-        let res = self.issue_inner(names, private_key).await;
+        let res = self.issue_inner(&names, private_key).await;
 
         debug!("ACME: Cleaning up");
 
         // Post-cleanup
         // Treat cleanup failures as non-critical.
-        let _ = self.cleanup(names).await;
+        let _ = self.cleanup(&names).await;
 
         res.map(|(_, cert)| cert)
     }
 
     /// Revokes the certificate according to the provided request
-    async fn revoke(&self, req: RevocationRequest<'_>) -> Result<(), AcmeError> {
-        self.account.revoke(&req).await
+    async fn revoke(&self, request: &RevocationRequest<'_>) -> Result<(), Error> {
+        self.account.revoke(request).await.map_err(|e| Error::Generic(e.into()))
     }
 }
 
@@ -521,12 +530,12 @@ mod test {
         let cli = builder.build().await.unwrap();
 
         let cert = cli
-            .issue(&vec!["foo".to_string(), "*.foo".to_string()], None)
+            .issue(vec!["foo".to_string(), "*.foo".to_string()], None)
             .await
             .unwrap();
 
         let cert = pem_convert_to_rustls(&cert.key, &cert.cert).unwrap();
-        cli.revoke(RevocationRequest {
+        cli.revoke(&RevocationRequest {
             certificate: cert.end_entity_cert().unwrap(),
             reason: Some(RevocationReason::Superseded),
         })
