@@ -275,30 +275,36 @@ impl AcmeCertificateClient for Client {
         private_key: Option<Vec<u8>>,
     ) -> Result<Cert, Error> {
         // Convert to internal format
-        let names: Vec<String> = names.into_iter()
-            .map(|s| s.as_ref().to_string())
-            .collect();
-
-        // Pre-cleanup: attempt to remove all existing tokens for the given names.
-        // This ensures a clean state before issuance begins.
-        // Treat cleanup failures as non-critical.
-        let _ = self.cleanup(&names).await;
+        let names: Vec<String> = names.into_iter().map(|s| s.as_ref().to_string()).collect();
 
         // Try to issue the certificate using the ACME protocol
         let res = self.issue_inner(&names, private_key).await;
 
-        debug!("ACME: Cleaning up");
-
-        // Post-cleanup
-        // Treat cleanup failures as non-critical.
-        let _ = self.cleanup(&names).await;
+        match &res {
+            Ok((auth_ids, _)) => {
+                debug!("ACME: Cleaning up");
+                // Post-cleanup using the authorization IDs
+                // Treat cleanup failures as non-critical.
+                if let Err(err) = self.cleanup_by_ids(auth_ids).await {
+                    debug!("ACME: Cleanup failed: {err}");
+                } else {
+                    debug!("ACME: Cleanup successful");
+                }
+            }
+            Err(_) => {
+                debug!("ACME: Issue failed, no cleanup needed");
+            }
+        }
 
         res.map(|(_, cert)| cert)
     }
 
     /// Revokes the certificate according to the provided request
     async fn revoke(&self, request: &RevocationRequest<'_>) -> Result<(), Error> {
-        self.account.revoke(request).await.map_err(|e| Error::Generic(e.into()))
+        self.account
+            .revoke(request)
+            .await
+            .map_err(|e| Error::Generic(e.into()))
     }
 }
 
@@ -404,9 +410,9 @@ impl Client {
         Ok(ids)
     }
 
-    /// Cleans up the tokens after issuance
-    async fn cleanup(&self, names: &Vec<String>) -> Result<(), Error> {
-        for id in names {
+    /// Cleans up the tokens after issuance using authorization IDs
+    async fn cleanup_by_ids(&self, auth_ids: &Vec<String>) -> Result<(), Error> {
+        for id in auth_ids {
             self.token_manager.unset(id).await?;
         }
 
