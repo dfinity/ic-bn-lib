@@ -252,31 +252,21 @@ impl ClientBuilder {
 }
 
 /// ACME client trait to issue and revoke certificates
+#[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait AcmeCertificateClient {
     /// Issue the certificate with provided names and an optional private key.
-    async fn issue(
-        &self,
-        names: impl IntoIterator<Item = impl AsRef<str>> + Send,
-        private_key: Option<Vec<u8>>,
-    ) -> Result<Cert, Error>;
+    async fn issue(&self, names: Vec<String>, private_key: Option<Vec<u8>>) -> Result<Cert, Error>;
 
     /// Revoke the certificate according to the provided request
-    async fn revoke(&self, request: &RevocationRequest<'_>) -> Result<(), Error>;
+    async fn revoke<'a>(&self, request: &RevocationRequest<'a>) -> Result<(), Error>;
 }
 
 #[async_trait]
 impl AcmeCertificateClient for Client {
     /// Issue the certificate with provided names and an optional private key.
     /// Key must be in PEM format, if it's not provided - new one will be generated.
-    async fn issue(
-        &self,
-        names: impl IntoIterator<Item = impl AsRef<str>> + Send,
-        private_key: Option<Vec<u8>>,
-    ) -> Result<Cert, Error> {
-        // Convert to internal format
-        let names: Vec<String> = names.into_iter().map(|s| s.as_ref().to_string()).collect();
-
+    async fn issue(&self, names: Vec<String>, private_key: Option<Vec<u8>>) -> Result<Cert, Error> {
         // Try to issue the certificate using the ACME protocol
         let res = self.issue_inner(&names, private_key).await;
 
@@ -300,7 +290,7 @@ impl AcmeCertificateClient for Client {
     }
 
     /// Revokes the certificate according to the provided request
-    async fn revoke(&self, request: &RevocationRequest<'_>) -> Result<(), Error> {
+    async fn revoke<'a>(&self, request: &RevocationRequest<'a>) -> Result<(), Error> {
         self.account
             .revoke(request)
             .await

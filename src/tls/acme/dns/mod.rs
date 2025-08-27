@@ -279,7 +279,7 @@ impl AcmeDns {
 
         let cert = self
             .client
-            .issue(&self.names, None)
+            .issue(self.names.clone(), None)
             .await
             .context("unable to issue a certificate")?;
 
