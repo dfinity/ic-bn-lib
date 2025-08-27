@@ -252,7 +252,6 @@ impl ClientBuilder {
 }
 
 /// ACME client trait to issue and revoke certificates
-#[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait AcmeCertificateClient: Sync + Send {
     /// Issue the certificate with provided names and an optional private key.
