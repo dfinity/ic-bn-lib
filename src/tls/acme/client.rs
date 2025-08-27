@@ -254,7 +254,7 @@ impl ClientBuilder {
 /// ACME client trait to issue and revoke certificates
 #[cfg_attr(test, mockall::automock)]
 #[async_trait]
-pub trait AcmeCertificateClient {
+pub trait AcmeCertificateClient: Sync + Send {
     /// Issue the certificate with provided names and an optional private key.
     async fn issue(&self, names: Vec<String>, private_key: Option<Vec<u8>>) -> Result<Cert, Error>;
 
