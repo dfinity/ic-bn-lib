@@ -1,6 +1,7 @@
 use std::{pin::Pin, sync::Arc, time::Duration};
 
 use anyhow::Context;
+use async_trait::async_trait;
 use bytes::Bytes;
 use http::Request;
 use hyper_util::{
@@ -250,6 +251,53 @@ impl ClientBuilder {
     }
 }
 
+/// ACME client trait to issue and revoke certificates
+#[cfg_attr(test, mockall::automock)]
+#[async_trait]
+pub trait AcmeCertificateClient {
+    /// Issue the certificate with provided names and an optional private key.
+    async fn issue(&self, names: Vec<String>, private_key: Option<Vec<u8>>) -> Result<Cert, Error>;
+
+    /// Revoke the certificate according to the provided request
+    async fn revoke<'a>(&self, request: &RevocationRequest<'a>) -> Result<(), Error>;
+}
+
+#[async_trait]
+impl AcmeCertificateClient for Client {
+    /// Issue the certificate with provided names and an optional private key.
+    /// Key must be in PEM format, if it's not provided - new one will be generated.
+    async fn issue(&self, names: Vec<String>, private_key: Option<Vec<u8>>) -> Result<Cert, Error> {
+        // Try to issue the certificate using the ACME protocol
+        let res = self.issue_inner(&names, private_key).await;
+
+        match &res {
+            Ok((auth_ids, _)) => {
+                debug!("ACME: Cleaning up");
+                // Post-cleanup using the authorization IDs
+                // Treat cleanup failures as non-critical.
+                if let Err(err) = self.cleanup_by_ids(auth_ids).await {
+                    debug!("ACME: Cleanup failed: {err}");
+                } else {
+                    debug!("ACME: Cleanup successful");
+                }
+            }
+            Err(_) => {
+                debug!("ACME: Issue failed, no cleanup needed");
+            }
+        }
+
+        res.map(|(_, cert)| cert)
+    }
+
+    /// Revokes the certificate according to the provided request
+    async fn revoke<'a>(&self, request: &RevocationRequest<'a>) -> Result<(), Error> {
+        self.account
+            .revoke(request)
+            .await
+            .map_err(|e| Error::Generic(e.into()))
+    }
+}
+
 /// Generic ACME client that is using TokenManager to set a challenge token
 #[derive(derive_new::new)]
 pub struct Client {
@@ -352,37 +400,13 @@ impl Client {
         Ok(ids)
     }
 
-    /// Cleans up the tokens after issuance
-    async fn cleanup(&self, names: &Vec<String>) -> Result<(), Error> {
-        for id in names {
+    /// Cleans up the tokens after issuance using authorization IDs
+    async fn cleanup_by_ids(&self, auth_ids: &Vec<String>) -> Result<(), Error> {
+        for id in auth_ids {
             self.token_manager.unset(id).await?;
         }
 
         Ok(())
-    }
-
-    /// Issue the certificate with provided names and an optional private key.
-    /// Key must be in PEM format, if it's not provided - new one will be generated.
-    pub async fn issue(
-        &self,
-        names: &Vec<String>,
-        private_key: Option<Vec<u8>>,
-    ) -> Result<Cert, Error> {
-        // Pre-cleanup: attempt to remove all existing tokens for the given names.
-        // This ensures a clean state before issuance begins.
-        // Treat cleanup failures as non-critical.
-        let _ = self.cleanup(names).await;
-
-        // Try to issue the certificate using the ACME protocol
-        let res = self.issue_inner(names, private_key).await;
-
-        debug!("ACME: Cleaning up");
-
-        // Post-cleanup
-        // Treat cleanup failures as non-critical.
-        let _ = self.cleanup(names).await;
-
-        res.map(|(_, cert)| cert)
     }
 
     async fn issue_inner(
@@ -466,11 +490,6 @@ impl Client {
             },
         ))
     }
-
-    /// Revokes the certificate according to the provided request
-    pub async fn revoke(&self, req: RevocationRequest<'_>) -> Result<(), AcmeError> {
-        self.account.revoke(&req).await
-    }
 }
 
 #[cfg(test)]
@@ -507,12 +526,12 @@ mod test {
         let cli = builder.build().await.unwrap();
 
         let cert = cli
-            .issue(&vec!["foo".to_string(), "*.foo".to_string()], None)
+            .issue(vec!["foo".to_string(), "*.foo".to_string()], None)
             .await
             .unwrap();
 
         let cert = pem_convert_to_rustls(&cert.key, &cert.cert).unwrap();
-        cli.revoke(RevocationRequest {
+        cli.revoke(&RevocationRequest {
             certificate: cert.end_entity_cert().unwrap(),
             reason: Some(RevocationReason::Superseded),
         })

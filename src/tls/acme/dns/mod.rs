@@ -32,7 +32,7 @@ use crate::{
     tls::{
         acme::{
             AcmeUrl,
-            client::{Client, ClientBuilder},
+            client::{AcmeCertificateClient, Client, ClientBuilder},
         },
         extract_sans, pem_convert_to_rustls_single, sni_matches,
     },
@@ -279,7 +279,7 @@ impl AcmeDns {
 
         let cert = self
             .client
-            .issue(&self.names, None)
+            .issue(self.names.clone(), None)
             .await
             .context("unable to issue a certificate")?;
 
