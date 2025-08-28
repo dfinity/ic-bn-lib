@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString, IntoStaticStr};
 
@@ -38,6 +40,6 @@ impl RequestType {
 }
 
 /// Generic trait that allows components to signal their health status
-pub trait Healthy {
+pub trait Healthy: Send + Sync + Debug + 'static {
     fn healthy(&self) -> bool;
 }
