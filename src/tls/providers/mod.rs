@@ -7,7 +7,10 @@ pub use dir::Provider as Dir;
 pub use file::Provider as File;
 pub use issuer::CertificatesImporter as Issuer;
 
-use std::sync::{Arc, Mutex};
+use std::{
+    ops::Deref,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::{Context, Error, anyhow};
 use async_trait::async_trait;
@@ -26,10 +29,19 @@ use crate::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Pem(pub Vec<u8>);
 
+impl Deref for Pem {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_slice()
+    }
+}
+
 /// Trait that the certificate providers should implement
 /// It should return a vector of PEM-encoded cert-keys pairs
 #[async_trait]
 pub trait ProvidesCertificates: Sync + Send + std::fmt::Debug {
+    /// Returns a list of certificates in PEM format
     async fn get_certificates(&self) -> Result<Vec<Pem>, anyhow::Error>;
 }
 
@@ -61,6 +73,8 @@ pub fn pem_convert_to_certkey(pem: &[u8]) -> Result<CertKey, Error> {
     })
 }
 
+/// Snapshot of provider's certificates.
+/// Raw PEM format is needed because we can't compare parsed one.
 #[derive(Clone, Debug)]
 struct AggregatorSnapshot {
     pem: Vec<Option<Vec<Pem>>>,
@@ -85,7 +99,7 @@ impl PartialEq for AggregatorSnapshot {
 }
 impl Eq for AggregatorSnapshot {}
 
-// Collects certificates from providers and stores them in a given storage
+/// Collects certificates from providers and stores them in the provided storage
 pub struct Aggregator {
     providers: Vec<Arc<dyn ProvidesCertificates>>,
     storage: Arc<dyn StoresCertificates<Arc<CertifiedKey>>>,
@@ -96,6 +110,11 @@ impl std::fmt::Debug for Aggregator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "CertificateAggregator")
     }
+}
+
+/// Convert a list of PEM-encoded certificates to a Vec of CertKeys
+fn parse_pem(pem: &[Pem]) -> Result<Vec<CertKey>, Error> {
+    pem.iter().map(|x| pem_convert_to_certkey(x)).collect()
 }
 
 impl Aggregator {
@@ -114,16 +133,17 @@ impl Aggregator {
             snapshot: Mutex::new(snapshot),
         }
     }
-}
 
-/// Convert a list of PEM-encoded certificates to a Vec of CertKeys
-fn parse_pem(pem: &[Pem]) -> Result<Vec<CertKey>, Error> {
-    pem.iter()
-        .map(|x| pem_convert_to_certkey(&x.0))
-        .collect::<Result<Vec<_>, _>>()
-}
+    /// Returns true if all providers returned data successfully at least once
+    pub fn is_initialized(&self) -> bool {
+        self.snapshot
+            .lock()
+            .unwrap()
+            .parsed
+            .iter()
+            .all(|x| x.is_some())
+    }
 
-impl Aggregator {
     /// Fetches certificates concurrently from all providers.
     /// It returns both raw & parsed since parsed don't implement PartialEq and can't be compared.
     async fn fetch(&self, mut snapshot: AggregatorSnapshot) -> AggregatorSnapshot {
