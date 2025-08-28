@@ -36,3 +36,8 @@ impl RequestType {
         matches!(self, Self::Call | Self::SyncCall)
     }
 }
+
+/// Generic trait that allows components to signal their health status
+pub trait Healthy {
+    fn healthy(&self) -> bool;
+}

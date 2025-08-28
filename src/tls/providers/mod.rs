@@ -23,6 +23,7 @@ use storage::StoresCertificates;
 use crate::{
     tasks::Run,
     tls::{extract_sans_der, pem_convert_to_rustls_single},
+    types::Healthy,
 };
 
 /// A single PEM-encoded certificate+private key pair
@@ -210,6 +211,12 @@ impl Aggregator {
     }
 }
 
+impl Healthy for Aggregator {
+    fn healthy(&self) -> bool {
+        self.is_initialized()
+    }
+}
+
 #[async_trait]
 impl Run for Aggregator {
     async fn run(&self, _: CancellationToken) -> Result<(), Error> {
@@ -234,7 +241,7 @@ pub mod test {
     #[async_trait]
     impl ProvidesCertificates for TestProvider {
         async fn get_certificates(&self) -> Result<Vec<Pem>, Error> {
-            if self.1.load(Ordering::SeqCst) == 0 {
+            if self.1.load(Ordering::SeqCst) <= 1 {
                 self.1.fetch_add(1, Ordering::SeqCst);
                 Ok(vec![self.0.clone()])
             } else {
@@ -264,32 +271,33 @@ pub mod test {
 
     #[tokio::test]
     async fn test_aggregator() -> Result<(), Error> {
-        let prov1 = TestProvider(
+        let prov1 = Arc::new(TestProvider(
             Pem([TEST_KEY_1.as_bytes(), TEST_CERT_1.as_bytes()]
                 .concat()
                 .to_vec()),
             AtomicUsize::new(0),
-        );
-        let prov2 = TestProvider(
+        ));
+        let prov2 = Arc::new(TestProvider(
             Pem([TEST_KEY_2.as_bytes(), TEST_CERT_2.as_bytes()]
                 .concat()
                 .to_vec()),
             AtomicUsize::new(0),
-        );
+        ));
 
         let storage = Arc::new(storage::StorageKey::new(
             None,
             storage::Metrics::new(&Registry::new()),
         ));
-        let aggregator = Aggregator::new(
-            vec![
-                Arc::new(prov1),
-                Arc::new(prov2),
-                Arc::new(TestProviderBroken),
-            ],
-            storage,
-        );
+
+        // Test fully healthy
+        let aggregator = Aggregator::new(vec![prov1.clone(), prov2.clone()], storage.clone());
         aggregator.refresh().await;
+        assert!(aggregator.healthy());
+
+        // Test partially failed
+        let aggregator = Aggregator::new(vec![prov1, prov2, Arc::new(TestProviderBroken)], storage);
+        aggregator.refresh().await;
+        assert!(!aggregator.healthy());
 
         let certs = aggregator.snapshot.lock().unwrap().clone().flatten();
         assert_eq!(certs.len(), 2);
