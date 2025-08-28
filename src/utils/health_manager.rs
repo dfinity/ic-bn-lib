@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use crate::types::Healthy;
 
@@ -6,17 +6,17 @@ use crate::types::Healthy;
 /// It is healthy when all inner services are healthy.
 #[derive(Debug, Default)]
 pub struct HealthManager {
-    services: Mutex<Vec<Arc<dyn Healthy>>>,
+    services: RwLock<Vec<Arc<dyn Healthy>>>,
 }
 
 impl HealthManager {
     pub fn add(&self, svc: Arc<dyn Healthy>) {
-        self.services.lock().unwrap().push(svc);
+        self.services.write().unwrap().push(svc);
     }
 }
 
 impl Healthy for HealthManager {
     fn healthy(&self) -> bool {
-        self.services.lock().unwrap().iter().all(|x| x.healthy())
+        self.services.read().unwrap().iter().all(|x| x.healthy())
     }
 }
