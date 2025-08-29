@@ -74,7 +74,11 @@ impl Error {
         };
 
         if let AcmeError::Api(v) = acme_error {
-            return v.r#type.as_deref() == Some("rateLimited");
+            return v
+                .r#type
+                .as_deref()
+                .map(|s| s.to_ascii_lowercase())
+                .is_some_and(|s| s.ends_with(":ratelimited"));
         }
 
         false
