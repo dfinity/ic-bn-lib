@@ -76,9 +76,7 @@ impl Error {
 
         if let AcmeError::Api(problem) = acme_error {
             // Check if this is a rate limiting error
-            if problem.status == Some(429) {
-                return true;
-            }
+            return problem.status == Some(429);
         }
 
         false
