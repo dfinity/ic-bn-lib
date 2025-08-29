@@ -3,6 +3,7 @@ use std::{pin::Pin, sync::Arc, time::Duration};
 use anyhow::Context;
 use async_trait::async_trait;
 use bytes::Bytes;
+use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use http::Request;
 use hyper_util::{
     client::legacy::{Client as HyperClient, connect::HttpConnector},
@@ -11,9 +12,11 @@ use hyper_util::{
 use instant_acme::{
     Account, AccountCredentials, AuthorizationStatus, BodyWrapper, BytesResponse, ChallengeType,
     Error as AcmeError, HttpClient as HttpClientTrait, Identifier, NewAccount, NewOrder, Order,
-    OrderStatus, RetryPolicy, RevocationRequest,
+    OrderStatus, Problem, RetryPolicy, RevocationRequest,
 };
+use once_cell::sync::Lazy;
 use rcgen::{CertificateParams, DistinguishedName, KeyPair};
+use regex::Regex;
 use tracing::debug;
 
 use crate::{
@@ -63,26 +66,50 @@ pub enum Error {
 }
 
 impl Error {
-    pub fn rate_limited(&self) -> bool {
+    /// Checks if the error is due to Let's Encrypt rate limiting and if yes attempts to extract the retry-after timestamp
+    pub fn rate_limited(&self) -> (bool, Option<u64>) {
         let acme_error = match self {
             Self::UnableToCreateOrder(v) => v,
             Self::UnableToGetAuthorizations(v) => v,
             Self::UnableToSetChallengeReady(v) => v,
             Self::UnableToFinalizeOrder(v) => v,
             Self::UnableToGetCertificate(v) => v,
-            _ => return false,
+            _ => return (false, None),
         };
 
-        if let AcmeError::Api(v) = acme_error {
-            return v
-                .r#type
-                .as_deref()
-                .map(|s| s.to_ascii_lowercase())
-                .is_some_and(|s| s.ends_with(":ratelimited"));
+        if let AcmeError::Api(problem) = acme_error {
+            // Check if this is a rate limiting error
+            let is_rate_limited = problem.status == Some(429)
+                || problem
+                    .r#type
+                    .as_deref()
+                    .map(|s| s.to_ascii_lowercase())
+                    .is_some_and(|s| s.contains("ratelimited"));
+
+            if !is_rate_limited {
+                return (false, None);
+            }
+
+            let retry_after = extract_retry_after(problem);
+
+            return (true, retry_after);
         }
 
-        false
+        (false, None)
     }
+}
+
+// Example: Some("too many certificates (5) already issued for this exact set of identifiers in the last 168h0m0s, retry after 2025-08-30 19:01:33 UTC: see https://letsencrypt.org/docs/rate-limits/#new-certificates-per-exact-set-of-identifiers"), status: Some(429) })
+static RETRY_AFTER_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"retry after (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC").unwrap());
+
+pub fn extract_retry_after(acme_problem: &Problem) -> Option<u64> {
+    let detail = acme_problem.detail.as_ref()?;
+    let caps = RETRY_AFTER_REGEX.captures(detail)?;
+    let timestamp = &caps[1];
+    let naive = NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M:%S").ok()?;
+    let datetime: DateTime<Utc> = Utc.from_utc_datetime(&naive);
+    Some(datetime.timestamp() as u64)
 }
 
 /// Certificate and private key pair
@@ -497,7 +524,7 @@ impl Client {
 
 #[cfg(test)]
 mod test {
-    use instant_acme::RevocationReason;
+    use instant_acme::{Problem, RevocationReason};
 
     use crate::{
         tests::pebble::{Env, dns::TokenManagerPebble},
@@ -540,5 +567,36 @@ mod test {
         })
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn test_rate_limited_detection() {
+        // An example of rate limiting error from Let's Encrypt (normally both type and status are present)
+        let problem_1 = Problem {
+            r#type: Some("urn:ietf:params:acme:error:rateLimited".to_string()),
+            detail: Some("too many certificates (5) already issued for this exact set of identifiers in the last 168h0m0s, retry after 2025-08-30 19:01:33 UTC: see https://letsencrypt.org/docs/rate-limits/#new-certificates-per-exact-set-of-identifiers".to_string()),
+            status: None,
+            subproblems: vec![],
+        };
+
+        let problem_2 = Problem {
+            r#type: None,
+            detail: None,
+            status: Some(429),
+            subproblems: vec![],
+        };
+
+        let client_error_1 = Error::UnableToCreateOrder(AcmeError::Api(problem_1));
+        let client_error_2 = Error::UnableToCreateOrder(AcmeError::Api(problem_2));
+
+        let (is_rate_limited_1, retry_after) = client_error_1.rate_limited();
+        let (is_rate_limited_2, _) = client_error_2.rate_limited();
+
+        assert!(is_rate_limited_1, "Detect rate limiting from type");
+        assert!(is_rate_limited_2, "Detect rate limiting from status");
+
+        let timestamp = retry_after.unwrap();
+
+        assert_eq!(timestamp, 1756580493);
     }
 }
