@@ -63,6 +63,7 @@ pub enum Error {
 }
 
 impl Error {
+    /// Checks if the error is due to Let's Encrypt rate limiting
     pub fn rate_limited(&self) -> bool {
         let acme_error = match self {
             Self::UnableToCreateOrder(v) => v,
@@ -73,8 +74,9 @@ impl Error {
             _ => return false,
         };
 
-        if let AcmeError::Api(v) = acme_error {
-            return v.r#type.as_deref() == Some("rateLimited");
+        if let AcmeError::Api(problem) = acme_error {
+            // Check if this is a rate limiting error
+            return problem.status == Some(429);
         }
 
         false
@@ -493,7 +495,7 @@ impl Client {
 
 #[cfg(test)]
 mod test {
-    use instant_acme::RevocationReason;
+    use instant_acme::{Problem, RevocationReason};
 
     use crate::{
         tests::pebble::{Env, dns::TokenManagerPebble},
@@ -536,5 +538,23 @@ mod test {
         })
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn test_rate_limited_detection() {
+        // An example of rate limiting error from Let's Encrypt (normally both type and status are present)
+        let problem = Problem {
+            r#type: Some("urn:ietf:params:acme:error:rateLimited".to_string()),
+            detail: Some("too many certificates (5) already issued for this exact set of identifiers in the last 168h0m0s, retry after 2025-08-30 19:01:33 UTC: see https://letsencrypt.org/docs/rate-limits/#new-certificates-per-exact-set-of-identifiers".to_string()),
+            status: Some(429),
+            subproblems: vec![],
+        };
+
+        let client_error = Error::UnableToCreateOrder(AcmeError::Api(problem));
+
+        assert!(
+            client_error.rate_limited(),
+            "Detect rate limiting from type"
+        );
     }
 }
