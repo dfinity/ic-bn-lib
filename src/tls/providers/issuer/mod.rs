@@ -24,6 +24,7 @@ use crate::{
     custom_domains::{CustomDomain, ProvidesCustomDomains},
     http,
     tasks::Run,
+    types::Healthy,
 };
 use verify::{Parser, Verifier, Verify, VerifyError};
 
@@ -176,6 +177,12 @@ impl CertificatesImporter {
 
         self.snapshot.store(Some(Arc::new(packages)));
         Ok(())
+    }
+}
+
+impl Healthy for CertificatesImporter {
+    fn healthy(&self) -> bool {
+        self.snapshot.load_full().is_some()
     }
 }
 
