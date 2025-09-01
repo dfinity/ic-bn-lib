@@ -2,7 +2,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::types::Healthy;
 
-/// Aggregates objects that implement Healhy trait.
+/// Aggregates objects that implement Healthy trait.
 /// It is healthy when all inner services are healthy.
 #[derive(Debug, Default)]
 pub struct HealthManager {
