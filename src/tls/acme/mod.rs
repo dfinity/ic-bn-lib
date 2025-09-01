@@ -9,11 +9,10 @@ use std::{fmt::Display, str::FromStr};
 
 use anyhow::{Context, Error};
 use async_trait::async_trait;
-use instant_acme::LetsEncrypt;
-use strum_macros::{Display, EnumString};
-
 #[cfg(feature = "acme")]
 pub use instant_acme;
+use instant_acme::LetsEncrypt;
+use strum_macros::{Display, EnumString};
 use url::Url;
 
 /// Challenge type

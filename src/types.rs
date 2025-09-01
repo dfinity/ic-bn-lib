@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString, IntoStaticStr};
 
@@ -35,4 +37,9 @@ impl RequestType {
     pub const fn is_call(&self) -> bool {
         matches!(self, Self::Call | Self::SyncCall)
     }
+}
+
+/// Generic trait that allows components to signal their health status
+pub trait Healthy: Send + Sync + Debug + 'static {
+    fn healthy(&self) -> bool;
 }
