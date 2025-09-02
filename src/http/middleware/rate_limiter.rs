@@ -1,4 +1,4 @@
-use std::{net::IpAddr, str::FromStr, sync::Arc, time::Duration};
+use std::{net::IpAddr, sync::Arc, time::Duration};
 
 use ::governor::{clock::QuantaInstant, middleware::NoOpMiddleware};
 use anyhow::{Error, anyhow};
@@ -10,7 +10,7 @@ use tower_governor::{
     key_extractor::{GlobalKeyExtractor, KeyExtractor},
 };
 
-use crate::http::{ConnInfo, headers::X_REAL_IP};
+use crate::http::middleware::extract_ip_from_request;
 
 pub type RateLimitLayer<K> = GovernorLayer<K, NoOpMiddleware<QuantaInstant>, Body>;
 
@@ -21,19 +21,7 @@ impl KeyExtractor for IpKeyExtractor {
     type Key = IpAddr;
 
     fn extract<B>(&self, req: &Request<B>) -> Result<Self::Key, GovernorError> {
-        // Try to extract from the header first
-        req.headers()
-            .get(X_REAL_IP)
-            .and_then(|x| x.to_str().ok())
-            .and_then(|x| IpAddr::from_str(x).ok())
-            .or_else(|| {
-                // Then from the extension
-                // ConnInfo is expected to exist in request extension
-                req.extensions()
-                    .get::<Arc<ConnInfo>>()
-                    .map(|x| x.remote_addr.ip())
-            })
-            .ok_or(GovernorError::UnableToExtractKey)
+        extract_ip_from_request(req).ok_or(GovernorError::UnableToExtractKey)
     }
 }
 
@@ -93,6 +81,8 @@ pub fn layer<K: KeyExtractor, R: IntoResponse + Clone + Send + Sync + 'static>(
 
 #[cfg(test)]
 mod test {
+    use crate::http::ConnInfo;
+
     use super::*;
 
     use axum::{
