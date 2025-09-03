@@ -1,21 +1,42 @@
-use std::{net::IpAddr, num::NonZeroU32, str::FromStr, time::Duration};
+use std::{
+    net::IpAddr,
+    num::NonZeroU32,
+    str::FromStr,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
 
 use ahash::RandomState;
-use anyhow::{Context, anyhow};
-use axum::response::{IntoResponse, Response};
+use anyhow::{Context as _, anyhow};
+use arc_swap::ArcSwap;
+use async_trait::async_trait;
+use axum::{
+    extract::Request as AxumRequest,
+    response::{IntoResponse, Response as AxumResponse},
+};
+use futures::future::BoxFuture;
 use governor::{
     Quota, RateLimiter,
     clock::{Clock, DefaultClock},
     state::{InMemoryState, NotKeyed, keyed::DashMapStateStore},
 };
-use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, header::RETRY_AFTER};
+use http::{
+    HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, header::RETRY_AFTER,
+};
 use humantime::parse_duration;
 use itertools::Itertools;
 use regex::Regex;
 use serde::Deserialize;
 use serde_with::{DeserializeFromStr, DisplayFromStr, serde_as};
+use tokio_util::sync::CancellationToken;
+use tower::{Layer, Service};
+use url::Url;
 
-use crate::http::{Error, middleware::extract_ip_from_request};
+use crate::{
+    http::{Client, Error, middleware::extract_ip_from_request},
+    tasks::Run,
+};
 
 /// Matches HTTP status codes or ranges
 #[derive(Debug, Clone, Copy, Eq, PartialEq, DeserializeFromStr)]
@@ -25,6 +46,7 @@ pub struct StatusRange {
 }
 
 impl StatusRange {
+    /// Check status code against the range
     pub const fn evaluate(&self, v: StatusCode) -> bool {
         let code = v.as_u16();
 
@@ -89,6 +111,7 @@ impl PartialEq for HeaderMatcher {
 impl Eq for HeaderMatcher {}
 
 impl HeaderMatcher {
+    /// Check if the header name/value matches
     pub fn evaluate(&self, name: &HeaderName, value: &HeaderValue) -> bool {
         if name != self.name {
             return false;
@@ -101,6 +124,7 @@ impl HeaderMatcher {
         self.regex.is_match(value)
     }
 
+    /// Check if the header map matches
     pub fn evaluate_headermap(&self, map: &HeaderMap) -> bool {
         map.iter().any(|(name, value)| self.evaluate(name, value))
     }
@@ -127,6 +151,7 @@ impl PartialEq for RequestMatcher {
 impl Eq for RequestMatcher {}
 
 impl RequestMatcher {
+    /// Check if the request matches
     pub fn evaluate<T>(&self, req: &Request<T>) -> bool {
         // Check if URL matches
         if let Some(v) = &self.url {
@@ -163,6 +188,7 @@ pub struct ResponseMatcher {
 }
 
 impl ResponseMatcher {
+    /// Check if the response matches
     pub fn evaluate<T>(&self, req: &Response<T>) -> bool {
         // Check status codes
         if let Some(v) = &self.status {
@@ -183,6 +209,7 @@ impl ResponseMatcher {
     }
 }
 
+/// Decision on the rate limit
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum RateLimitDecision {
     Pass,
@@ -356,7 +383,7 @@ pub enum Decision {
 }
 
 impl IntoResponse for Decision {
-    fn into_response(self) -> Response {
+    fn into_response(self) -> AxumResponse {
         match self {
             Self::Pass => StatusCode::OK.into_response(),
             Self::Block(v) => (v, "Blocked for policy reasons").into_response(),
@@ -364,9 +391,9 @@ impl IntoResponse for Decision {
                 StatusCode::TOO_MANY_REQUESTS,
                 [(
                     RETRY_AFTER,
-                    HeaderValue::from_str(&v.as_secs().to_string()).unwrap(),
+                    HeaderValue::from_str(&(v.as_secs() + 1).to_string()).unwrap(),
                 )],
-                "Rate limited",
+                "Request was rate-limited, consult Retry-After header for a number of seconds after which it can be retried",
             )
                 .into_response(),
         }
@@ -424,7 +451,7 @@ impl ResponseRule {
 }
 
 /// Ruleset
-#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize, Default)]
 pub struct Ruleset {
     pub requests: Option<Vec<RequestRule>>,
     pub responses: Option<Vec<ResponseRule>>,
@@ -451,6 +478,100 @@ impl Ruleset {
         v.iter()
             .find_map(|x| x.evaluate(resp))
             .unwrap_or(Decision::Pass)
+    }
+}
+
+/// Web Application Firewall
+pub struct Waf<S> {
+    ruleset: Arc<ArcSwap<Ruleset>>,
+    inner: S,
+}
+
+/// Implement Tower Service for Waf
+impl<S> Service<AxumRequest> for Waf<S>
+where
+    S: Service<AxumRequest, Response = AxumResponse> + Send + 'static,
+    S::Future: Send + 'static,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: AxumRequest) -> Self::Future {
+        let ruleset = self.ruleset.load_full();
+
+        // Evaluate the request
+        let decision = ruleset.evaluate_request(&request);
+        if decision != Decision::Pass {
+            return Box::pin(async move { Ok(decision.into_response()) });
+        }
+
+        let future = self.inner.call(request);
+        Box::pin(async move {
+            let response: AxumResponse = future.await?;
+
+            // Evaluate the response
+            let decision = ruleset.evaluate_response(&response);
+            if decision != Decision::Pass {
+                return Ok(decision.into_response());
+            }
+
+            Ok(response)
+        })
+    }
+}
+
+/// Waf layer usable as an Axum middleware
+#[derive(Clone, derive_new::new)]
+pub struct WafLayer {
+    ruleset: Arc<ArcSwap<Ruleset>>,
+}
+
+impl<S> Layer<S> for WafLayer {
+    type Service = Waf<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        Waf {
+            ruleset: self.ruleset.clone(),
+            inner,
+        }
+    }
+}
+
+/// Updates the ruleset periodically from the given URL
+#[derive(Clone, derive_new::new)]
+pub struct WafRunner {
+    url: Url,
+    client: Arc<dyn Client>,
+    ruleset: Arc<ArcSwap<Ruleset>>,
+}
+
+#[async_trait]
+impl Run for WafRunner {
+    async fn run(&self, _token: CancellationToken) -> Result<(), anyhow::Error> {
+        let req = reqwest::Request::new(Method::GET, self.url.clone());
+        let resp = self
+            .client
+            .execute(req)
+            .await
+            .context("unable to execute request")?;
+        let body = resp.text().await.context("unable to get response body")?;
+
+        let new: Ruleset =
+            serde_json::from_str(&body).context("unable to parse body into Ruleset")?;
+        let new = Arc::new(new);
+
+        // Check if the new ruleset is different
+        if new == self.ruleset.load_full() {
+            return Ok(());
+        }
+
+        self.ruleset.store(new);
+        Ok(())
     }
 }
 
@@ -754,25 +875,29 @@ mod test {
     #[test]
     fn test_ruleset() {
         let ruleset = json!({
-            "requests": [{
+            "requests": [
+            {
                 "rule": {
                     "methods": ["GET", "POST"],
                     "url": "^https.*",
                 },
                 "action": "limit:global:10/1h",
-            }, {
+            },
+            {
                 "rule": {
                     "methods": ["DELETE"],
                 },
                 "action": "block:403",
             }],
 
-            "responses": [{
+            "responses": [
+            {
                 "rule": {
                     "status": ["100-200", "400-499", "599"],
                 },
                 "action": "block:451",
-            }, {
+            },
+            {
                 "rule": {
                     "status": ["500"],
                     "headers": [{
@@ -812,6 +937,20 @@ mod test {
                 .body("")
                 .unwrap();
             assert_eq!(ruleset.evaluate_request(&req), Decision::Pass);
+        }
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("https://foobar")
+            .body("")
+            .unwrap();
+
+        let r = ruleset.evaluate_request(&req);
+        match r {
+            Decision::Throttle(v) => {
+                assert!(v >= Duration::from_secs(359) && v <= Duration::from_secs(360))
+            }
+            _ => unreachable!(),
         }
 
         for _ in 0..1000 {
