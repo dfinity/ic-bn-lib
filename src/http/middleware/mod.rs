@@ -57,5 +57,9 @@ mod test {
             .body("")
             .unwrap();
         assert_eq!(extract_ip_from_request(&req), Some(addr2));
+
+        // Neither
+        let req = Request::builder().body("").unwrap();
+        assert_eq!(extract_ip_from_request(&req), None);
     }
 }

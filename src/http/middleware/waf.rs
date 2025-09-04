@@ -83,6 +83,13 @@ impl FromStr for StatusRange {
                 return Err(anyhow!("Status code can be between 100 and 599, not {v}").into());
             }
 
+            if v <= from {
+                return Err(anyhow!(
+                    "End of the range should be greater than start ({v} > {from})"
+                )
+                .into());
+            }
+
             Some(v)
         } else {
             None
@@ -109,6 +116,17 @@ impl PartialEq for HeaderMatcher {
     }
 }
 impl Eq for HeaderMatcher {}
+
+impl Ord for HeaderMatcher {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.name.as_str().cmp(other.name.as_str())
+    }
+}
+impl PartialOrd for HeaderMatcher {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 impl HeaderMatcher {
     /// Check if the header name/value matches
@@ -144,7 +162,15 @@ pub struct RequestMatcher {
 impl PartialEq for RequestMatcher {
     fn eq(&self, other: &Self) -> bool {
         self.methods == other.methods
-            && self.headers == other.headers
+        // Sort header matchers before comparison
+            && self
+                .headers
+                .as_ref()
+                .map(|x| x.clone().into_iter().sorted().collect::<Vec<_>>())
+                == other
+                    .headers
+                    .as_ref()
+                    .map(|x| x.clone().into_iter().sorted().collect::<Vec<_>>())
             && self.url.as_ref().map(|x| x.as_str()) == other.url.as_ref().map(|x| x.as_str())
     }
 }
@@ -542,7 +568,7 @@ impl<S> Layer<S> for WafLayer {
     }
 }
 
-/// Updates the ruleset periodically from the given URL
+/// Updates the ruleset from the given URL
 #[derive(Clone, derive_new::new)]
 pub struct WafRunner {
     url: Url,
@@ -561,8 +587,10 @@ impl Run for WafRunner {
             .context("unable to execute request")?;
         let body = resp.text().await.context("unable to get response body")?;
 
-        let new: Ruleset =
-            serde_json::from_str(&body).context("unable to parse body into Ruleset")?;
+        let new: Ruleset = serde_json::from_str(&body)
+            .context("unable to parse body into Ruleset")
+            .or_else(|_| serde_yaml_ng::from_str(&body))
+            .context("unable to parse ruleset as JSON or YAML")?;
         let new = Arc::new(new);
 
         // Check if the new ruleset is different
@@ -607,6 +635,7 @@ mod test {
         assert!(StatusRange::from_str("99-").is_err());
         assert!(StatusRange::from_str("-500").is_err());
         assert!(StatusRange::from_str("101-600").is_err());
+        assert!(StatusRange::from_str("199-100").is_err());
 
         let range = StatusRange::from_str("200-499").unwrap();
 
@@ -673,6 +702,15 @@ mod test {
         let req = Request::builder()
             .header("foo", "barfuss")
             .header("dead", "beefbeef")
+            .method(Method::OPTIONS)
+            .uri("https://lala")
+            .body("")
+            .unwrap();
+        assert!(rule.evaluate(&req));
+
+        let req = Request::builder()
+            .header("dead", "beefbeef")
+            .header("foo", "barfuss")
             .method(Method::OPTIONS)
             .uri("https://lala")
             .body("")
