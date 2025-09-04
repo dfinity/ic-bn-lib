@@ -573,11 +573,17 @@ impl<S> Layer<S> for WafLayer {
 impl WafLayer {
     /// Tries to update the ruleset by parsing the provided byte slice as JSON or YAML.
     /// Updates only if the new ruleset is different.
-    pub fn update_ruleset(&self, src: &[u8]) -> Result<bool, Error> {
+    pub fn update_ruleset_raw(&self, src: &[u8]) -> Result<bool, Error> {
         let new: Ruleset = serde_json::from_slice(src)
             .context("unable to parse ruleset as JSON")
             .or_else(|_| serde_yaml_ng::from_slice(src))
             .context("unable to parse ruleset as YAML")?;
+
+        self.update_ruleset(new)
+    }
+
+    /// Updates the ruleset, only if the new ruleset is different.
+    pub fn update_ruleset(&self, new: Ruleset) -> Result<bool, Error> {
         let new = Arc::new(new);
 
         // Check if the new ruleset is different
@@ -611,7 +617,7 @@ impl Run for WafRunner {
 
         if self
             .layer
-            .update_ruleset(body.as_bytes())
+            .update_ruleset_raw(body.as_bytes())
             .context("unable to update ruleset")?
         {
             warn!("WafRunner: new ruleset applied");
@@ -1075,7 +1081,8 @@ mod test {
               regex: ^bar.*$
         "#;
 
-        layer.update_ruleset(ruleset.as_bytes()).unwrap();
+        assert!(layer.update_ruleset_raw(ruleset.as_bytes()).unwrap());
+        assert!(!layer.update_ruleset_raw(ruleset.as_bytes()).unwrap());
 
         let mut router = Router::new()
             .route("/", get(|| async { "foo" }).options(|| async { "bar" }))
