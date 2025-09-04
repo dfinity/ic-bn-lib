@@ -31,6 +31,7 @@ use serde::Deserialize;
 use serde_with::{DeserializeFromStr, DisplayFromStr, serde_as};
 use tokio_util::sync::CancellationToken;
 use tower::{Layer, Service};
+use tracing::warn;
 use url::Url;
 
 use crate::{
@@ -508,6 +509,7 @@ impl Ruleset {
 }
 
 /// Web Application Firewall
+#[derive(Debug, Clone)]
 pub struct Waf<S> {
     ruleset: Arc<ArcSwap<Ruleset>>,
     inner: S,
@@ -568,12 +570,32 @@ impl<S> Layer<S> for WafLayer {
     }
 }
 
+impl WafLayer {
+    /// Tries to update the ruleset by parsing the provided byte slice as JSON or YAML.
+    /// Updates only if the new ruleset is different.
+    pub fn update_ruleset(&self, src: &[u8]) -> Result<bool, Error> {
+        let new: Ruleset = serde_json::from_slice(src)
+            .context("unable to parse ruleset as JSON")
+            .or_else(|_| serde_yaml_ng::from_slice(src))
+            .context("unable to parse ruleset as YAML")?;
+        let new = Arc::new(new);
+
+        // Check if the new ruleset is different
+        if new == self.ruleset.load_full() {
+            return Ok(false);
+        }
+
+        self.ruleset.store(new);
+        Ok(true)
+    }
+}
+
 /// Updates the ruleset from the given URL
 #[derive(Clone, derive_new::new)]
 pub struct WafRunner {
     url: Url,
     client: Arc<dyn Client>,
-    ruleset: Arc<ArcSwap<Ruleset>>,
+    layer: WafLayer,
 }
 
 #[async_trait]
@@ -587,24 +609,21 @@ impl Run for WafRunner {
             .context("unable to execute request")?;
         let body = resp.text().await.context("unable to get response body")?;
 
-        let new: Ruleset = serde_json::from_str(&body)
-            .context("unable to parse body into Ruleset")
-            .or_else(|_| serde_yaml_ng::from_str(&body))
-            .context("unable to parse ruleset as JSON or YAML")?;
-        let new = Arc::new(new);
-
-        // Check if the new ruleset is different
-        if new == self.ruleset.load_full() {
-            return Ok(());
+        if self
+            .layer
+            .update_ruleset(body.as_bytes())
+            .context("unable to update ruleset")?
+        {
+            warn!("WafRunner: new ruleset applied");
         }
 
-        self.ruleset.store(new);
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod test {
+    use axum::{Router, body::Body};
     use serde_json::json;
 
     use super::*;
@@ -1035,5 +1054,56 @@ mod test {
                 Decision::Block(StatusCode::UNAUTHORIZED)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_waflayer() {
+        use axum::routing::get;
+
+        let ruleset = Ruleset::default();
+        let layer = WafLayer::new(Arc::new(ArcSwap::new(Arc::new(ruleset))));
+
+        let ruleset = r#"
+        requests:
+        - action: block:451
+          rule:
+            methods:
+            - OPTIONS
+            - GET
+            headers:
+            - name: foo
+              regex: ^bar.*$
+        "#;
+
+        layer.update_ruleset(ruleset.as_bytes()).unwrap();
+
+        let mut router = Router::new()
+            .route("/", get(|| async { "foo" }).options(|| async { "bar" }))
+            .layer(layer);
+
+        // Should block
+        let req = Request::builder()
+            .method(Method::OPTIONS)
+            .header("foo", "barfuss")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .header("foo", "barfuss")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
+
+        // Should pass
+        let req = Request::builder()
+            .method(Method::OPTIONS)
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }
