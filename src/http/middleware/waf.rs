@@ -776,7 +776,7 @@ pub struct WafCli {
     pub waf_url: Option<Url>,
 
     /// File from which to load WAF rules.
-    /// /// Conflicts with `waf_api` and `waf_url`.
+    /// Conflicts with `waf_api` and `waf_url`.
     #[clap(env, long, group = "waf_input")]
     pub waf_file: Option<PathBuf>,
 
