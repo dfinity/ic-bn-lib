@@ -673,10 +673,11 @@ async fn api_handler(State(state): State<WafLayer>, body: Bytes) -> AxumResponse
         }
     };
 
+    warn!("WAF: Ruleset updated over API");
     if state.set_ruleset(ruleset) {
-        "Ruleset updated"
+        "Ruleset updated\n"
     } else {
-        "Ruleset is the same, not updated"
+        "Ruleset is the same, not updated\n"
     }
     .into_response()
 }
