@@ -1,6 +1,7 @@
 use std::{
     net::IpAddr,
     num::NonZeroU32,
+    path::PathBuf,
     str::FromStr,
     sync::Arc,
     task::{Context, Poll},
@@ -12,9 +13,13 @@ use anyhow::{Context as _, anyhow};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use axum::{
-    extract::Request as AxumRequest,
+    Router,
+    extract::{Request as AxumRequest, State},
     response::{IntoResponse, Response as AxumResponse},
+    routing::post,
 };
+use bytes::Bytes;
+use clap::Args;
 use futures::future::BoxFuture;
 use governor::{
     Quota, RateLimiter,
@@ -29,6 +34,7 @@ use itertools::Itertools;
 use regex::Regex;
 use serde::Deserialize;
 use serde_with::{DeserializeFromStr, DisplayFromStr, serde_as};
+use tokio::{fs, select, time::interval};
 use tokio_util::sync::CancellationToken;
 use tower::{Layer, Service};
 use tracing::warn;
@@ -553,10 +559,64 @@ where
     }
 }
 
+fn parse_ruleset(data: &[u8]) -> Result<Ruleset, Error> {
+    let ruleset: Ruleset = serde_json::from_slice(data)
+        .context("unable to parse ruleset as JSON")
+        .or_else(|_| serde_yaml_ng::from_slice(data))
+        .context("unable to parse ruleset as YAML")?;
+
+    Ok(ruleset)
+}
+
+/// Trait to fetch ruleset
+#[async_trait]
+pub trait FetchesRuleset: Send + Sync {
+    async fn fetch_rules(&self) -> Result<Ruleset, Error>;
+}
+
+/// Fetches ruleset from the file
+pub struct RulesetFetcherFile {
+    path: PathBuf,
+}
+
+#[async_trait]
+impl FetchesRuleset for RulesetFetcherFile {
+    async fn fetch_rules(&self) -> Result<Ruleset, Error> {
+        let data = fs::read(&self.path)
+            .await
+            .context("unable to read ruleset from file")?;
+
+        parse_ruleset(&data)
+    }
+}
+
+/// Fetches ruleset from the URL
+pub struct RulesetFetcherUrl {
+    http_client: Arc<dyn Client>,
+    url: Url,
+}
+
+#[async_trait]
+impl FetchesRuleset for RulesetFetcherUrl {
+    async fn fetch_rules(&self) -> Result<Ruleset, Error> {
+        let req = reqwest::Request::new(Method::GET, self.url.clone());
+        let resp = self
+            .http_client
+            .execute(req)
+            .await
+            .context("unable to execute request")?;
+        let data = resp.bytes().await.context("unable to get response body")?;
+
+        parse_ruleset(&data)
+    }
+}
+
 /// Waf layer usable as an Axum middleware
 #[derive(Clone, derive_new::new)]
 pub struct WafLayer {
     ruleset: Arc<ArcSwap<Ruleset>>,
+    fetcher: Option<Arc<dyn FetchesRuleset>>,
+    interval: Duration,
 }
 
 impl<S> Layer<S> for WafLayer {
@@ -570,61 +630,131 @@ impl<S> Layer<S> for WafLayer {
     }
 }
 
-impl WafLayer {
-    /// Tries to update the ruleset by parsing the provided byte slice as JSON or YAML.
-    /// Updates only if the new ruleset is different.
-    pub fn update_ruleset_raw(&self, src: &[u8]) -> Result<bool, Error> {
-        let new: Ruleset = serde_json::from_slice(src)
-            .context("unable to parse ruleset as JSON")
-            .or_else(|_| serde_yaml_ng::from_slice(src))
-            .context("unable to parse ruleset as YAML")?;
+/// API handler to update the ruleset.
+/// Supports JSON and YAML.
+async fn api_handler(State(state): State<WafLayer>, body: Bytes) -> AxumResponse {
+    let ruleset = match parse_ruleset(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("Unable to parse ruleset: {e:#}"),
+            )
+                .into_response();
+        }
+    };
 
-        self.update_ruleset(new)
+    if state.set_ruleset(ruleset) {
+        "Ruleset updated"
+    } else {
+        "Ruleset is the same, not updated"
+    }
+    .into_response()
+}
+
+/// Create an API router for nesting
+pub fn create_router<S: Send + Sync + Clone + 'static>(layer: WafLayer) -> Router<S> {
+    Router::new().route("/update", post(api_handler).with_state(layer))
+}
+
+impl WafLayer {
+    /// Create a new layer from provided CLI and optional HTTP client
+    pub fn new_from_cli(cli: &WafCli, http_client: Option<Arc<dyn Client>>) -> Result<Self, Error> {
+        let fetcher = if let Some(v) = &cli.waf_url {
+            let Some(http_client) = http_client else {
+                return Err(anyhow!("URL source requires HTTP client").into());
+            };
+
+            Some(Arc::new(RulesetFetcherUrl {
+                http_client,
+                url: v.clone(),
+            }) as Arc<dyn FetchesRuleset>)
+        } else {
+            cli.waf_file.as_ref().map(|v| {
+                Arc::new(RulesetFetcherFile { path: v.clone() }) as Arc<dyn FetchesRuleset>
+            })
+        };
+
+        Ok(Self {
+            ruleset: Arc::new(ArcSwap::new(Arc::new(Ruleset::default()))),
+            fetcher,
+            interval: cli.waf_interval,
+        })
     }
 
-    /// Updates the ruleset, only if the new ruleset is different.
-    pub fn update_ruleset(&self, new: Ruleset) -> Result<bool, Error> {
+    /// Updates the ruleset, but only if the new ruleset is different.
+    pub fn set_ruleset(&self, new: Ruleset) -> bool {
         let new = Arc::new(new);
 
         // Check if the new ruleset is different
         if new == self.ruleset.load_full() {
-            return Ok(false);
+            return false;
         }
 
         self.ruleset.store(new);
-        Ok(true)
+        true
     }
-}
 
-/// Updates the ruleset from the given URL
-#[derive(Clone, derive_new::new)]
-pub struct WafRunner {
-    url: Url,
-    client: Arc<dyn Client>,
-    layer: WafLayer,
+    async fn update_ruleset(&self) {
+        let Some(fetcher) = &self.fetcher else {
+            return;
+        };
+
+        let ruleset = match fetcher.fetch_rules().await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("WAF: unable to fetch ruleset: {e:#}");
+                return;
+            }
+        };
+
+        if self.set_ruleset(ruleset) {
+            warn!("WAF: Ruleset was updated");
+        }
+    }
 }
 
 #[async_trait]
-impl Run for WafRunner {
-    async fn run(&self, _token: CancellationToken) -> Result<(), anyhow::Error> {
-        let req = reqwest::Request::new(Method::GET, self.url.clone());
-        let resp = self
-            .client
-            .execute(req)
-            .await
-            .context("unable to execute request")?;
-        let body = resp.text().await.context("unable to get response body")?;
+impl Run for WafLayer {
+    async fn run(&self, token: CancellationToken) -> Result<(), anyhow::Error> {
+        let mut interval = interval(self.interval);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        if self
-            .layer
-            .update_ruleset_raw(body.as_bytes())
-            .context("unable to update ruleset")?
-        {
-            warn!("WafRunner: new ruleset applied");
+        loop {
+            select! {
+                () = token.cancelled() => return Ok(()),
+                _ = interval.tick() => self.update_ruleset().await,
+            }
         }
-
-        Ok(())
     }
+}
+
+#[derive(Args)]
+pub struct WafCli {
+    /// Enables the WAF.
+    /// Requires one of sources to be defined.
+    #[clap(env, long, requires = "waf_input")]
+    pub waf_enable: bool,
+
+    /// Enables the WAF API endpoint.
+    /// Conflicts with `waf_url` and `waf_file`.
+    #[clap(env, long, group = "waf_input")]
+    pub waf_api: bool,
+
+    /// URL where to fetch WAF rules.
+    /// Conflicts with `waf_api` and `waf_file`.
+    #[clap(env, long, group = "waf_input")]
+    pub waf_url: Option<Url>,
+
+    /// File from which to load WAF rules.
+    /// /// Conflicts with `waf_api` and `waf_url`.
+    #[clap(env, long, group = "waf_input")]
+    pub waf_file: Option<PathBuf>,
+
+    /// File from which to load WAF rules.
+    /// /// Conflicts with `waf_api` and `waf_url`.
+    #[clap(env, long, value_parser = parse_duration, default_value = "10s")]
+    pub waf_interval: Duration,
 }
 
 #[cfg(test)]
@@ -1067,7 +1197,11 @@ mod test {
         use axum::routing::get;
 
         let ruleset = Ruleset::default();
-        let layer = WafLayer::new(Arc::new(ArcSwap::new(Arc::new(ruleset))));
+        let layer = WafLayer::new(
+            Arc::new(ArcSwap::new(Arc::new(ruleset))),
+            None,
+            Duration::ZERO,
+        );
 
         let ruleset = r#"
         requests:
@@ -1081,8 +1215,8 @@ mod test {
               regex: ^bar.*$
         "#;
 
-        assert!(layer.update_ruleset_raw(ruleset.as_bytes()).unwrap());
-        assert!(!layer.update_ruleset_raw(ruleset.as_bytes()).unwrap());
+        assert!(layer.set_ruleset(parse_ruleset(ruleset.as_bytes()).unwrap()));
+        assert!(!layer.set_ruleset(parse_ruleset(ruleset.as_bytes()).unwrap()));
 
         let mut router = Router::new()
             .route("/", get(|| async { "foo" }).options(|| async { "bar" }))
