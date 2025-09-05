@@ -2,7 +2,7 @@ use std::{net::IpAddr, sync::Arc, time::Duration};
 
 use ::governor::{clock::QuantaInstant, middleware::NoOpMiddleware};
 use anyhow::{Error, anyhow};
-use axum::{extract::Request, response::IntoResponse};
+use axum::{body::Body, extract::Request, response::IntoResponse};
 use http::StatusCode;
 use tower_governor::{
     GovernorError, GovernorLayer,
@@ -10,7 +10,9 @@ use tower_governor::{
     key_extractor::{GlobalKeyExtractor, KeyExtractor},
 };
 
-use crate::http::ConnInfo;
+use crate::http::middleware::extract_ip_from_request;
+
+pub type RateLimitLayer<K> = GovernorLayer<K, NoOpMiddleware<QuantaInstant>, Body>;
 
 #[derive(Clone)]
 pub struct IpKeyExtractor;
@@ -19,11 +21,7 @@ impl KeyExtractor for IpKeyExtractor {
     type Key = IpAddr;
 
     fn extract<B>(&self, req: &Request<B>) -> Result<Self::Key, GovernorError> {
-        // ConnInfo is expected to exist in request extension, otherwise 500.
-        req.extensions()
-            .get::<Arc<ConnInfo>>()
-            .map(|x| x.remote_addr.ip())
-            .ok_or(GovernorError::UnableToExtractKey)
+        extract_ip_from_request(req).ok_or(GovernorError::UnableToExtractKey)
     }
 }
 
@@ -31,7 +29,7 @@ pub fn layer_global<R: IntoResponse + Clone + Send + Sync + 'static>(
     rps: u32,
     burst_size: u32,
     rate_limited_response: R,
-) -> Result<GovernorLayer<GlobalKeyExtractor, NoOpMiddleware<QuantaInstant>>, Error> {
+) -> Result<RateLimitLayer<GlobalKeyExtractor>, Error> {
     layer(rps, burst_size, GlobalKeyExtractor, rate_limited_response)
 }
 
@@ -39,16 +37,16 @@ pub fn layer_by_ip<R: IntoResponse + Clone + Send + Sync + 'static>(
     rps: u32,
     burst_size: u32,
     rate_limited_response: R,
-) -> Result<GovernorLayer<IpKeyExtractor, NoOpMiddleware<QuantaInstant>>, Error> {
+) -> Result<RateLimitLayer<IpKeyExtractor>, Error> {
     layer(rps, burst_size, IpKeyExtractor, rate_limited_response)
 }
 
-pub fn layer<T: KeyExtractor, R: IntoResponse + Clone + Send + Sync + 'static>(
+pub fn layer<K: KeyExtractor, R: IntoResponse + Clone + Send + Sync + 'static>(
     rps: u32,
     burst_size: u32,
-    key_extractor: T,
+    key_extractor: K,
     rate_limited_response: R,
-) -> Result<GovernorLayer<T, NoOpMiddleware<QuantaInstant>>, Error> {
+) -> Result<RateLimitLayer<K>, Error> {
     let period = Duration::from_secs(1)
         .checked_div(rps)
         .ok_or_else(|| anyhow!("RPS is zero"))?;
@@ -56,26 +54,35 @@ pub fn layer<T: KeyExtractor, R: IntoResponse + Clone + Send + Sync + 'static>(
     let config = Arc::new(
         GovernorConfigBuilder::default()
             .period(period)
-            .error_handler(move |err| match err {
-                GovernorError::TooManyRequests { .. } => {
-                    rate_limited_response.clone().into_response()
-                }
-                GovernorError::UnableToExtractKey => {
-                    (StatusCode::INTERNAL_SERVER_ERROR, "Unable to extract rate limiting key").into_response()
-                }
-                GovernorError::Other { code, msg, headers } => {
-                    (StatusCode::INTERNAL_SERVER_ERROR, format!("Rate limiter failed unexpectedly: code={code}, msg={msg:?}, headers={headers:?}")).into_response()
-                }
-            })
             .burst_size(burst_size)
             .key_extractor(key_extractor)
-            .finish().ok_or_else(|| anyhow!("unable to build governor config"))?);
+            .finish()
+            .ok_or_else(|| anyhow!("unable to build governor config"))?,
+    );
 
-    Ok(GovernorLayer { config })
+    let layer = GovernorLayer::new(config).error_handler(move |err| match err {
+        GovernorError::TooManyRequests { .. } => rate_limited_response.clone().into_response(),
+        GovernorError::UnableToExtractKey => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unable to extract rate limiting key",
+        )
+            .into_response(),
+        GovernorError::Other { code, msg, headers } => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "Rate limiter failed unexpectedly: code={code}, msg={msg:?}, headers={headers:?}"
+            ),
+        )
+            .into_response(),
+    });
+
+    Ok(layer)
 }
 
 #[cfg(test)]
 mod test {
+    use crate::http::ConnInfo;
+
     use super::*;
 
     use axum::{
