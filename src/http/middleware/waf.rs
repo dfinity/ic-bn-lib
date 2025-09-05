@@ -27,7 +27,8 @@ use governor::{
     state::{InMemoryState, NotKeyed, keyed::DashMapStateStore},
 };
 use http::{
-    HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, header::RETRY_AFTER,
+    HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Version,
+    header::{HOST, RETRY_AFTER},
 };
 use humantime::parse_duration;
 use itertools::Itertools;
@@ -159,11 +160,13 @@ impl HeaderMatcher {
 #[serde_as]
 #[derive(Debug, Clone, Deserialize)]
 pub struct RequestMatcher {
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub host: Option<Regex>,
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub path: Option<Regex>,
     #[serde_as(as = "Option<Vec<DisplayFromStr>>")]
     pub methods: Option<Vec<Method>>,
     pub headers: Option<Vec<HeaderMatcher>>,
-    #[serde_as(as = "Option<DisplayFromStr>")]
-    pub url: Option<Regex>,
 }
 
 impl PartialEq for RequestMatcher {
@@ -178,7 +181,8 @@ impl PartialEq for RequestMatcher {
                     .headers
                     .as_ref()
                     .map(|x| x.clone().into_iter().sorted().collect::<Vec<_>>())
-            && self.url.as_ref().map(|x| x.as_str()) == other.url.as_ref().map(|x| x.as_str())
+            && self.host.as_ref().map(|x| x.as_str()) == other.host.as_ref().map(|x| x.as_str())
+            && self.path.as_ref().map(|x| x.as_str()) == other.path.as_ref().map(|x| x.as_str())
     }
 }
 impl Eq for RequestMatcher {}
@@ -186,9 +190,34 @@ impl Eq for RequestMatcher {}
 impl RequestMatcher {
     /// Check if the request matches
     pub fn evaluate<T>(&self, req: &Request<T>) -> bool {
-        // Check if URL matches
-        if let Some(v) = &self.url {
-            if !v.is_match(&req.uri().to_string()) {
+        // Check if host matches
+        if let Some(v) = &self.host {
+            let host = match req.version() {
+                // With <HTTP/2 the host portion of the URI is not populated,
+                // so extract the Host header.
+                Version::HTTP_09 | Version::HTTP_10 | Version::HTTP_11 => req
+                    .headers()
+                    .get(HOST)
+                    .and_then(|x| x.to_str().ok())
+                    .unwrap_or_default(),
+
+                // With >=HTTP/2 it is the other way around - there's no Host header.
+                _ => req.uri().host().unwrap_or_default(),
+            };
+
+            if !v.is_match(host) {
+                return false;
+            }
+        }
+
+        // Check if path matches
+        if let Some(v) = &self.path {
+            if !v.is_match(
+                req.uri()
+                    .path_and_query()
+                    .map(|x| x.as_str())
+                    .unwrap_or_default(),
+            ) {
                 return false;
             }
         }
@@ -751,8 +780,7 @@ pub struct WafCli {
     #[clap(env, long, group = "waf_input")]
     pub waf_file: Option<PathBuf>,
 
-    /// File from which to load WAF rules.
-    /// /// Conflicts with `waf_api` and `waf_url`.
+    /// Interval at which to fetch the rules from the file or URL.
     #[clap(env, long, value_parser = parse_duration, default_value = "10s")]
     pub waf_interval: Duration,
 }
@@ -821,7 +849,8 @@ mod test {
                     "regex": "^beef.*$"
                 }
             ],
-            "url": "^https",
+            "host": "^lala",
+            "path": "^/foo",
         })
         .to_string();
 
@@ -840,7 +869,8 @@ mod test {
                         regex: Regex::from_str("^beef.*$").unwrap(),
                     }
                 ]),
-                url: Some(Regex::from_str("^https").unwrap(),)
+                host: Some(Regex::from_str("^lala").unwrap()),
+                path: Some(Regex::from_str("^/foo").unwrap()),
             }
         );
 
@@ -849,25 +879,31 @@ mod test {
             .header("foo", "barfuss")
             .header("dead", "beefbeef")
             .method(Method::GET)
-            .uri("https://lala")
+            .version(Version::HTTP_2)
+            .uri("https://lala/foo")
             .body("")
             .unwrap();
         assert!(rule.evaluate(&req));
 
-        let req = Request::builder()
-            .header("foo", "barfuss")
-            .header("dead", "beefbeef")
-            .method(Method::OPTIONS)
-            .uri("https://lala")
-            .body("")
-            .unwrap();
-        assert!(rule.evaluate(&req));
+        for http_ver in [Version::HTTP_09, Version::HTTP_10, Version::HTTP_11] {
+            let req = Request::builder()
+                .header("foo", "barfuss")
+                .header("dead", "beefbeef")
+                .header("host", "lala")
+                .version(http_ver)
+                .method(Method::OPTIONS)
+                .uri("https://lala/foo")
+                .body("")
+                .unwrap();
+            assert!(rule.evaluate(&req));
+        }
 
         let req = Request::builder()
             .header("dead", "beefbeef")
             .header("foo", "barfuss")
+            .version(Version::HTTP_2)
             .method(Method::OPTIONS)
-            .uri("https://lala")
+            .uri("https://lala/foo")
             .body("")
             .unwrap();
         assert!(rule.evaluate(&req));
@@ -877,7 +913,7 @@ mod test {
             .header("foo", "barfuss")
             .header("dead", "beefbeef")
             .method(Method::POST)
-            .uri("https://lala")
+            .uri("https://lala/foo")
             .body("")
             .unwrap();
         assert!(!rule.evaluate(&req));
@@ -886,7 +922,7 @@ mod test {
             .header("foo", "barfuss")
             .header("dead", "beefbeef")
             .method(Method::GET)
-            .uri("http://lala")
+            .uri("https://lala/bar")
             .body("")
             .unwrap();
         assert!(!rule.evaluate(&req));
@@ -895,7 +931,7 @@ mod test {
             .header("fox", "barfuss")
             .header("dead", "beefbeef")
             .method(Method::GET)
-            .uri("https://lala")
+            .uri("https://lala/foo")
             .body("")
             .unwrap();
         assert!(!rule.evaluate(&req));
@@ -1072,7 +1108,8 @@ mod test {
             {
                 "rule": {
                     "methods": ["GET", "POST"],
-                    "url": "^https.*",
+                    "host": "^foo",
+                    "path": "^/bar"
                 },
                 "action": "limit:global:10/1h",
             },
@@ -1126,7 +1163,8 @@ mod test {
         for _ in 0..10 {
             let req = Request::builder()
                 .method(Method::GET)
-                .uri("https://foobar")
+                .version(Version::HTTP_2)
+                .uri("https://foo/bar")
                 .body("")
                 .unwrap();
             assert_eq!(ruleset.evaluate_request(&req), Decision::Pass);
@@ -1134,7 +1172,8 @@ mod test {
 
         let req = Request::builder()
             .method(Method::GET)
-            .uri("https://foobar")
+            .version(Version::HTTP_2)
+            .uri("https://foo/bar")
             .body("")
             .unwrap();
 
@@ -1149,7 +1188,8 @@ mod test {
         for _ in 0..1000 {
             let req = Request::builder()
                 .method(Method::GET)
-                .uri("https://foobar")
+                .version(Version::HTTP_2)
+                .uri("https://foo/bar")
                 .body("")
                 .unwrap();
             assert!(matches!(
