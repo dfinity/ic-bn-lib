@@ -104,17 +104,17 @@ mod test {
         assert!(TypeLatency::<RequestType>::from_str("foo").is_err());
         assert!(TypeLatency::<RequestType>::from_str(":").is_err());
         assert!(TypeLatency::<RequestType>::from_str("foo:100ms").is_err());
-        assert!(TypeLatency::<RequestType>::from_str("query:").is_err());
-        assert!(TypeLatency::<RequestType>::from_str("query:1gigasecond").is_err());
+        assert!(TypeLatency::<RequestType>::from_str("query_v2:").is_err());
+        assert!(TypeLatency::<RequestType>::from_str("query_v2:1gigasecond").is_err());
 
         assert_eq!(
-            TypeLatency::<RequestType>::from_str("query:100ms").unwrap(),
-            TypeLatency::<RequestType>(RequestType::Query, Duration::from_millis(100))
+            TypeLatency::<RequestType>::from_str("query_v2:100ms").unwrap(),
+            TypeLatency::<RequestType>(RequestType::QueryV2, Duration::from_millis(100))
         );
 
         assert_eq!(
-            TypeLatency::<RequestType>::from_str("sync_call:1s").unwrap(),
-            TypeLatency::<RequestType>(RequestType::SyncCall, Duration::from_millis(1000))
+            TypeLatency::<RequestType>::from_str("call_v3:1s").unwrap(),
+            TypeLatency::<RequestType>(RequestType::CallV3, Duration::from_millis(1000))
         );
     }
 
