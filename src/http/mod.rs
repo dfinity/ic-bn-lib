@@ -116,10 +116,11 @@ pub fn extract_host(host_port: &str) -> Option<&str> {
 
     // Cover IPv6 case
     if host_port.as_bytes()[0] == b'[' {
-        host_port.find(']').map(|i| &host_port[0..=i])
+        host_port.find(']').map(|i| &host_port[1..i])
     } else {
         host_port.split(':').next()
     }
+    .filter(|x| !x.is_empty())
 }
 
 /// Attempts to extract host from `X-Forwarded-Host` header, HTTP2 "authority" pseudo-header or from HTTP/1.1 `Host` header
@@ -285,25 +286,27 @@ mod test {
     #[test]
     fn test_extract_host() {
         assert_eq!(extract_host("foo.bar"), Some("foo.bar"));
-        assert_eq!(extract_host("foo.bar:123"), Some("foo.bar"));
+        assert_eq!(extract_host("foo.bar:443"), Some("foo.bar"));
         assert_eq!(extract_host("foo.bar:"), Some("foo.bar"));
-        assert_eq!(extract_host("foo:123"), Some("foo"));
+        assert_eq!(extract_host("foo:443"), Some("foo"));
 
-        assert_eq!(extract_host("127.0.0.1:123"), Some("127.0.0.1"));
+        assert_eq!(extract_host("127.0.0.1:443"), Some("127.0.0.1"));
+        assert_eq!(extract_host("[::1]:443"), Some("::1"));
 
         assert_eq!(
             extract_host("[fe80::b696:91ff:fe84:3ae8]"),
-            Some("[fe80::b696:91ff:fe84:3ae8]")
+            Some("fe80::b696:91ff:fe84:3ae8")
         );
         assert_eq!(
             extract_host("[fe80::b696:91ff:fe84:3ae8]:123"),
-            Some("[fe80::b696:91ff:fe84:3ae8]")
+            Some("fe80::b696:91ff:fe84:3ae8")
         );
 
         // Unterminated bracket
         assert_eq!(extract_host("[fe80::b696:91ff:fe84:3ae8:123"), None);
         // Empty
         assert_eq!(extract_host(""), None);
+        assert_eq!(extract_host("[]:443"), None);
     }
 
     #[test]
@@ -325,6 +328,15 @@ mod test {
             .build()
             .unwrap();
         assert_eq!(extract_authority(&req), Some("foo.bar"));
+
+        let mut req = Request::new(());
+        *req.uri_mut() = Uri::builder()
+            .scheme("http")
+            .authority("[::1]:443")
+            .path_and_query("/foo?bar=baz")
+            .build()
+            .unwrap();
+        assert_eq!(extract_authority(&req), Some("::1"));
 
         // Host header
         let mut req = Request::new(());
