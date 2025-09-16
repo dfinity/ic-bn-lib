@@ -24,13 +24,28 @@ pub struct HttpClient {
     #[clap(env, long, default_value = "120s", value_parser = parse_duration)]
     pub http_client_pool_idle: Duration,
 
-    /// TCP Keepalive interval
-    #[clap(env, long, default_value = "15s", value_parser = parse_duration)]
-    pub http_client_tcp_keepalive: Duration,
+    /// TCP Keepalive delay.
+    /// It's the time between when the connection became idle and when the keepalive packet is sent.
+    /// If not specified - keepalives are disabled.
+    #[clap(env, long, value_parser = parse_duration)]
+    pub http_client_tcp_keepalive_delay: Option<Duration>,
 
-    /// HTTP2 Keepalive interval
-    #[clap(env, long, default_value = "10s", value_parser = parse_duration)]
-    pub http_client_http2_keepalive: Duration,
+    /// TCP Keepalive interval.
+    /// If the acknowledgement for the 1st keepalive wasn't received - retry after this time.
+    /// If not specified - use system default.
+    #[clap(env, long, value_parser = parse_duration)]
+    pub http_client_tcp_keepalive_interval: Option<Duration>,
+
+    /// TCP Keepalive retries.
+    /// If this many keepalives in a row weren't acknowledged - close the connection.
+    /// If not specified - use system default.
+    #[clap(env, long)]
+    pub http_client_tcp_keepalive_retries: Option<u32>,
+
+    /// HTTP2 Keepalive interval.
+    /// If not specified - the keepalives are not sent.
+    #[clap(env, long, value_parser = parse_duration)]
+    pub http_client_http2_keepalive: Option<Duration>,
 
     /// HTTP2 Keepalive timeout
     #[clap(env, long, default_value = "5s", value_parser = parse_duration)]
@@ -54,10 +69,12 @@ impl From<&HttpClient> for super::Options {
             timeout: c.http_client_timeout,
             pool_idle_timeout: Some(c.http_client_pool_idle),
             pool_idle_max: None,
-            tcp_keepalive: Some(c.http_client_tcp_keepalive),
-            http2_keepalive: Some(c.http_client_http2_keepalive),
+            tcp_keepalive_delay: c.http_client_tcp_keepalive_delay,
+            tcp_keepalive_interval: c.http_client_tcp_keepalive_interval,
+            tcp_keepalive_retries: c.http_client_tcp_keepalive_retries,
+            http2_keepalive: c.http_client_http2_keepalive,
             http2_keepalive_timeout: c.http_client_http2_keepalive_timeout,
-            http2_keepalive_idle: false,
+            http2_keepalive_idle: true,
             http_version: c.http_client_http_version,
             user_agent: "".into(),
             tls_config: None,

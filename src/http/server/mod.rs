@@ -32,10 +32,11 @@ use prometheus::{
 use proxy_protocol::{ProxyHeader, ProxyProtocolStream};
 use rustls::{CipherSuite, ProtocolVersion, server::ServerConnection, sign::SingleCertAndKey};
 use scopeguard::defer;
+use socket2::{Domain, Socket, TcpKeepalive, Type};
 use strum::EnumString;
 use tokio::{
     io::AsyncWriteExt,
-    net::{TcpListener, TcpSocket, UnixListener, UnixSocket},
+    net::{TcpListener, UnixListener, UnixSocket},
     pin, select,
     sync::mpsc::channel,
     time::{sleep, timeout},
@@ -178,9 +179,13 @@ pub struct Options {
     pub read_timeout: Option<Duration>,
     pub write_timeout: Option<Duration>,
     pub idle_timeout: Duration,
+    pub tcp_keepalive_delay: Option<Duration>,
+    pub tcp_keepalive_interval: Option<Duration>,
+    pub tcp_keepalive_retries: Option<u32>,
+    pub tcp_mss: Option<u32>,
     pub http1_header_read_timeout: Duration,
     pub http2_max_streams: u32,
-    pub http2_keepalive_interval: Duration,
+    pub http2_keepalive_interval: Option<Duration>,
     pub http2_keepalive_timeout: Duration,
     pub grace_period: Duration,
     pub max_requests_per_conn: Option<u64>,
@@ -195,14 +200,36 @@ impl Default for Options {
             read_timeout: Some(Duration::from_secs(60)),
             write_timeout: Some(Duration::from_secs(60)),
             idle_timeout: Duration::from_secs(60),
+            tcp_keepalive_delay: None,
+            tcp_keepalive_interval: None,
+            tcp_keepalive_retries: None,
+            tcp_mss: None,
             http1_header_read_timeout: Duration::from_secs(10),
             http2_max_streams: 128,
-            http2_keepalive_interval: Duration::from_secs(20),
+            http2_keepalive_interval: None,
             http2_keepalive_timeout: Duration::from_secs(10),
             grace_period: Duration::from_secs(60),
             max_requests_per_conn: None,
             proxy_protocol_mode: ProxyProtocolMode::Off,
         }
+    }
+}
+
+impl From<&Options> for TcpKeepalive {
+    fn from(v: &Options) -> Self {
+        let mut ka = Self::new();
+
+        if let Some(v) = v.tcp_keepalive_delay {
+            ka = ka.with_time(v);
+        }
+        if let Some(v) = v.tcp_keepalive_interval {
+            ka = ka.with_interval(v);
+        }
+        if let Some(v) = v.tcp_keepalive_retries {
+            ka = ka.with_retries(v);
+        }
+
+        ka
     }
 }
 
@@ -273,6 +300,12 @@ impl ConnInfo {
     }
 }
 
+pub struct ListenerOpts {
+    backlog: u32,
+    mss: Option<u32>,
+    keepalive: TcpKeepalive,
+}
+
 /// Connection listener
 pub enum Listener {
     Tcp(TcpListener),
@@ -281,10 +314,10 @@ pub enum Listener {
 
 impl Listener {
     /// Create a new Listener
-    pub fn new(addr: Addr, backlog: u32) -> Result<Self, Error> {
+    pub fn new(addr: Addr, opts: ListenerOpts) -> Result<Self, Error> {
         Ok(match addr {
-            Addr::Tcp(v) => Self::Tcp(listen_tcp_backlog(v, backlog)?),
-            Addr::Unix(v) => Self::Unix(listen_unix_backlog(v, backlog)?),
+            Addr::Tcp(v) => Self::Tcp(listen_tcp_backlog(v, opts)?),
+            Addr::Unix(v) => Self::Unix(listen_unix_backlog(v, opts)?),
         })
     }
 
@@ -293,8 +326,6 @@ impl Listener {
         Ok(match self {
             Self::Tcp(v) => {
                 let x = v.accept().await?;
-                // Disable Nagle's algo
-                x.0.set_nodelay(true)?;
                 (Box::new(x.0), Addr::Tcp(x.1))
             }
             Self::Unix(v) => {
@@ -876,7 +907,7 @@ impl Server {
             .adaptive_window(true)
             .max_concurrent_streams(Some(options.http2_max_streams))
             .timer(TokioTimer::new()) // Needed for the keepalives below
-            .keep_alive_interval(Some(options.http2_keepalive_interval))
+            .keep_alive_interval(options.http2_keepalive_interval)
             .keep_alive_timeout(options.http2_keepalive_timeout)
             .enable_connect_protocol(); // Needed for Websockets
 
@@ -891,8 +922,15 @@ impl Server {
         }
     }
 
+    /// Start serving with given cancellation token
     pub async fn serve(&self, token: CancellationToken) -> Result<(), Error> {
-        let listener = Listener::new(self.addr.clone(), self.options.backlog)?;
+        let opts = ListenerOpts {
+            backlog: self.options.backlog,
+            mss: self.options.tcp_mss,
+            keepalive: (&self.options).into(),
+        };
+
+        let listener = Listener::new(self.addr.clone(), opts)?;
         self.serve_with_listener(listener, token).await
     }
 
@@ -931,6 +969,7 @@ impl Server {
         });
     }
 
+    /// Start serving with a given listener & cancellation token
     pub async fn serve_with_listener(
         &self,
         listener: Listener,
@@ -986,25 +1025,42 @@ impl Server {
     }
 }
 
-// Creates a TCP listener with a backlog set
-pub fn listen_tcp_backlog(addr: SocketAddr, backlog: u32) -> Result<TcpListener, Error> {
-    let socket = match addr {
-        SocketAddr::V4(_) => TcpSocket::new_v4(),
-        SocketAddr::V6(_) => TcpSocket::new_v6(),
+// Creates a TCP listener with given opts
+pub fn listen_tcp_backlog(addr: SocketAddr, opts: ListenerOpts) -> Result<TcpListener, Error> {
+    let domain = if addr.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+
+    let socket = Socket::new(domain, Type::STREAM, None).context("unable to create socket")?;
+    socket
+        .set_tcp_nodelay(true)
+        .context("unable to set TCP_NODELAY")?;
+
+    if let Some(v) = opts.mss {
+        socket.set_tcp_mss(v).context("unable to set TCP MSS")?;
     }
-    .context("unable to open socket")?;
 
     socket
-        .set_reuseaddr(true)
+        .set_reuse_address(true)
         .context("unable to set SO_REUSEADDR")?;
-    socket.bind(addr).context("unable to bind socket")?;
+    socket
+        .set_tcp_keepalive(&opts.keepalive)
+        .context("unable to set keepalive on the socket")?;
+    socket.bind(&addr.into()).context("unable to bind socket")?;
+    socket
+        .listen(opts.backlog as i32)
+        .context("unable to listen on the socket")?;
 
-    let socket = socket.listen(backlog).context("unable to listen socket")?;
-    Ok(socket)
+    let listener = TcpListener::from_std(socket.into())
+        .context("unable to convert socket from the standard one")?;
+
+    Ok(listener)
 }
 
-// Creates a Unix Socket listener with a backlog set
-pub fn listen_unix_backlog(path: PathBuf, backlog: u32) -> Result<UnixListener, Error> {
+// Creates a Unix Socket listener with given opts
+pub fn listen_unix_backlog(path: PathBuf, opts: ListenerOpts) -> Result<UnixListener, Error> {
     let socket = UnixSocket::new_stream().context("unable to open UNIX socket")?;
 
     if path.exists() {
@@ -1013,7 +1069,9 @@ pub fn listen_unix_backlog(path: PathBuf, backlog: u32) -> Result<UnixListener, 
 
     socket.bind(&path).context("unable to bind socket")?;
 
-    let socket = socket.listen(backlog).context("unable to listen socket")?;
+    let socket = socket
+        .listen(opts.backlog)
+        .context("unable to listen socket")?;
 
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))
         .context("unable to set permissions on socket")?;
