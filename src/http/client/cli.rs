@@ -56,6 +56,13 @@ pub struct HttpClient {
     #[clap(env, long, default_value = "all")]
     pub http_client_http_version: HttpVersion,
 
+    /// If the target hostname resolves to both IPv6 and IPv4,
+    /// we first try the preferred family and if the connections isn't established
+    /// in this time - we in parallel try the other family.
+    /// See RFC6555.
+    #[clap(env, long, value_parser = parse_duration, default_value = "500ms")]
+    pub http_client_happy_eyeballs_timeout: Duration,
+
     /// Fixed name to use when checking TLS certificates, instead of the host name.
     #[clap(env, long)]
     pub http_client_tls_fixed_name: Option<String>,
@@ -75,6 +82,7 @@ impl From<&HttpClient> for super::Options {
             http2_keepalive: c.http_client_http2_keepalive,
             http2_keepalive_timeout: c.http_client_http2_keepalive_timeout,
             http2_keepalive_idle: true,
+            happy_eyeballs_timeout: c.http_client_happy_eyeballs_timeout,
             http_version: c.http_client_http_version,
             user_agent: "".into(),
             tls_config: None,
