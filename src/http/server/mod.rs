@@ -178,7 +178,7 @@ pub struct Options {
     pub tls_handshake_timeout: Duration,
     pub read_timeout: Option<Duration>,
     pub write_timeout: Option<Duration>,
-    pub idle_timeout: Duration,
+    pub idle_timeout: Option<Duration>,
     pub tcp_keepalive_delay: Option<Duration>,
     pub tcp_keepalive_interval: Option<Duration>,
     pub tcp_keepalive_retries: Option<u32>,
@@ -199,7 +199,7 @@ impl Default for Options {
             tls_handshake_timeout: Duration::from_secs(15),
             read_timeout: Some(Duration::from_secs(60)),
             write_timeout: Some(Duration::from_secs(60)),
-            idle_timeout: Duration::from_secs(60),
+            idle_timeout: None,
             tcp_keepalive_delay: None,
             tcp_keepalive_interval: None,
             tcp_keepalive_retries: None,
@@ -632,8 +632,9 @@ impl Conn {
         tls_info: Option<Arc<TlsInfo>>,
         requests_inflight: GenericGauge<AtomicI64>,
     ) -> Result<(), Error> {
-        // Create a timer for idle connection tracking
-        let mut idle_timer = Box::pin(sleep(self.options.idle_timeout));
+        // Create a timer for idle connection tracking.
+        // Falls back to 10 years if idle timer is not set (for simplicity)
+        let mut idle_timer = Box::pin(sleep(self.options.idle_timeout.unwrap_or(10 * YEAR)));
 
         // Create channel to notify about request start/stop.
         // Use bounded but big enough so that it's larger than our concurrency.
@@ -732,11 +733,14 @@ impl Conn {
                     match v {
                         RequestState::Start => {
                             let reqs = self.requests.fetch_add(1, Ordering::SeqCst) + 1;
-                            debug!("{self}: request started, stopping idle timer (now: {reqs})");
+                            debug!("{self}: request started");
 
                             // Effectively disable the timer by setting it to 1 year into the future.
                             // TODO improve?
-                            idle_timer.as_mut().reset(tokio::time::Instant::now() + YEAR);
+                            if self.options.idle_timeout.is_some() {
+                                debug!("stopping idle timer (now: {reqs})");
+                                idle_timer.as_mut().reset(tokio::time::Instant::now() + 10 * YEAR);
+                            }
                         },
 
                         RequestState::End => {
@@ -744,10 +748,10 @@ impl Conn {
                             debug!("{self}: request finished (now: {reqs})");
 
                             // Check if the number of outstanding requests is now zero
-                            if reqs == 0 {
+                            if let Some(v) = self.options.idle_timeout && reqs == 0 {
                                 debug!("{self}: no outstanding requests, starting timer");
                                 // Enable the idle timer
-                                idle_timer.as_mut().reset(tokio::time::Instant::now() + self.options.idle_timeout);
+                                idle_timer.as_mut().reset(tokio::time::Instant::now() + v);
                             }
                         }
                     }

@@ -33,8 +33,8 @@ pub struct HttpServer {
     /// If no requests are executed during this period - the connections is closed.
     /// Mostly needed for HTTP/2 where the read timeout sometimes cannot kick in
     /// due to PING frames and other non-request activity.
-    #[clap(env, long, default_value = "60s", value_parser = parse_duration)]
-    pub http_server_idle_timeout: Duration,
+    #[clap(env, long, value_parser = parse_duration)]
+    pub http_server_idle_timeout: Option<Duration>,
 
     /// TLS handshake timeout
     #[clap(env, long, default_value = "15s", value_parser = parse_duration)]
