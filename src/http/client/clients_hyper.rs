@@ -91,19 +91,21 @@ where
         builder
             .http2_adaptive_window(true)
             .http2_keep_alive_interval(opts.http2_keepalive)
-            .http2_keep_alive_timeout(opts.http2_keepalive_timeout)
             .http2_keep_alive_while_idle(opts.http2_keepalive_idle)
             .pool_idle_timeout(opts.pool_idle_timeout)
             .pool_timer(TokioTimer::new())
             .timer(TokioTimer::new())
             .retry_canceled_requests(true);
 
+        if let Some(v) = opts.http2_keepalive_timeout {
+            builder.http2_keep_alive_timeout(v);
+        }
+
         if let Some(v) = opts.pool_idle_max {
             builder.pool_max_idle_per_host(v);
         }
 
         let cli = builder.build(https_conn);
-
         Self { cli }
     }
 }

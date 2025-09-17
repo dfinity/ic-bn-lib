@@ -54,8 +54,8 @@ pub struct HttpClient {
     pub http_client_http2_keepalive: Option<Duration>,
 
     /// HTTP2 Keepalive timeout
-    #[clap(env, long, default_value = "20s", value_parser = parse_duration)]
-    pub http_client_http2_keepalive_timeout: Duration,
+    #[clap(env, long, value_parser = parse_duration)]
+    pub http_client_http2_keepalive_timeout: Option<Duration>,
 
     /// Whether to send HTTP2 Keepalives while connection is idle (no active streams)
     #[clap(env, long)]
@@ -67,8 +67,8 @@ pub struct HttpClient {
     pub http_client_http_version: HttpVersion,
 
     /// If the target hostname resolves to both IPv6 and IPv4,
-    /// we first try the preferred family and if the connections isn't established
-    /// in this time - we in parallel try the other family.
+    /// we first try the preferred family and, if the connection isn't established
+    /// in this time, we in parallel try the other family.
     /// See RFC6555.
     #[clap(env, long, value_parser = parse_duration, default_value = "500ms")]
     pub http_client_happy_eyeballs_timeout: Duration,
