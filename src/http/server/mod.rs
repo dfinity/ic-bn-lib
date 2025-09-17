@@ -735,10 +735,10 @@ impl Conn {
                             let reqs = self.requests.fetch_add(1, Ordering::SeqCst) + 1;
                             debug!("{self}: request started");
 
-                            // Effectively disable the timer by setting it to 1 year into the future.
+                            // Effectively disable the timer by setting it to 10 years into the future.
                             // TODO improve?
                             if self.options.idle_timeout.is_some() {
-                                debug!("stopping idle timer (now: {reqs})");
+                                debug!("{self}: stopping idle timer (now: {reqs})");
                                 idle_timer.as_mut().reset(tokio::time::Instant::now() + 10 * YEAR);
                             }
                         },
@@ -749,8 +749,8 @@ impl Conn {
 
                             // Check if the number of outstanding requests is now zero
                             if let Some(v) = self.options.idle_timeout && reqs == 0 {
-                                debug!("{self}: no outstanding requests, starting timer");
                                 // Enable the idle timer
+                                debug!("{self}: no outstanding requests, starting timer");
                                 idle_timer.as_mut().reset(tokio::time::Instant::now() + v);
                             }
                         }
@@ -758,7 +758,7 @@ impl Conn {
                 },
 
                 // See if the idle timeout has kicked in
-                () = idle_timer.as_mut() => {
+                () = idle_timer.as_mut(), if self.options.idle_timeout.is_some() => {
                     debug!("{self}: Idle timeout triggered, closing");
 
                     // Signal that we're closing
