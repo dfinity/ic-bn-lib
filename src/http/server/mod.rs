@@ -1054,6 +1054,9 @@ pub fn listen_tcp_backlog(addr: SocketAddr, opts: ListenerOpts) -> Result<TcpLis
         .context("unable to set keepalive on the socket")?;
     socket.bind(&addr.into()).context("unable to bind socket")?;
     socket
+        .set_nonblocking(true)
+        .context("unable to set socket into non-blocking mode")?;
+    socket
         .listen(opts.backlog as i32)
         .context("unable to listen on the socket")?;
 
