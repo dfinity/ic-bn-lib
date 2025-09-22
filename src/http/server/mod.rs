@@ -316,8 +316,8 @@ impl Listener {
     /// Create a new Listener
     pub fn new(addr: Addr, opts: ListenerOpts) -> Result<Self, Error> {
         Ok(match addr {
-            Addr::Tcp(v) => Self::Tcp(listen_tcp_backlog(v, opts)?),
-            Addr::Unix(v) => Self::Unix(listen_unix_backlog(v, opts)?),
+            Addr::Tcp(v) => Self::Tcp(listen_tcp(v, opts)?),
+            Addr::Unix(v) => Self::Unix(listen_unix(v, opts)?),
         })
     }
 
@@ -1030,7 +1030,7 @@ impl Server {
 }
 
 // Creates a TCP listener with given opts
-pub fn listen_tcp_backlog(addr: SocketAddr, opts: ListenerOpts) -> Result<TcpListener, Error> {
+pub fn listen_tcp(addr: SocketAddr, opts: ListenerOpts) -> Result<TcpListener, Error> {
     let domain = if addr.is_ipv4() {
         Domain::IPV4
     } else {
@@ -1052,6 +1052,10 @@ pub fn listen_tcp_backlog(addr: SocketAddr, opts: ListenerOpts) -> Result<TcpLis
     socket
         .set_tcp_keepalive(&opts.keepalive)
         .context("unable to set keepalive on the socket")?;
+    socket
+        .set_nonblocking(true)
+        .context("unable to set socket into non-blocking mode")?;
+
     socket.bind(&addr.into()).context("unable to bind socket")?;
     socket
         .listen(opts.backlog as i32)
@@ -1064,7 +1068,7 @@ pub fn listen_tcp_backlog(addr: SocketAddr, opts: ListenerOpts) -> Result<TcpLis
 }
 
 // Creates a Unix Socket listener with given opts
-pub fn listen_unix_backlog(path: PathBuf, opts: ListenerOpts) -> Result<UnixListener, Error> {
+pub fn listen_unix(path: PathBuf, opts: ListenerOpts) -> Result<UnixListener, Error> {
     let socket = UnixSocket::new_stream().context("unable to open UNIX socket")?;
 
     if path.exists() {
@@ -1088,5 +1092,53 @@ impl Run for Server {
     async fn run(&self, token: CancellationToken) -> Result<(), anyhow::Error> {
         self.serve(token).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use http::StatusCode;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_server() {
+        let opts = Options::default();
+        let listener = listen_tcp(
+            "127.0.0.1:0".parse().unwrap(),
+            ListenerOpts {
+                backlog: 128,
+                mss: None,
+                keepalive: (&opts).into(),
+            },
+        )
+        .unwrap();
+
+        let addr = listener.local_addr().unwrap();
+
+        let server = Server::new(
+            Addr::Tcp(addr),
+            Router::new(),
+            opts,
+            Metrics::new(&Registry::new()),
+            None,
+        );
+
+        tokio::spawn(async move {
+            server
+                .serve_with_listener(listener.into(), CancellationToken::new())
+                .await
+                .unwrap();
+        });
+
+        for _ in 0..10 {
+            let Ok(result) = reqwest::get(format!("http://{addr}")).await else {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
+            };
+
+            assert_eq!(result.status(), StatusCode::NOT_FOUND);
+            break;
+        }
     }
 }
