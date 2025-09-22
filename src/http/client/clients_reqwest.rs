@@ -40,9 +40,10 @@ pub fn new<R: CloneableDnsResolver>(
         .timeout(opts.timeout)
         .pool_idle_timeout(opts.pool_idle_timeout)
         .tcp_nodelay(true)
-        .tcp_keepalive(opts.tcp_keepalive)
+        .tcp_keepalive(opts.tcp_keepalive_delay)
+        .tcp_keepalive_interval(opts.tcp_keepalive_interval)
+        .tcp_keepalive_retries(opts.tcp_keepalive_retries)
         .http2_keep_alive_interval(opts.http2_keepalive)
-        .http2_keep_alive_timeout(opts.http2_keepalive_timeout)
         .http2_keep_alive_while_idle(opts.http2_keepalive_idle)
         .http2_adaptive_window(true)
         .user_agent(opts.user_agent)
@@ -57,6 +58,10 @@ pub fn new<R: CloneableDnsResolver>(
             client = client.http2_prior_knowledge();
         }
         _ => {}
+    }
+
+    if let Some(v) = opts.http2_keepalive_timeout {
+        client = client.http2_keep_alive_timeout(v);
     }
 
     if let Some(v) = opts.pool_idle_max {

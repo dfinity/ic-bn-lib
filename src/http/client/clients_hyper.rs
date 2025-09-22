@@ -56,13 +56,13 @@ where
     pub fn new(opts: Options, resolver: R) -> Self {
         let mut http_conn = HttpConnector::new_with_resolver(resolver);
         http_conn.set_connect_timeout(Some(opts.timeout_connect));
-        http_conn.set_keepalive(opts.tcp_keepalive);
-        http_conn.set_keepalive_interval(opts.tcp_keepalive.map(|x| x.div_f32(4.0)));
-        http_conn.set_keepalive_retries(Some(2));
+        http_conn.set_keepalive(opts.tcp_keepalive_delay);
+        http_conn.set_keepalive_interval(opts.tcp_keepalive_interval);
+        http_conn.set_keepalive_retries(opts.tcp_keepalive_retries);
         http_conn.enforce_http(false);
         http_conn.set_nodelay(true);
         http_conn.set_reuse_address(true);
-        http_conn.set_happy_eyeballs_timeout(Some(Duration::from_millis(100)));
+        http_conn.set_happy_eyeballs_timeout(Some(opts.happy_eyeballs_timeout));
 
         let builder = HttpsConnector::<HttpConnector>::builder();
         let mut builder = if let Some(mut v) = opts.tls_config {
@@ -89,19 +89,23 @@ where
 
         let mut builder = ClientHyper::builder(TokioExecutor::new());
         builder
-            .pool_max_idle_per_host(opts.pool_idle_max.unwrap_or(usize::MAX))
             .http2_adaptive_window(true)
+            .http2_keep_alive_interval(opts.http2_keepalive)
+            .http2_keep_alive_while_idle(opts.http2_keepalive_idle)
             .pool_idle_timeout(opts.pool_idle_timeout)
             .pool_timer(TokioTimer::new())
             .timer(TokioTimer::new())
             .retry_canceled_requests(true);
+
+        if let Some(v) = opts.http2_keepalive_timeout {
+            builder.http2_keep_alive_timeout(v);
+        }
 
         if let Some(v) = opts.pool_idle_max {
             builder.pool_max_idle_per_host(v);
         }
 
         let cli = builder.build(https_conn);
-
         Self { cli }
     }
 }

@@ -15,9 +15,8 @@ pub struct HttpServer {
 
     /// Maximum number of HTTP requests to serve over a single connection.
     /// After this number is reached the connection is gracefully closed.
-    /// The default is consistent with nginx's `keepalive_requests` parameter.
-    #[clap(env, long, default_value = "1000")]
-    pub http_server_max_requests_per_conn: u64,
+    #[clap(env, long)]
+    pub http_server_max_requests_per_conn: Option<u64>,
 
     /// Timeout for network read calls.
     /// If the read call takes longer than that - the connection is closed.
@@ -34,8 +33,8 @@ pub struct HttpServer {
     /// If no requests are executed during this period - the connections is closed.
     /// Mostly needed for HTTP/2 where the read timeout sometimes cannot kick in
     /// due to PING frames and other non-request activity.
-    #[clap(env, long, default_value = "60s", value_parser = parse_duration)]
-    pub http_server_idle_timeout: Duration,
+    #[clap(env, long, value_parser = parse_duration)]
+    pub http_server_idle_timeout: Option<Duration>,
 
     /// TLS handshake timeout
     #[clap(env, long, default_value = "15s", value_parser = parse_duration)]
@@ -56,12 +55,35 @@ pub struct HttpServer {
     pub http_server_http2_max_streams: u32,
 
     /// Keepalive interval for HTTP2 connections
-    #[clap(env, long, default_value = "20s", value_parser = parse_duration)]
-    pub http_server_http2_keepalive_interval: Duration,
+    #[clap(env, long, value_parser = parse_duration)]
+    pub http_server_http2_keepalive_interval: Option<Duration>,
 
     /// Keepalive timeout for HTTP2 connections
     #[clap(env, long, default_value = "10s", value_parser = parse_duration)]
     pub http_server_http2_keepalive_timeout: Duration,
+
+    /// TCP Keepalive delay.
+    /// It's the time between when the connection became idle and when the keepalive packet is sent.
+    /// If not specified - keepalives are disabled.
+    #[clap(env, long, value_parser = parse_duration)]
+    pub http_server_tcp_keepalive_delay: Option<Duration>,
+
+    /// TCP Keepalive interval.
+    /// If the acknowledgement for the 1st keepalive wasn't received - retry after this time.
+    /// If not specified - use system default.
+    #[clap(env, long, value_parser = parse_duration)]
+    pub http_server_tcp_keepalive_interval: Option<Duration>,
+
+    /// TCP Keepalive retries.
+    /// If this many keepalives in a row weren't acknowledged - close the connection.
+    /// If not specified - use system default.
+    #[clap(env, long)]
+    pub http_server_tcp_keepalive_retries: Option<u32>,
+
+    /// TCP MSS option.
+    /// Limits the TCP segment size, can be used to work around PMTU issues.
+    #[clap(env, long)]
+    pub http_server_tcp_mss: Option<u32>,
 
     /// Maximum size of cache to store TLS sessions in memory
     #[clap(env, long, default_value = "256MB", value_parser = parse_size)]
@@ -98,12 +120,16 @@ impl From<&HttpServer> for super::Options {
             write_timeout: Some(c.http_server_write_timeout),
             idle_timeout: c.http_server_idle_timeout,
             tls_handshake_timeout: c.http_server_tls_handshake_timeout,
+            tcp_keepalive_delay: c.http_server_tcp_keepalive_delay,
+            tcp_keepalive_interval: c.http_server_tcp_keepalive_interval,
+            tcp_keepalive_retries: c.http_server_tcp_keepalive_retries,
+            tcp_mss: c.http_server_tcp_mss,
             http1_header_read_timeout: c.http_server_http1_header_read_timeout,
             http2_keepalive_interval: c.http_server_http2_keepalive_interval,
             http2_keepalive_timeout: c.http_server_http2_keepalive_timeout,
             http2_max_streams: c.http_server_http2_max_streams,
             grace_period: c.http_server_grace_period,
-            max_requests_per_conn: Some(c.http_server_max_requests_per_conn),
+            max_requests_per_conn: c.http_server_max_requests_per_conn,
             proxy_protocol_mode: c.http_server_proxy_protocol_mode,
         }
     }

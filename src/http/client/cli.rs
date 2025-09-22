@@ -20,26 +20,58 @@ pub struct HttpClient {
     #[clap(env, long, default_value = "60s", value_parser = parse_duration)]
     pub http_client_timeout: Duration,
 
-    /// How long to keep idle HTTP connections open
-    #[clap(env, long, default_value = "120s", value_parser = parse_duration)]
-    pub http_client_pool_idle: Duration,
+    /// How long to keep idle HTTP connections open.
+    /// Default is 90s.
+    #[clap(env, long, value_parser = parse_duration)]
+    pub http_client_pool_idle_timeout: Option<Duration>,
 
-    /// TCP Keepalive interval
-    #[clap(env, long, default_value = "15s", value_parser = parse_duration)]
-    pub http_client_tcp_keepalive: Duration,
+    /// How many idle connections maximum to keep per-host.
+    /// Default is unlimited.
+    #[clap(env, long)]
+    pub http_client_pool_idle_max: Option<usize>,
 
-    /// HTTP2 Keepalive interval
-    #[clap(env, long, default_value = "10s", value_parser = parse_duration)]
-    pub http_client_http2_keepalive: Duration,
+    /// TCP Keepalive delay.
+    /// It's the time between when the connection became idle and when the keepalive packet is sent.
+    /// If not specified - keepalives are disabled.
+    #[clap(env, long, value_parser = parse_duration)]
+    pub http_client_tcp_keepalive_delay: Option<Duration>,
+
+    /// TCP Keepalive interval.
+    /// If the acknowledgement for the 1st keepalive wasn't received - retry after this time.
+    /// If not specified - use system default.
+    #[clap(env, long, value_parser = parse_duration)]
+    pub http_client_tcp_keepalive_interval: Option<Duration>,
+
+    /// TCP Keepalive retries.
+    /// If this many keepalives in a row weren't acknowledged - close the connection.
+    /// If not specified - use system default.
+    #[clap(env, long)]
+    pub http_client_tcp_keepalive_retries: Option<u32>,
+
+    /// HTTP2 Keepalive interval.
+    /// If not specified - the keepalives are not sent.
+    #[clap(env, long, value_parser = parse_duration)]
+    pub http_client_http2_keepalive: Option<Duration>,
 
     /// HTTP2 Keepalive timeout
-    #[clap(env, long, default_value = "5s", value_parser = parse_duration)]
-    pub http_client_http2_keepalive_timeout: Duration,
+    #[clap(env, long, value_parser = parse_duration)]
+    pub http_client_http2_keepalive_timeout: Option<Duration>,
+
+    /// Whether to send HTTP2 Keepalives while connection is idle (no active streams)
+    #[clap(env, long)]
+    pub http_client_http2_keepalive_idle: bool,
 
     /// Which HTTP versions to use.
     /// Can be "http1", "http2" or "all". Defaults to "all".
     #[clap(env, long, default_value = "all")]
     pub http_client_http_version: HttpVersion,
+
+    /// If the target hostname resolves to both IPv6 and IPv4,
+    /// we first try the preferred family and, if the connection isn't established
+    /// in this time, we in parallel try the other family.
+    /// See RFC6555.
+    #[clap(env, long, value_parser = parse_duration, default_value = "500ms")]
+    pub http_client_happy_eyeballs_timeout: Duration,
 
     /// Fixed name to use when checking TLS certificates, instead of the host name.
     #[clap(env, long)]
@@ -52,14 +84,17 @@ impl From<&HttpClient> for super::Options {
             timeout_connect: c.http_client_timeout_connect,
             timeout_read: c.http_client_timeout_read,
             timeout: c.http_client_timeout,
-            pool_idle_timeout: Some(c.http_client_pool_idle),
-            pool_idle_max: None,
-            tcp_keepalive: Some(c.http_client_tcp_keepalive),
-            http2_keepalive: Some(c.http_client_http2_keepalive),
+            pool_idle_timeout: c.http_client_pool_idle_timeout,
+            pool_idle_max: c.http_client_pool_idle_max,
+            tcp_keepalive_delay: c.http_client_tcp_keepalive_delay,
+            tcp_keepalive_interval: c.http_client_tcp_keepalive_interval,
+            tcp_keepalive_retries: c.http_client_tcp_keepalive_retries,
+            http2_keepalive: c.http_client_http2_keepalive,
             http2_keepalive_timeout: c.http_client_http2_keepalive_timeout,
-            http2_keepalive_idle: false,
+            http2_keepalive_idle: c.http_client_http2_keepalive_idle,
+            happy_eyeballs_timeout: c.http_client_happy_eyeballs_timeout,
             http_version: c.http_client_http_version,
-            user_agent: "".into(),
+            user_agent: "ic-bn-lib".into(),
             tls_config: None,
             tls_fixed_name: c.http_client_tls_fixed_name.clone(),
         }
