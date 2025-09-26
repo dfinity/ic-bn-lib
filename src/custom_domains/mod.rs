@@ -265,6 +265,8 @@ impl ProvidesCustomDomains for GenericProviderDiff {
         }
         drop(cache);
 
+        self.timestamp.store(resp.timestamp, Ordering::SeqCst);
+
         Ok(self.convert())
     }
 }
@@ -374,6 +376,20 @@ mod test {
                 .into());
             }
 
+            if req.url().as_str().ends_with("timestamp=20") {
+                return Ok(HttpResponse::new(
+                    json!({
+                        "timestamp": 30,
+                        "created": {
+                            "foo.bar5": "qoctq-giaaa-aaaaa-aaaea-cai"
+                        },
+                        "deleted": ["foo.bar2", "foo.bar3", "foo.bar4"],
+                    })
+                    .to_string(),
+                )
+                .into());
+            }
+
             return Ok(HttpResponse::new(
                 json!({
                     "timestamp": 10,
@@ -442,6 +458,23 @@ mod test {
                     canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai")
                 },
             ]
+        );
+
+        // Check that 3rd call does the updates
+        let domains: Vec<CustomDomain> = prov
+            .get_custom_domains()
+            .await
+            .unwrap()
+            .into_iter()
+            .sorted_by_key(|x| x.name.clone())
+            .collect();
+
+        assert_eq!(
+            domains,
+            vec![CustomDomain {
+                name: fqdn!("foo.bar5"),
+                canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai")
+            },]
         );
     }
 
