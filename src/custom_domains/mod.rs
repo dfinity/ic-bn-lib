@@ -214,6 +214,7 @@ impl GenericProviderDiff {
         Ok(())
     }
 
+    /// Converts from internal hashmap to a vec
     fn convert(&self) -> Vec<CustomDomain> {
         self.cache
             .lock()
