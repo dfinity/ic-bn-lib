@@ -466,7 +466,7 @@ impl IntoResponse for Decision {
 #[serde_as]
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 pub struct RequestRule {
-    #[serde(alias = "rule")]
+    #[serde(alias = "match")]
     pub matcher: RequestMatcher,
     #[serde_as(as = "DisplayFromStr")]
     pub action: RequestAction,
@@ -493,9 +493,9 @@ impl RequestRule {
 #[serde_as]
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 pub struct ResponseRule {
-    #[serde(alias = "rule_req")]
+    #[serde(alias = "match_req")]
     pub matcher_req: Option<RequestMatcher>,
-    #[serde(alias = "rule_resp")]
+    #[serde(alias = "match_resp")]
     pub matcher: ResponseMatcher,
     #[serde_as(as = "DisplayFromStr")]
     pub action: ResponseAction,
@@ -1132,7 +1132,7 @@ mod test {
         let ruleset = json!({
             "requests": [
             {
-                "rule": {
+                "match": {
                     "methods": ["GET", "POST"],
                     "host": "^foo",
                     "path": "^/bar"
@@ -1147,10 +1147,10 @@ mod test {
         let ruleset = json!({
             "responses": [
             {
-                "rule_req": {
+                "match_req": {
                     "methods": ["OPTIONS"],
                 },
-                "rule_resp": {
+                "match_resp": {
                     "status": ["100-200", "400-499", "599"],
                 },
                 "action": "block:499",
@@ -1175,7 +1175,7 @@ mod test {
         let ruleset = json!({
             "requests": [
             {
-                "rule": {
+                "match": {
                     "methods": ["GET", "POST"],
                     "host": "^foo",
                     "path": "^/bar"
@@ -1183,7 +1183,7 @@ mod test {
                 "action": "limit:global:10/1h",
             },
             {
-                "rule": {
+                "match": {
                     "methods": ["DELETE"],
                 },
                 "action": "block:403",
@@ -1191,22 +1191,22 @@ mod test {
 
             "responses": [
             {
-                "rule_req": {
+                "match_req": {
                     "methods": ["OPTIONS"],
                 },
-                "rule_resp": {
+                "match_resp": {
                     "status": ["100-200", "400-499", "599"],
                 },
                 "action": "block:499",
             },
             {
-                "rule_resp": {
+                "match_resp": {
                     "status": ["100-200", "400-499", "599"],
                 },
                 "action": "block:451",
             },
             {
-                "rule_resp": {
+                "match_resp": {
                     "status": ["500"],
                     "headers": [{
                         "name": "foo",
@@ -1339,7 +1339,7 @@ mod test {
         let ruleset = r#"
         requests:
         - action: block:451
-          rule:
+          match:
             methods:
             - OPTIONS
             - GET
