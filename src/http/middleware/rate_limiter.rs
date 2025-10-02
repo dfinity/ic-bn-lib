@@ -1,18 +1,27 @@
-use std::{net::IpAddr, sync::Arc, time::Duration};
+use std::{
+    net::IpAddr,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
 
 use ::governor::{clock::QuantaInstant, middleware::NoOpMiddleware};
 use anyhow::{Error, anyhow};
-use axum::{body::Body, extract::Request, response::IntoResponse};
-use http::StatusCode;
+use axum::{body::Body, extract::Request, response::IntoResponse, response::Response};
+use futures::future::BoxFuture;
+use http::{HeaderName, StatusCode};
+use tower::{Layer, Service};
 use tower_governor::{
     GovernorError, GovernorLayer,
-    governor::GovernorConfigBuilder,
+    governor::{Governor, GovernorConfig, GovernorConfigBuilder},
     key_extractor::{GlobalKeyExtractor, KeyExtractor},
 };
 
-use crate::http::middleware::extract_ip_from_request;
+use crate::{hname, http::middleware::extract_ip_from_request};
 
-pub type RateLimitLayer<K> = GovernorLayer<K, NoOpMiddleware<QuantaInstant>, Body>;
+pub type GovernorLayerAxum<K> = GovernorLayer<K, NoOpMiddleware<QuantaInstant>, Body>;
+
+const BYPASS_HEADER: HeaderName = hname!("x-ratelimit-bypass-token");
 
 #[derive(Clone)]
 pub struct IpKeyExtractor;
@@ -25,20 +34,123 @@ impl KeyExtractor for IpKeyExtractor {
     }
 }
 
+/// Ratelimiter that implements Tower Service
+#[derive(Clone)]
+pub struct RateLimiter<S, K: KeyExtractor> {
+    governor: Governor<K, NoOpMiddleware<QuantaInstant>, S, Body>,
+    bypass_token: Option<String>,
+    inner: S,
+}
+
+/// Implement Tower Service for RateLimiter
+impl<S, K> Service<Request> for RateLimiter<S, K>
+where
+    S: Service<Request, Response = Response> + Send + 'static,
+    S::Future: Send + 'static,
+    K: KeyExtractor,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: Request) -> Self::Future {
+        // Check that bypass token is configured, header was sent and it matches
+        let bypass = request
+            .headers()
+            .get(BYPASS_HEADER)
+            .zip(self.bypass_token.as_ref())
+            .map(|(hdr, token)| hdr.as_bytes() == token.as_bytes())
+            == Some(true);
+
+        // If bypassing - call the wrapped service directly
+        if bypass {
+            let fut = self.inner.call(request);
+            return Box::pin(fut);
+        }
+
+        // Otherwise go through Governor
+        let fut = self.governor.call(request);
+        Box::pin(fut)
+    }
+}
+
+/// Layer usable as an Axum middleware
+#[derive(Clone, derive_new::new)]
+pub struct RateLimiterLayer<K: KeyExtractor, R> {
+    config: Arc<GovernorConfig<K, NoOpMiddleware<QuantaInstant>>>,
+    rate_limited_response: R,
+    bypass_token: Option<String>,
+}
+
+impl<S, K, R> Layer<S> for RateLimiterLayer<K, R>
+where
+    S: Clone,
+    K: KeyExtractor,
+    R: IntoResponse + Clone + Send + Sync + 'static,
+{
+    type Service = RateLimiter<S, K>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        let rate_limited_response = self.rate_limited_response.clone();
+
+        let governor = Governor::new(inner.clone(), &self.config).error_handler(move |err| {
+            match err {
+                GovernorError::TooManyRequests { .. } => rate_limited_response.clone().into_response(),
+                GovernorError::UnableToExtractKey => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Unable to extract rate limiting key",
+                )
+                    .into_response(),
+                GovernorError::Other { code, msg, headers } => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!(
+                        "Rate limiter failed unexpectedly: code={code}, msg={msg:?}, headers={headers:?}"
+                    ),
+                )
+                    .into_response()
+            }
+        });
+
+        RateLimiter {
+            governor,
+            bypass_token: self.bypass_token.clone(),
+            inner,
+        }
+    }
+}
+
 pub fn layer_global<R: IntoResponse + Clone + Send + Sync + 'static>(
     rps: u32,
     burst_size: u32,
     rate_limited_response: R,
-) -> Result<RateLimitLayer<GlobalKeyExtractor>, Error> {
-    layer(rps, burst_size, GlobalKeyExtractor, rate_limited_response)
+    bypass_token: Option<String>,
+) -> Result<RateLimiterLayer<GlobalKeyExtractor, R>, Error> {
+    layer(
+        rps,
+        burst_size,
+        GlobalKeyExtractor,
+        rate_limited_response,
+        bypass_token,
+    )
 }
 
 pub fn layer_by_ip<R: IntoResponse + Clone + Send + Sync + 'static>(
     rps: u32,
     burst_size: u32,
     rate_limited_response: R,
-) -> Result<RateLimitLayer<IpKeyExtractor>, Error> {
-    layer(rps, burst_size, IpKeyExtractor, rate_limited_response)
+    bypass_token: Option<String>,
+) -> Result<RateLimiterLayer<IpKeyExtractor, R>, Error> {
+    layer(
+        rps,
+        burst_size,
+        IpKeyExtractor,
+        rate_limited_response,
+        bypass_token,
+    )
 }
 
 pub fn layer<K: KeyExtractor, R: IntoResponse + Clone + Send + Sync + 'static>(
@@ -46,37 +158,24 @@ pub fn layer<K: KeyExtractor, R: IntoResponse + Clone + Send + Sync + 'static>(
     burst_size: u32,
     key_extractor: K,
     rate_limited_response: R,
-) -> Result<RateLimitLayer<K>, Error> {
+    bypass_token: Option<String>,
+) -> Result<RateLimiterLayer<K, R>, Error> {
     let period = Duration::from_secs(1)
         .checked_div(rps)
         .ok_or_else(|| anyhow!("RPS is zero"))?;
 
-    let config = Arc::new(
-        GovernorConfigBuilder::default()
-            .period(period)
-            .burst_size(burst_size)
-            .key_extractor(key_extractor)
-            .finish()
-            .ok_or_else(|| anyhow!("unable to build governor config"))?,
-    );
+    let config = GovernorConfigBuilder::default()
+        .period(period)
+        .burst_size(burst_size)
+        .key_extractor(key_extractor)
+        .finish()
+        .ok_or_else(|| anyhow!("unable to build governor config"))?;
 
-    let layer = GovernorLayer::new(config).error_handler(move |err| match err {
-        GovernorError::TooManyRequests { .. } => rate_limited_response.clone().into_response(),
-        GovernorError::UnableToExtractKey => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to extract rate limiting key",
-        )
-            .into_response(),
-        GovernorError::Other { code, msg, headers } => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!(
-                "Rate limiter failed unexpectedly: code={code}, msg={msg:?}, headers={headers:?}"
-            ),
-        )
-            .into_response(),
-    });
-
-    Ok(layer)
+    Ok(RateLimiterLayer::new(
+        Arc::new(config),
+        rate_limited_response,
+        bypass_token,
+    ))
 }
 
 #[cfg(test)]
@@ -92,7 +191,7 @@ mod test {
         response::IntoResponse,
         routing::post,
     };
-    use http::StatusCode;
+    use http::{Method, StatusCode};
     use std::{sync::Arc, time::Duration};
     use tokio::time::sleep;
     use tower::Service;
@@ -120,6 +219,7 @@ mod test {
             burst_size,
             IpKeyExtractor,
             (StatusCode::TOO_MANY_REQUESTS, "foo"),
+            None,
         )
         .expect("failed to build middleware");
 
@@ -178,6 +278,7 @@ mod test {
             burst_size,
             IpKeyExtractor,
             (StatusCode::TOO_MANY_REQUESTS, "foo"),
+            None,
         )
         .expect("failed to build middleware");
 
@@ -192,5 +293,63 @@ mod test {
         assert_eq!(result.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = to_bytes(result.into_body(), 1024).await.unwrap().to_vec();
         assert_eq!(body, b"Unable to extract rate limiting key");
+    }
+
+    #[tokio::test]
+    async fn test_rate_limiter_bypass_token() {
+        let rate_limiter_mw = layer(
+            1,
+            10,
+            GlobalKeyExtractor,
+            (StatusCode::TOO_MANY_REQUESTS, "foo"),
+            Some("top_secret_token".into()),
+        )
+        .expect("failed to build middleware");
+
+        let mut app = Router::new()
+            .route("/", post(handler))
+            .layer(rate_limiter_mw);
+
+        // First 10 pass
+        for _ in 0..10 {
+            let req = Request::builder()
+                .method(Method::POST)
+                .body(Body::empty())
+                .unwrap();
+            let res = app.call(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+        }
+
+        // Then all blocked
+        for _ in 0..100 {
+            let req = Request::builder()
+                .method(Method::POST)
+                .body(Body::empty())
+                .unwrap();
+            let res = app.call(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+
+        // But pass with a token
+        for _ in 0..100 {
+            let req = Request::builder()
+                .method(Method::POST)
+                .header(BYPASS_HEADER, "top_secret_token")
+                .body(Body::empty())
+                .unwrap();
+            let res = app.call(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+        }
+
+        // And doesn't work with a bad token
+        for _ in 0..100 {
+            let req = Request::builder()
+                .method(Method::POST)
+                .header(BYPASS_HEADER, "not_very_secret")
+                .body(Body::empty())
+                .unwrap();
+            let res = app.call(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
     }
 }
