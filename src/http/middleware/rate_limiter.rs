@@ -34,6 +34,7 @@ impl KeyExtractor for IpKeyExtractor {
     }
 }
 
+/// Ratelimiter that implements Tower Service
 #[derive(Clone)]
 pub struct RateLimiter<S, K: KeyExtractor> {
     governor: Governor<K, NoOpMiddleware<QuantaInstant>, S, Body>,
@@ -41,7 +42,7 @@ pub struct RateLimiter<S, K: KeyExtractor> {
     inner: S,
 }
 
-/// Implement Tower Service for Waf
+/// Implement Tower Service for RateLimiter
 impl<S, K> Service<Request> for RateLimiter<S, K>
 where
     S: Service<Request, Response = Response> + Send + 'static,
@@ -77,7 +78,7 @@ where
     }
 }
 
-/// Waf layer usable as an Axum middleware
+/// Layer usable as an Axum middleware
 #[derive(Clone, derive_new::new)]
 pub struct RateLimiterLayer<K: KeyExtractor, R> {
     config: Arc<GovernorConfig<K, NoOpMiddleware<QuantaInstant>>>,
