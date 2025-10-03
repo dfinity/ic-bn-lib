@@ -466,7 +466,7 @@ impl IntoResponse for Decision {
 #[serde_as]
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 pub struct RequestRule {
-    #[serde(alias = "rule")]
+    #[serde(alias = "match")]
     pub matcher: RequestMatcher,
     #[serde_as(as = "DisplayFromStr")]
     pub action: RequestAction,
@@ -493,14 +493,22 @@ impl RequestRule {
 #[serde_as]
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 pub struct ResponseRule {
-    #[serde(alias = "rule")]
+    #[serde(alias = "match_req")]
+    pub matcher_req: Option<RequestMatcher>,
+    #[serde(alias = "match_resp")]
     pub matcher: ResponseMatcher,
     #[serde_as(as = "DisplayFromStr")]
     pub action: ResponseAction,
 }
 
 impl ResponseRule {
-    pub fn evaluate<B>(&self, resp: &Response<B>) -> Option<Decision> {
+    pub fn evaluate<B1, B2>(&self, req: &Request<B1>, resp: &Response<B2>) -> Option<Decision> {
+        if let Some(v) = &self.matcher_req {
+            if !v.evaluate(req) {
+                return None;
+            }
+        }
+
         if !self.matcher.evaluate(resp) {
             return None;
         }
@@ -520,8 +528,14 @@ pub struct Ruleset {
 }
 
 impl Ruleset {
+    fn is_empty(&self) -> bool {
+        (self.requests.is_none() || self.requests.as_ref().map(|x| x.is_empty()) == Some(true))
+            && (self.responses.is_none()
+                || self.responses.as_ref().map(|x| x.is_empty()) == Some(true))
+    }
+
     /// Evaluate given request against ruleset
-    pub fn evaluate_request<B>(&self, req: &Request<B>) -> Decision {
+    fn evaluate_request<B>(&self, req: &Request<B>) -> Decision {
         let Some(v) = &self.requests else {
             return Decision::Pass;
         };
@@ -531,14 +545,14 @@ impl Ruleset {
             .unwrap_or(Decision::Pass)
     }
 
-    /// Evaluate given response against ruleset
-    pub fn evaluate_response<B>(&self, resp: &Response<B>) -> Decision {
+    /// Evaluate given request parts & response against ruleset
+    fn evaluate_response<B1, B2>(&self, req: &Request<B1>, resp: &Response<B2>) -> Decision {
         let Some(v) = &self.responses else {
             return Decision::Pass;
         };
 
         v.iter()
-            .find_map(|x| x.evaluate(resp))
+            .find_map(|x| x.evaluate(req, resp))
             .unwrap_or(Decision::Pass)
     }
 }
@@ -566,6 +580,11 @@ where
 
     fn call(&mut self, request: AxumRequest) -> Self::Future {
         let ruleset = self.ruleset.load_full();
+        // Fast-path
+        if ruleset.is_empty() {
+            let fut = self.inner.call(request);
+            return Box::pin(fut);
+        }
 
         // Evaluate the request
         let decision = ruleset.evaluate_request(&request);
@@ -573,12 +592,18 @@ where
             return Box::pin(async move { Ok(decision.into_response()) });
         }
 
+        // Clone the parts for later evaluation
+        let (parts, body) = request.into_parts();
+        let parts_clone = parts.clone();
+        let request = AxumRequest::from_parts(parts, body);
+
         let future = self.inner.call(request);
         Box::pin(async move {
             let response: AxumResponse = future.await?;
 
             // Evaluate the response
-            let decision = ruleset.evaluate_response(&response);
+            let req = Request::from_parts(parts_clone, ());
+            let decision = ruleset.evaluate_response(&req, &response);
             if decision != Decision::Pass {
                 return Ok(decision.into_response());
             }
@@ -1107,7 +1132,50 @@ mod test {
         let ruleset = json!({
             "requests": [
             {
-                "rule": {
+                "match": {
+                    "methods": ["GET", "POST"],
+                    "host": "^foo",
+                    "path": "^/bar"
+                },
+                "action": "limit:global:10/1h",
+            }]
+        })
+        .to_string();
+        let ruleset: Ruleset = serde_json::from_str(&ruleset).unwrap();
+        assert!(!ruleset.is_empty());
+
+        let ruleset = json!({
+            "responses": [
+            {
+                "match_req": {
+                    "methods": ["OPTIONS"],
+                },
+                "match_resp": {
+                    "status": ["100-200", "400-499", "599"],
+                },
+                "action": "block:499",
+            }]
+        })
+        .to_string();
+        let ruleset: Ruleset = serde_json::from_str(&ruleset).unwrap();
+        assert!(!ruleset.is_empty());
+
+        let ruleset = json!({
+            "requests": [],
+            "responses": [],
+        })
+        .to_string();
+        let ruleset: Ruleset = serde_json::from_str(&ruleset).unwrap();
+        assert!(ruleset.is_empty());
+
+        let ruleset = json!({}).to_string();
+        let ruleset: Ruleset = serde_json::from_str(&ruleset).unwrap();
+        assert!(ruleset.is_empty());
+
+        let ruleset = json!({
+            "requests": [
+            {
+                "match": {
                     "methods": ["GET", "POST"],
                     "host": "^foo",
                     "path": "^/bar"
@@ -1115,7 +1183,7 @@ mod test {
                 "action": "limit:global:10/1h",
             },
             {
-                "rule": {
+                "match": {
                     "methods": ["DELETE"],
                 },
                 "action": "block:403",
@@ -1123,13 +1191,22 @@ mod test {
 
             "responses": [
             {
-                "rule": {
+                "match_req": {
+                    "methods": ["OPTIONS"],
+                },
+                "match_resp": {
+                    "status": ["100-200", "400-499", "599"],
+                },
+                "action": "block:499",
+            },
+            {
+                "match_resp": {
                     "status": ["100-200", "400-499", "599"],
                 },
                 "action": "block:451",
             },
             {
-                "rule": {
+                "match_resp": {
                     "status": ["500"],
                     "headers": [{
                         "name": "foo",
@@ -1142,6 +1219,7 @@ mod test {
         .to_string();
 
         let ruleset: Ruleset = serde_json::from_str(&ruleset).unwrap();
+        assert!(!ruleset.is_empty());
 
         // Test requests
 
@@ -1200,34 +1278,48 @@ mod test {
         }
 
         // Test responses
+        let req = Request::builder().method(Method::POST).body(()).unwrap();
+
+        let resp = Response::builder()
+            .status(StatusCode::PERMANENT_REDIRECT)
+            .body("")
+            .unwrap();
 
         // Should always pass
         for _ in 0..1000 {
-            let resp = Response::builder()
-                .status(StatusCode::PERMANENT_REDIRECT)
-                .body("")
-                .unwrap();
-            assert_eq!(ruleset.evaluate_response(&resp), Decision::Pass);
+            assert_eq!(ruleset.evaluate_response(&req, &resp), Decision::Pass);
         }
 
         // Should always block with 451
         for _ in 0..1000 {
             let resp = Response::builder().status(StatusCode::OK).body("").unwrap();
             assert_eq!(
-                ruleset.evaluate_response(&resp),
+                ruleset.evaluate_response(&req, &resp),
                 Decision::Block(StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS)
             );
         }
 
-        // Should always block with 401
+        // Should always block with 499
+        let req = Request::builder().method(Method::OPTIONS).body(()).unwrap();
+
         for _ in 0..1000 {
-            let resp = Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .header("foo", "bardead")
-                .body("")
-                .unwrap();
+            let resp = Response::builder().status(StatusCode::OK).body("").unwrap();
             assert_eq!(
-                ruleset.evaluate_response(&resp),
+                ruleset.evaluate_response(&req, &resp),
+                Decision::Block(StatusCode::from_u16(499).unwrap())
+            );
+        }
+
+        // Should always block with 401
+        let resp = Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header("foo", "bardead")
+            .body("")
+            .unwrap();
+
+        for _ in 0..1000 {
+            assert_eq!(
+                ruleset.evaluate_response(&req, &resp),
                 Decision::Block(StatusCode::UNAUTHORIZED)
             );
         }
@@ -1247,7 +1339,7 @@ mod test {
         let ruleset = r#"
         requests:
         - action: block:451
-          rule:
+          match:
             methods:
             - OPTIONS
             - GET
