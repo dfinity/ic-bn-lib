@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -171,6 +171,107 @@ impl ProvidesCustomDomains for GenericProviderTimestamped {
     }
 }
 
+#[derive(Deserialize)]
+struct DiffResponse {
+    timestamp: u64,
+    created: HashMap<FQDN, Principal>,
+    deleted: Vec<FQDN>,
+}
+
+#[derive(new)]
+pub struct GenericProviderDiff {
+    http_client: Arc<dyn http::Client>,
+    url: Url,
+    timeout: Duration,
+    #[new(default)]
+    timestamp: AtomicU64,
+    #[new(default)]
+    cache: Mutex<HashMap<FQDN, Principal>>,
+}
+
+impl GenericProviderDiff {
+    async fn get_response(&self, url: &Url) -> Result<DiffResponse, Error> {
+        let body = get_url_body(&self.http_client, url, self.timeout)
+            .await
+            .context("unable to fetch custom domains JSON")?;
+
+        let resp: DiffResponse =
+            serde_json::from_slice(&body).context("failed to parse JSON body")?;
+
+        Ok(resp)
+    }
+
+    /// Downloads the initial snapshot of data
+    async fn seed(&self) -> Result<(), Error> {
+        let resp = self
+            .get_response(&self.url)
+            .await
+            .context("unable to get seed response")?;
+
+        *self.cache.lock().unwrap() = resp.created;
+        self.timestamp.store(resp.timestamp, Ordering::SeqCst);
+
+        Ok(())
+    }
+
+    /// Converts from internal hashmap to a vec
+    fn convert(&self) -> Vec<CustomDomain> {
+        self.cache
+            .lock()
+            .unwrap()
+            .clone()
+            .into_iter()
+            .map(|(name, canister_id)| CustomDomain { name, canister_id })
+            .collect()
+    }
+}
+
+impl std::fmt::Debug for GenericProviderDiff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GenericProviderDiff({})", self.url)
+    }
+}
+
+#[async_trait]
+impl ProvidesCustomDomains for GenericProviderDiff {
+    async fn get_custom_domains(&self) -> Result<Vec<CustomDomain>, Error> {
+        let ts = self.timestamp.load(Ordering::SeqCst);
+
+        // If the timestamp is zero - we need to seed our cache with full snapshot
+        if ts == 0 {
+            self.seed()
+                .await
+                .context("unable to download initial snapshot")?;
+
+            return Ok(self.convert());
+        }
+
+        // Otherwise get the incremental changes since the timestamp
+        let mut url = self.url.clone();
+        url.set_query(Some(&format!("timestamp={ts}")));
+
+        let resp = self
+            .get_response(&url)
+            .await
+            .context("unable to get diff reponse")?;
+
+        let mut cache = self.cache.lock().unwrap();
+
+        for (k, v) in resp.created {
+            cache.insert(k, v);
+        }
+
+        for k in resp.deleted {
+            cache.remove(&k);
+        }
+        drop(cache);
+
+        self.timestamp.store(resp.timestamp, Ordering::SeqCst);
+
+        Ok(self.convert())
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::principal;
@@ -250,6 +351,132 @@ mod test {
             )
             .into());
         }
+    }
+
+    #[derive(Debug)]
+    struct MockClientDiff;
+
+    #[async_trait]
+    impl http::Client for MockClientDiff {
+        async fn execute(
+            &self,
+            req: reqwest::Request,
+        ) -> Result<reqwest::Response, reqwest::Error> {
+            if req.url().as_str().ends_with("timestamp=10") {
+                return Ok(HttpResponse::new(
+                    json!({
+                        "timestamp": 20,
+                        "created": {
+                            "foo.bar3": "aaaaa-aa",
+                            "foo.bar4": "qoctq-giaaa-aaaaa-aaaea-cai"
+                        },
+                        "deleted": ["foo.bar1", "foo.bar0"],
+                    })
+                    .to_string(),
+                )
+                .into());
+            }
+
+            if req.url().as_str().ends_with("timestamp=20") {
+                return Ok(HttpResponse::new(
+                    json!({
+                        "timestamp": 30,
+                        "created": {
+                            "foo.bar5": "qoctq-giaaa-aaaaa-aaaea-cai"
+                        },
+                        "deleted": ["foo.bar2", "foo.bar3", "foo.bar4"],
+                    })
+                    .to_string(),
+                )
+                .into());
+            }
+
+            return Ok(HttpResponse::new(
+                json!({
+                    "timestamp": 10,
+                    "created": {
+                        "foo.bar1": "aaaaa-aa",
+                        "foo.bar2": "qoctq-giaaa-aaaaa-aaaea-cai"
+                    },
+                    "deleted": [],
+                })
+                .to_string(),
+            )
+            .into());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_generic_provider_diff() {
+        let cli = Arc::new(MockClientDiff);
+        let prov = GenericProviderDiff::new(cli, "http://foo".try_into().unwrap(), Duration::ZERO);
+
+        // Check that 1st call provides the seed set
+        let domains: Vec<CustomDomain> = prov
+            .get_custom_domains()
+            .await
+            .unwrap()
+            .into_iter()
+            .sorted_by_key(|x| x.name.clone())
+            .collect();
+
+        assert_eq!(
+            domains,
+            vec![
+                CustomDomain {
+                    name: fqdn!("foo.bar1"),
+                    canister_id: principal!("aaaaa-aa")
+                },
+                CustomDomain {
+                    name: fqdn!("foo.bar2"),
+                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai")
+                },
+            ]
+        );
+
+        // Check that 2nd call does the updates
+        let domains: Vec<CustomDomain> = prov
+            .get_custom_domains()
+            .await
+            .unwrap()
+            .into_iter()
+            .sorted_by_key(|x| x.name.clone())
+            .collect();
+
+        assert_eq!(
+            domains,
+            vec![
+                CustomDomain {
+                    name: fqdn!("foo.bar2"),
+                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai")
+                },
+                CustomDomain {
+                    name: fqdn!("foo.bar3"),
+                    canister_id: principal!("aaaaa-aa")
+                },
+                CustomDomain {
+                    name: fqdn!("foo.bar4"),
+                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai")
+                },
+            ]
+        );
+
+        // Check that 3rd call does the updates
+        let domains: Vec<CustomDomain> = prov
+            .get_custom_domains()
+            .await
+            .unwrap()
+            .into_iter()
+            .sorted_by_key(|x| x.name.clone())
+            .collect();
+
+        assert_eq!(
+            domains,
+            vec![CustomDomain {
+                name: fqdn!("foo.bar5"),
+                canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai")
+            },]
+        );
     }
 
     #[tokio::test]
