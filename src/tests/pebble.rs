@@ -469,6 +469,8 @@ pub mod dns {
 
     #[cfg(test)]
     mod test {
+        use hickory_proto::rr::RecordType;
+
         use super::*;
         use crate::tests::pebble::Env;
 
@@ -486,13 +488,15 @@ pub mod dns {
 
             tm.set("foo", "bar").await.unwrap();
             let r = resolver
-                .resolve("_acme-challenge.foo", "TXT")
+                .resolve(RecordType::TXT, "_acme-challenge.foo")
                 .await
                 .unwrap();
             assert_eq!(r, vec![("TXT".to_string(), "bar".to_string())]);
 
             tm.unset("foo").await.unwrap();
-            let r = resolver.resolve("_acme-challenge.foo", "TXT").await;
+            let r = resolver
+                .resolve(RecordType::TXT, "_acme-challenge.foo")
+                .await;
             assert!(r.is_err());
 
             #[cfg(feature = "acme-dns")]
@@ -501,13 +505,15 @@ pub mod dns {
                     .await
                     .unwrap();
                 let r = resolver
-                    .resolve("_acme-challenge.baz", "TXT")
+                    .resolve(RecordType::TXT, "_acme-challenge.baz")
                     .await
                     .unwrap();
                 assert_eq!(r, vec![("TXT".to_string(), "deadbeef".to_string())]);
 
                 tm.unset("baz").await.unwrap();
-                let r = resolver.resolve("_acme-challenge.baz", "TXT").await;
+                let r = resolver
+                    .resolve(RecordType::TXT, "_acme-challenge.baz")
+                    .await;
                 assert!(r.is_err());
             }
         }

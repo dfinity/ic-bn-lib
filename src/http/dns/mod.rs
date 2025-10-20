@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use candid::Principal;
 use hickory_proto::rr::RecordType;
 use hickory_resolver::{
-    TokioResolver,
+    ResolveError, TokioResolver,
     config::{
         CLOUDFLARE_IPS, LookupIpStrategy, NameServerConfigGroup, ResolveHosts, ResolverConfig,
         ResolverOpts,
@@ -94,7 +94,11 @@ impl FromStr for Protocol {
 
 #[async_trait]
 pub trait Resolves: Send + Sync {
-    async fn resolve(&self, name: &str, record: &str) -> Result<Vec<(String, String)>, Error>;
+    async fn resolve(
+        &self,
+        record_type: RecordType,
+        name: &str,
+    ) -> Result<Vec<(String, String)>, ResolveError>;
     fn flush_cache(&self);
 }
 
@@ -211,14 +215,12 @@ impl Resolve for Resolver {
 
 #[async_trait]
 impl Resolves for Resolver {
-    async fn resolve(&self, name: &str, record: &str) -> Result<Vec<(String, String)>, Error> {
-        let record_type = RecordType::from_str(record).context("unable to parse record")?;
-
-        let lookup = self
-            .0
-            .lookup(name, record_type)
-            .await
-            .context("lookup failed")?;
+    async fn resolve(
+        &self,
+        record_type: RecordType,
+        name: &str,
+    ) -> Result<Vec<(String, String)>, ResolveError> {
+        let lookup = self.0.lookup(name, record_type).await?;
 
         let rr = lookup
             .into_iter()
