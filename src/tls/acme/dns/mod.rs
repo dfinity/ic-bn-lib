@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use core::fmt;
 use derive_new::new;
 use fqdn::FQDN;
+use hickory_proto::rr::RecordType;
 use instant_acme::AccountCredentials;
 use rustls::{
     server::{ClientHello, ResolvesServerCert},
@@ -86,14 +87,14 @@ impl TokenManager for TokenManagerDns {
             // Get all TXT records for given hostname
             let records = self
                 .resolver
-                .resolve(&host, "TXT")
+                .resolve(RecordType::TXT, &host)
                 .await
                 .map_err(|e| RetryError::Transient(e.into()))?;
 
             // See if any of them matches given token
             records
                 .iter()
-                .find(|&x| x.0 == "TXT" && x.1 == token)
+                .find(|&x| x.record_type() == RecordType::TXT && x.to_string() == token)
                 .ok_or_else(|| RetryError::Transient(anyhow!("requested record not found")))?;
 
             Ok(())
