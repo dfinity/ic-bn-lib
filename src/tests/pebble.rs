@@ -491,7 +491,8 @@ pub mod dns {
                 .resolve(RecordType::TXT, "_acme-challenge.foo")
                 .await
                 .unwrap();
-            assert_eq!(r, vec![("TXT".to_string(), "bar".to_string())]);
+            assert_eq!(r[0].record_type(), RecordType::TXT);
+            assert_eq!(r[0].to_string(), "bar");
 
             tm.unset("foo").await.unwrap();
             let r = resolver
@@ -508,7 +509,8 @@ pub mod dns {
                     .resolve(RecordType::TXT, "_acme-challenge.baz")
                     .await
                     .unwrap();
-                assert_eq!(r, vec![("TXT".to_string(), "deadbeef".to_string())]);
+                assert_eq!(r[0].record_type(), RecordType::TXT);
+                assert_eq!(r[0].to_string(), "deadbeef");
 
                 tm.unset("baz").await.unwrap();
                 let r = resolver
