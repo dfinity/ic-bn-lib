@@ -120,6 +120,7 @@ pub trait CloneableHyperDnsResolver:
 {
 }
 
+#[derive(Debug, Clone)]
 pub struct Options {
     pub protocol: Protocol,
     pub servers: Vec<IpAddr>,
