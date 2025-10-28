@@ -486,8 +486,34 @@ impl Run for ApiBnResolver {
     }
 }
 
+/// Resolver that resolves all hostnames to the single IP address
+#[derive(Debug, Clone)]
+pub struct SingleResolver(IpAddr);
+impl CloneableDnsResolver for SingleResolver {}
+
+impl SingleResolver {
+    pub const fn new(addr: IpAddr) -> Self {
+        Self(addr)
+    }
+}
+
+/// Implement resolving for Reqwest
+impl Resolve for SingleResolver {
+    fn resolve(&self, _name: Name) -> Resolving {
+        let addr = self.0;
+
+        Box::pin(async move {
+            Ok(Box::new(SocketAddrs {
+                iter: Box::new(vec![addr].into_iter()),
+            }) as Addrs)
+        })
+    }
+}
+
 #[cfg(test)]
 mod test {
+    use std::net::Ipv4Addr;
+
     use super::*;
 
     #[test]
@@ -510,5 +536,17 @@ mod test {
         assert!(Protocol::from_str("clear:x").is_err(),);
         assert!(Protocol::from_str("clear:-1").is_err(),);
         assert!(Protocol::from_str("clear:65537").is_err(),);
+    }
+
+    #[tokio::test]
+    async fn test_single_resolver() {
+        let addr = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
+        let resolver = SingleResolver::new(addr);
+
+        let mut res = resolver
+            .resolve(Name::from_str("foo.bar").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.next(), Some(SocketAddr::new(addr, 0)));
     }
 }
