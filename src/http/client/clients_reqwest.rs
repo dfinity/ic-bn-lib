@@ -11,7 +11,7 @@ use anyhow::Context;
 use async_trait::async_trait;
 use moka::sync::{Cache, CacheBuilder};
 use prometheus::Registry;
-use reqwest::{Request, Response};
+use reqwest::{Request, Response, dns::Resolve};
 use scopeguard::defer;
 use url::Url;
 
@@ -30,7 +30,7 @@ fn extract_host(url: &Url) -> String {
     )
 }
 
-pub fn new<R: CloneableDnsResolver>(
+pub fn new<R: Resolve + 'static>(
     opts: Options,
     resolver: Option<R>,
 ) -> Result<reqwest::Client, Error> {
