@@ -87,7 +87,7 @@ pub fn new<R: Resolve + 'static>(
 pub struct ReqwestClient(reqwest::Client);
 
 impl ReqwestClient {
-    pub fn new<R: CloneableDnsResolver>(opts: Options, resolver: Option<R>) -> Result<Self, Error> {
+    pub fn new<R: Resolve + 'static>(opts: Options, resolver: Option<R>) -> Result<Self, Error> {
         Ok(Self(new(opts, resolver)?))
     }
 }
