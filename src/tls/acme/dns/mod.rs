@@ -75,10 +75,17 @@ pub struct TokenManagerDns {
 }
 
 impl TokenManagerDns {
-    fn get_zone(&self, zone: &str) -> String {
+    fn pick_zone(&self, zone: &str) -> String {
         self.delegation_domain
             .as_ref()
-            .map_or_else(|| zone.to_string(), |v| format!("{zone}.{v}"))
+            .map_or_else(|| zone.to_string(), |v| v.clone())
+    }
+
+    fn pick_record(&self, zone: &str) -> String {
+        self.delegation_domain.as_ref().map_or_else(
+            || ACME_RECORD.to_string(),
+            |_| format!("{ACME_RECORD}.{zone}"),
+        )
     }
 }
 
@@ -88,7 +95,7 @@ impl TokenManager for TokenManagerDns {
         // Try to resolve the hostname with backoff and verify that the record is there and correct.
         // Retry for up to double the DNS TTL.
 
-        let host = format!("{ACME_RECORD}.{}", self.get_zone(zone));
+        let host = format!("{}.{}", self.pick_record(zone), self.pick_zone(zone));
 
         retry_async! {
         async {
@@ -114,8 +121,8 @@ impl TokenManager for TokenManagerDns {
     async fn set(&self, zone: &str, token: &str) -> Result<(), Error> {
         self.manager
             .create(
-                &self.get_zone(zone),
-                ACME_RECORD,
+                &self.pick_zone(zone),
+                &self.pick_record(zone),
                 Record::Txt(token.into()),
                 TTL,
             )
@@ -123,7 +130,9 @@ impl TokenManager for TokenManagerDns {
     }
 
     async fn unset(&self, zone: &str) -> Result<(), Error> {
-        self.manager.delete(&self.get_zone(zone), ACME_RECORD).await
+        self.manager
+            .delete(&self.pick_zone(zone), &self.pick_record(zone))
+            .await
     }
 }
 
