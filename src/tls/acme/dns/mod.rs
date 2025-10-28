@@ -71,6 +71,15 @@ pub trait DnsManager: Sync + Send {
 pub struct TokenManagerDns {
     resolver: Arc<dyn Resolves>,
     manager: Arc<dyn DnsManager>,
+    delegation_domain: Option<String>,
+}
+
+impl TokenManagerDns {
+    fn get_zone(&self, zone: &str) -> String {
+        self.delegation_domain
+            .as_ref()
+            .map_or_else(|| zone.to_string(), |v| format!("{zone}.{v}"))
+    }
 }
 
 #[async_trait]
@@ -79,7 +88,8 @@ impl TokenManager for TokenManagerDns {
         // Try to resolve the hostname with backoff and verify that the record is there and correct.
         // Retry for up to double the DNS TTL.
 
-        let host = format!("{ACME_RECORD}.{zone}");
+        let host = format!("{ACME_RECORD}.{}", self.get_zone(zone));
+
         retry_async! {
         async {
             self.resolver.flush_cache();
@@ -103,12 +113,17 @@ impl TokenManager for TokenManagerDns {
 
     async fn set(&self, zone: &str, token: &str) -> Result<(), Error> {
         self.manager
-            .create(zone, ACME_RECORD, Record::Txt(token.into()), TTL)
+            .create(
+                &self.get_zone(zone),
+                ACME_RECORD,
+                Record::Txt(token.into()),
+                TTL,
+            )
             .await
     }
 
     async fn unset(&self, zone: &str) -> Result<(), Error> {
-        self.manager.delete(zone, ACME_RECORD).await
+        self.manager.delete(&self.get_zone(zone), ACME_RECORD).await
     }
 }
 
@@ -346,7 +361,7 @@ mod test {
         ));
 
         let resolver = pebble_env.resolver();
-        let token_manager_dns = Arc::new(TokenManagerDns::new(resolver, token_manager));
+        let token_manager_dns = Arc::new(TokenManagerDns::new(resolver, token_manager, None));
 
         let opts = Opts {
             acme_url: AcmeUrl::Custom(
