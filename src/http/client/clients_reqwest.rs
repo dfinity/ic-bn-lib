@@ -50,6 +50,10 @@ pub fn new<R: CloneableDnsResolver>(
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy();
 
+    for (host, addr) in &opts.dns_overrides {
+        client = client.resolve(host, *addr);
+    }
+
     match opts.http_version {
         HttpVersion::Http1 => {
             client = client.http1_only();

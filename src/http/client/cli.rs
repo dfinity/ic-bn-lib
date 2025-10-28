@@ -97,6 +97,7 @@ impl From<&HttpClient> for super::Options {
             user_agent: "ic-bn-lib".into(),
             tls_config: None,
             tls_fixed_name: c.http_client_tls_fixed_name.clone(),
+            dns_overrides: vec![],
         }
     }
 }
