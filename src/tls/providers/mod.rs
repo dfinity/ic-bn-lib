@@ -22,7 +22,7 @@ use storage::StoresCertificates;
 
 use crate::{
     tasks::Run,
-    tls::{extract_sans_der, pem_convert_to_rustls_single},
+    tls::{extract_sans_der, extract_validity_der, pem_convert_to_rustls_single},
     types::Healthy,
 };
 
@@ -50,6 +50,7 @@ pub trait ProvidesCertificates: Sync + Send + std::fmt::Debug {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cert<T: Clone + Send + Sync> {
     pub san: Vec<String>,
+    pub not_after: i64,
     pub cert: T,
 }
 
@@ -61,15 +62,19 @@ pub fn pem_convert_to_certkey(pem: &[u8]) -> Result<CertKey, Error> {
     let cert_key = pem_convert_to_rustls_single(pem)
         .context("unable to convert certificate chain and/or private key from PEM")?;
 
-    let san = extract_sans_der(cert_key.cert[0].as_ref()).context("unable to extract SANs")?;
+    let san = extract_sans_der(&cert_key.cert[0]).context("unable to extract SANs")?;
     if san.is_empty() {
         return Err(anyhow!(
             "no supported names found in SubjectAlternativeName extension"
         ));
     }
 
+    let (_, not_after) =
+        extract_validity_der(&cert_key.cert[0]).context("unable to extract validity")?;
+
     Ok(CertKey {
         san,
+        not_after,
         cert: Arc::new(cert_key),
     })
 }

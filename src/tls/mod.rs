@@ -83,6 +83,31 @@ pub fn extract_sans_der(cert: &[u8]) -> Result<Vec<String>, Error> {
     extract_sans(&cert)
 }
 
+/// Parses the given PEM-encoded certificate (1st if there are more than one) & extracts its validity period.
+pub fn extract_validity(mut pem: &[u8]) -> Result<(i64, i64), Error> {
+    let certs = rustls_pemfile::certs(&mut pem)
+        .collect::<Result<Vec<_>, _>>()
+        .context("unable to read certificate")?;
+
+    if certs.is_empty() {
+        return Err(anyhow!("no certificates found").into());
+    }
+
+    extract_validity_der(&certs[0])
+}
+
+/// Parses the given DER-encoded certificate (1st if there are more than one) & extracts its validity period.
+pub fn extract_validity_der(der: &[u8]) -> Result<(i64, i64), Error> {
+    let cert = X509Certificate::from_der(der)
+        .context("unable to parse DER-encoded certificate")?
+        .1;
+
+    Ok((
+        cert.validity().not_before.timestamp(),
+        cert.validity().not_after.timestamp(),
+    ))
+}
+
 /// Extracts a list of SubjectAlternativeName from a single certificate, formatted as strings.
 /// Skips everything except DNSName and IPAddress
 pub fn extract_sans(cert: &X509Certificate) -> Result<Vec<String>, Error> {
@@ -291,5 +316,12 @@ mod test {
     #[test]
     fn test_prepare_client_config() {
         prepare_client_config(&[&rustls::version::TLS13, &rustls::version::TLS12]);
+    }
+
+    #[test]
+    fn test_extract_validity() {
+        let (from, to) = extract_validity(TEST_CERT_1.as_bytes()).unwrap();
+        assert_eq!(from, 1673300396);
+        assert_eq!(to, 1988660396);
     }
 }

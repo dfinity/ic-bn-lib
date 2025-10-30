@@ -24,6 +24,7 @@ use crate::{
     custom_domains::{CustomDomain, ProvidesCustomDomains},
     http,
     tasks::Run,
+    tls::extract_validity,
     types::Healthy,
 };
 use verify::{Parser, Verifier, Verify, VerifyError};
@@ -197,9 +198,15 @@ impl ProvidesCustomDomains for CertificatesImporter {
         let domains = packages
             .iter()
             .map(|x| -> Result<_, anyhow::Error> {
+                // Use cert's end of validity period as a timestamp
+                let not_after = extract_validity(&x.pair.1)
+                    .context("unable to extract validity")?
+                    .1;
+
                 Ok(CustomDomain {
                     name: FQDN::from_str(&x.name)?,
                     canister_id: x.canister,
+                    timestamp: not_after as u64,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
