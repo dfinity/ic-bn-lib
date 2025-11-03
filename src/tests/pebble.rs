@@ -16,7 +16,7 @@ use nix::{
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tempdir::TempDir;
+use tempfile::{TempDir, tempdir};
 use tokio::fs;
 
 use crate::{
@@ -241,7 +241,7 @@ impl Pebble {
     pub async fn new(opts: PebbleOpts) -> Self {
         println!("Starting Pebble...");
 
-        let dir = TempDir::new("pebble").expect("unable to create temp dir");
+        let dir = tempdir().expect("unable to create temp dir");
 
         fs::write(
             dir.path().join("pebble.conf"),
@@ -374,7 +374,7 @@ mod test {
     #[ignore]
     #[tokio::test]
     async fn test_download() {
-        let dir = TempDir::new("pebble_download").unwrap();
+        let dir = tempdir().unwrap();
         download(dir.path()).await.unwrap();
     }
 }

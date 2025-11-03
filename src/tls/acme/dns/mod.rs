@@ -351,7 +351,7 @@ impl Run for AcmeDns {
 #[cfg(test)]
 mod test {
     use fqdn::fqdn;
-    use tempdir::TempDir;
+    use tempfile::tempdir;
 
     use super::*;
     use crate::{
@@ -363,7 +363,7 @@ mod test {
     #[tokio::test]
     async fn test_acme_dns() {
         let pebble_env = Env::new().await;
-        let dir = TempDir::new("test_acme_dns").unwrap();
+        let dir = tempdir().unwrap();
 
         let token_manager = Arc::new(TokenManagerPebble::new(
             format!("http://{}", pebble_env.addr_dns_management())
