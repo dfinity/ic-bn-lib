@@ -16,7 +16,7 @@ use anyhow::{Context, anyhow};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use candid::Principal;
-use hickory_proto::rr::{RData, RecordType};
+use hickory_proto::rr::{Record, RecordType};
 use hickory_resolver::{
     ResolveError, TokioResolver,
     config::{
@@ -98,7 +98,7 @@ pub trait Resolves: Send + Sync {
         &self,
         record_type: RecordType,
         name: &str,
-    ) -> Result<Vec<RData>, ResolveError>;
+    ) -> Result<Vec<Record>, ResolveError>;
 
     fn flush_cache(&self);
 }
@@ -221,10 +221,9 @@ impl Resolves for Resolver {
         &self,
         record_type: RecordType,
         name: &str,
-    ) -> Result<Vec<RData>, ResolveError> {
+    ) -> Result<Vec<Record>, ResolveError> {
         let lookup = self.0.lookup(name, record_type).await?;
-        let rr = lookup.into_iter().collect();
-        Ok(rr)
+        Ok(lookup.records().to_vec())
     }
 
     fn flush_cache(&self) {
