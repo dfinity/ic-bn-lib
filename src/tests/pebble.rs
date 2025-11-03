@@ -492,7 +492,7 @@ pub mod dns {
                 .await
                 .unwrap();
             assert_eq!(r[0].record_type(), RecordType::TXT);
-            assert_eq!(r[0].to_string(), "bar");
+            assert_eq!(r[0].data().to_string(), "bar");
 
             tm.unset("foo").await.unwrap();
             let r = resolver
@@ -510,7 +510,7 @@ pub mod dns {
                     .await
                     .unwrap();
                 assert_eq!(r[0].record_type(), RecordType::TXT);
-                assert_eq!(r[0].to_string(), "deadbeef");
+                assert_eq!(r[0].data().to_string(), "deadbeef");
 
                 tm.unset("baz").await.unwrap();
                 let r = resolver

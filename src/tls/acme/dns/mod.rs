@@ -75,12 +75,14 @@ pub struct TokenManagerDns {
 }
 
 impl TokenManagerDns {
+    /// Picks the correct zone to work on depending on if we work with a delegation domain
     fn pick_zone(&self, zone: &str) -> String {
         self.delegation_domain
             .as_ref()
             .map_or_else(|| zone.to_string(), |v| v.clone())
     }
 
+    /// Picks the correct record to work on depending on if we work with a delegation domain
     fn pick_record(&self, zone: &str) -> String {
         self.delegation_domain.as_ref().map_or_else(
             || ACME_RECORD.to_string(),
@@ -111,7 +113,7 @@ impl TokenManager for TokenManagerDns {
             // See if any of them matches given token
             records
                 .iter()
-                .find(|&x| x.record_type() == RecordType::TXT && x.to_string() == token)
+                .find(|&x| x.record_type() == RecordType::TXT && x.data().to_string() == token)
                 .ok_or_else(|| RetryError::Transient(anyhow!("requested record not found")))?;
 
             Ok(())
@@ -119,6 +121,9 @@ impl TokenManager for TokenManagerDns {
     }
 
     async fn set(&self, zone: &str, token: &str) -> Result<(), Error> {
+        // Remove any entries first
+        self.unset(zone).await?;
+
         self.manager
             .create(
                 &self.pick_zone(zone),
