@@ -9,12 +9,12 @@ use hyper_util::{
     rt::TokioExecutor,
 };
 use instant_acme::{
-    Account, AccountCredentials, AuthorizationStatus, BodyWrapper, BytesResponse, ChallengeType,
-    Error as AcmeError, HttpClient as HttpClientTrait, Identifier, NewAccount, NewOrder, Order,
-    OrderStatus, RetryPolicy, RevocationRequest,
+    Account, AccountCredentials, AuthorizationHandle, AuthorizationStatus, BodyWrapper,
+    BytesResponse, ChallengeType, Error as AcmeError, HttpClient as HttpClientTrait, Identifier,
+    NewAccount, NewOrder, Order, OrderStatus, RetryPolicy, RevocationRequest,
 };
 use rcgen::{CertificateParams, DistinguishedName, KeyPair};
-use tracing::debug;
+use tracing::{debug, instrument};
 
 use crate::{
     RetryError, retry_async,
@@ -71,6 +71,7 @@ impl Error {
             Self::UnableToSetChallengeReady(v) => v,
             Self::UnableToFinalizeOrder(v) => v,
             Self::UnableToGetCertificate(v) => v,
+            Self::OrderUnableToReachReadyStatus(v) => v,
             _ => return false,
         };
 
@@ -267,23 +268,25 @@ pub trait AcmeCertificateClient: Sync + Send {
 impl AcmeCertificateClient for Client {
     /// Issue the certificate with provided names and an optional private key.
     /// Key must be in PEM format, if it's not provided - new one will be generated.
+    #[instrument(level = "debug", skip_all, fields(names = %names.join(", ")))]
     async fn issue(&self, names: Vec<String>, private_key: Option<Vec<u8>>) -> Result<Cert, Error> {
         // Try to issue the certificate using the ACME protocol
         let res = self.issue_inner(&names, private_key).await;
 
         match &res {
             Ok((auth_ids, _)) => {
-                debug!("ACME: Cleaning up");
+                debug!("Cleaning up");
                 // Post-cleanup using the authorization IDs
                 // Treat cleanup failures as non-critical.
                 if let Err(err) = self.cleanup_by_ids(auth_ids).await {
-                    debug!("ACME: Cleanup failed: {err}");
+                    debug!("Cleanup failed: {err}");
                 } else {
-                    debug!("ACME: Cleanup successful");
+                    debug!("Cleanup successful");
                 }
             }
-            Err(_) => {
-                debug!("ACME: Issue failed, no cleanup needed");
+
+            _ => {
+                debug!("Issue failed, not cleaning up");
             }
         }
 
@@ -310,8 +313,6 @@ pub struct Client {
 impl Client {
     /// Creates or retrieves an order for given ids
     async fn prepare_order(&self, ids: Vec<Identifier>) -> Result<Order, Error> {
-        debug!("ACME: Order identifiers: {:?}", ids);
-
         let mut order = self
             .account
             .new_order(&NewOrder::new(&ids))
@@ -328,7 +329,7 @@ impl Client {
     }
 
     /// Poll the token manager to verify if the token was correctly set
-    async fn poll_token(&self, id: &str, token: &str) -> Result<(), anyhow::Error> {
+    async fn poll_token(&self, id: &str, token: &str) -> Result<(), Error> {
         retry_async! {
             async {
                 self.token_manager
@@ -338,81 +339,104 @@ impl Client {
             },
             self.opts.token_timeout
         }
+        .map_err(Error::UnableToVerifyChallengeToken)
+    }
+
+    /// Process a single authorization
+    #[instrument(level = "debug", skip_all, fields(authz_id = %authz.identifier()))]
+    async fn process_authorization<'a>(
+        &self,
+        authz: &'a mut AuthorizationHandle<'a>,
+    ) -> Result<Option<String>, Error> {
+        match authz.status {
+            AuthorizationStatus::Valid => {
+                debug!("Authorization already valid");
+                return Ok(None);
+            }
+
+            AuthorizationStatus::Pending => {}
+            _ => {
+                return Err(Error::UnexpectedAuthorizationStatus(authz.status));
+            }
+        }
+
+        debug!("Getting challenge");
+
+        // Get the challenge
+        let mut challenge = authz
+            .challenge(self.opts.challenge.clone())
+            .ok_or_else(|| Error::NoChallengeFound(self.opts.challenge.clone()))?;
+
+        // Get an identifier & a token from the challenge
+        let identifier = challenge.identifier().identifier;
+
+        // Currently we support DNS only.
+        // TODO add IP address too?
+        let id = match identifier {
+            Identifier::Dns(v) => v.clone(),
+            _ => return Err(Error::UnsupportedIdentifierType(identifier.clone())),
+        };
+        let token = challenge.key_authorization().dns_value();
+        debug!("Got id '{id}' and token '{token}', setting it");
+
+        // Set token on the identifier
+        self.token_manager
+            .set(&id, &token)
+            .await
+            .map_err(Error::UnableToSetChallengeToken)?;
+
+        debug!("Token set, polling to verify");
+
+        // Verify that the token is correcly set
+        self.poll_token(&id, &token).await?;
+
+        debug!("Token verified, setting challenge ready");
+
+        // Set the challenge as ready
+        challenge
+            .set_ready()
+            .await
+            .map_err(Error::UnableToSetChallengeReady)?;
+
+        debug!("Challenge set as ready");
+
+        Ok(Some(id))
     }
 
     /// Iterates over authorizations in the order and tries to fulfill them.
     /// Returns the list of IDs that are later used in the cleanup.
+    #[instrument(level = "debug", skip_all)]
     async fn process_authorizations(&self, order: &mut Order) -> Result<Vec<String>, Error> {
         let mut authorizations = order.authorizations();
 
         let mut ids = vec![];
         while let Some(authz) = authorizations.next().await {
             let mut authz = authz.map_err(Error::UnableToGetAuthorizations)?;
+            let id = self.process_authorization(&mut authz).await?;
 
-            match authz.status {
-                AuthorizationStatus::Valid => {
-                    debug!(
-                        "ACME: Authorization '{}' is already valid",
-                        authz.identifier()
-                    );
-                    continue;
-                }
-                AuthorizationStatus::Pending => {}
-                _ => {
-                    return Err(Error::UnexpectedAuthorizationStatus(authz.status));
-                }
+            if let Some(v) = id {
+                ids.push(v)
             }
-
-            // Get the challenge
-            let mut challenge = authz
-                .challenge(self.opts.challenge.clone())
-                .ok_or_else(|| Error::NoChallengeFound(self.opts.challenge.clone()))?;
-
-            // Get the identifier & token from the challenge
-            let identifier = challenge.identifier().identifier;
-
-            let id = match identifier {
-                Identifier::Dns(v) => v.clone(),
-                _ => return Err(Error::UnsupportedIdentifierType(identifier.clone())),
-            };
-            let token = challenge.key_authorization().dns_value();
-
-            // Set id to the token
-            self.token_manager
-                .set(&id, &token)
-                .await
-                .map_err(Error::UnableToSetChallengeToken)?;
-
-            // Verify that the token is correcly set
-            self.poll_token(&id, &token)
-                .await
-                .map_err(Error::UnableToVerifyChallengeToken)?;
-
-            // Set the challenge as ready
-            challenge
-                .set_ready()
-                .await
-                .map_err(Error::UnableToSetChallengeReady)?;
-
-            debug!("ACME: token '{token}' for challenge id '{id}' set");
-            ids.push(id);
         }
 
         Ok(ids)
     }
 
     /// Cleans up the tokens after issuance using authorization IDs
+    #[instrument(level = "debug", skip_all, fields(ids = %auth_ids.join(", ")))]
     async fn cleanup_by_ids(&self, auth_ids: &Vec<String>) -> Result<(), Error> {
         for id in auth_ids {
+            debug!("Unsetting id '{id}'");
             self.token_manager.unset(id).await?;
         }
 
         Ok(())
     }
 
+    #[instrument(level = "debug", skip_all)]
     async fn issue_inner(
         &self,
-        names: &Vec<String>,
+        names: &[String],
         private_key: Option<Vec<u8>>,
     ) -> Result<(Vec<String>, Cert), Error> {
         // Prepare order identifiers
@@ -421,19 +445,20 @@ impl Client {
             .map(|x| Identifier::Dns(x.to_string()))
             .collect::<Vec<_>>();
 
+        debug!("Preparing the order");
+
         // Prepare the order
         let mut order = self.prepare_order(ids).await?;
 
         debug!(
-            "ACME: Order for names [{}] obtained (status: '{:?}')",
-            names.join(", "),
+            "Order obtained (status: {:?}), processing authorizations",
             order.state().status
         );
 
         // Process authorizations and fulfill their challenges
         let auth_ids = self.process_authorizations(&mut order).await?;
 
-        debug!("ACME: Authorizations processed");
+        debug!("Authorizations processed, waiting for the order to reach Ready state");
 
         let retry_policy = RetryPolicy::new().timeout(self.opts.order_timeout);
 
@@ -443,14 +468,11 @@ impl Client {
             .await
             .map_err(Error::OrderUnableToReachReadyStatus)?;
 
-        debug!(
-            "ACME: Order reached 'Ready' status, creating CSR with SANs: {:?}",
-            names
-        );
+        debug!("Order reached Ready state, creating CSR");
 
         // Prepare the signing request
-        let mut params = CertificateParams::new(names.clone())
-            .map_err(Error::UnableToGenerateCertificateParams)?;
+        let mut params =
+            CertificateParams::new(names).map_err(Error::UnableToGenerateCertificateParams)?;
         params.distinguished_name = DistinguishedName::new();
 
         // Parse or create the private key
@@ -466,13 +488,13 @@ impl Client {
             .map_err(Error::UnableToCreateCSR)?;
 
         // Issue the certificate
-        debug!("ACME: Finalizing the order");
+        debug!("Finalizing the order");
         order
             .finalize_csr(csr.der())
             .await
             .map_err(Error::UnableToFinalizeOrder)?;
 
-        debug!("ACME: Order is finalized, requesting the certificate");
+        debug!("Order is finalized, polling for the certificate");
 
         // Retrieve the certificate.
         // It polls until the order is Valid, Invalid or times out.
@@ -481,7 +503,7 @@ impl Client {
             .await
             .map_err(Error::UnableToGetCertificate)?;
 
-        debug!("ACME: Certificate obtained successfully");
+        debug!("Certificate obtained successfully");
 
         Ok((
             auth_ids,

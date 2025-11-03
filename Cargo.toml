@@ -138,7 +138,7 @@ tokio-io-timeout = "1.2.0"
 tower = { version = "0.5.1", features = ["util"] }
 tower_governor = { version = "0.8" }
 tower-service = "0.3.3"
-tracing = "0.1.40"
+tracing = { version = "0.1.40", features = ["attributes"] }
 url = "2.5.3"
 # DO NOT upgrade, this breaks monorepo compatibility
 # Read https://github.com/uuid-rs/uuid/releases/tag/1.13.0
