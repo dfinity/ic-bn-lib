@@ -113,10 +113,10 @@ impl<T: Clone + Send + Sync> StoresCertificates<T> for Storage<T> {
                     FQDN::from_str(key).context(format!("unable to parse '{san}' as FQDN"))?;
 
                 // Do not insert entry if it already exists and its not_after timestamp is newer
-                if let Some(v) = tree.get(&key) {
-                    if v.not_after > cert.not_after {
-                        continue;
-                    }
+                if let Some(v) = tree.get(&key)
+                    && v.not_after > cert.not_after
+                {
+                    continue;
                 }
 
                 tree.insert(key, cert.clone());

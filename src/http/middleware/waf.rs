@@ -211,29 +211,29 @@ impl RequestMatcher {
         }
 
         // Check if path matches
-        if let Some(v) = &self.path {
-            if !v.is_match(
+        if let Some(v) = &self.path
+            && !v.is_match(
                 req.uri()
                     .path_and_query()
                     .map(|x| x.as_str())
                     .unwrap_or_default(),
-            ) {
-                return false;
-            }
+            )
+        {
+            return false;
         }
 
         // Check if any methods match
-        if let Some(v) = &self.methods {
-            if !v.iter().contains(req.method()) {
-                return false;
-            }
+        if let Some(v) = &self.methods
+            && !v.iter().contains(req.method())
+        {
+            return false;
         }
 
         // Check that all of header rules match
-        if let Some(v) = &self.headers {
-            if !v.iter().all(|rule| rule.evaluate_headermap(req.headers())) {
-                return false;
-            }
+        if let Some(v) = &self.headers
+            && !v.iter().all(|rule| rule.evaluate_headermap(req.headers()))
+        {
+            return false;
         }
 
         // Empty rule matches anything
@@ -253,17 +253,17 @@ impl ResponseMatcher {
     /// Check if the response matches
     pub fn evaluate<T>(&self, req: &Response<T>) -> bool {
         // Check status codes
-        if let Some(v) = &self.status {
-            if !v.iter().any(|x| x.evaluate(req.status())) {
-                return false;
-            }
+        if let Some(v) = &self.status
+            && !v.iter().any(|x| x.evaluate(req.status()))
+        {
+            return false;
         }
 
         // Check that all of header rules match
-        if let Some(v) = &self.headers {
-            if !v.iter().all(|rule| rule.evaluate_headermap(req.headers())) {
-                return false;
-            }
+        if let Some(v) = &self.headers
+            && !v.iter().all(|rule| rule.evaluate_headermap(req.headers()))
+        {
+            return false;
         }
 
         // Empty rule matches anything
@@ -503,10 +503,10 @@ pub struct ResponseRule {
 
 impl ResponseRule {
     pub fn evaluate<B1, B2>(&self, req: &Request<B1>, resp: &Response<B2>) -> Option<Decision> {
-        if let Some(v) = &self.matcher_req {
-            if !v.evaluate(req) {
-                return None;
-            }
+        if let Some(v) = &self.matcher_req
+            && !v.evaluate(req)
+        {
+            return None;
         }
 
         if !self.matcher.evaluate(resp) {

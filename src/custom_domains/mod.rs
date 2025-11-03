@@ -143,11 +143,11 @@ impl ProvidesCustomDomains for GenericProviderTimestamped {
         let ts = self.timestamp.swap(resp.timestamp, Ordering::SeqCst);
 
         // Return the cached value if we have one & the timestamps are the same
-        if ts == resp.timestamp {
-            if let Some(v) = self.cache.load_full() {
-                info!("{self:?}: timestamp unchanged ({} domains)", v.len());
-                return Ok(v.as_ref().clone());
-            }
+        if ts == resp.timestamp
+            && let Some(v) = self.cache.load_full()
+        {
+            info!("{self:?}: timestamp unchanged ({} domains)", v.len());
+            return Ok(v.as_ref().clone());
         }
 
         // Try to parse the response URL and use it if we can do it
