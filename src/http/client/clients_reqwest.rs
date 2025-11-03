@@ -11,7 +11,7 @@ use anyhow::Context;
 use async_trait::async_trait;
 use moka::sync::{Cache, CacheBuilder};
 use prometheus::Registry;
-use reqwest::{Request, Response};
+use reqwest::{Request, Response, dns::Resolve};
 use scopeguard::defer;
 use url::Url;
 
@@ -30,7 +30,7 @@ fn extract_host(url: &Url) -> String {
     )
 }
 
-pub fn new<R: CloneableDnsResolver>(
+pub fn new<R: Resolve + 'static>(
     opts: Options,
     resolver: Option<R>,
 ) -> Result<reqwest::Client, Error> {
@@ -49,6 +49,10 @@ pub fn new<R: CloneableDnsResolver>(
         .user_agent(opts.user_agent)
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy();
+
+    for (host, addr) in &opts.dns_overrides {
+        client = client.resolve(host, *addr);
+    }
 
     match opts.http_version {
         HttpVersion::Http1 => {
@@ -83,7 +87,7 @@ pub fn new<R: CloneableDnsResolver>(
 pub struct ReqwestClient(reqwest::Client);
 
 impl ReqwestClient {
-    pub fn new<R: CloneableDnsResolver>(opts: Options, resolver: Option<R>) -> Result<Self, Error> {
+    pub fn new<R: Resolve + 'static>(opts: Options, resolver: Option<R>) -> Result<Self, Error> {
         Ok(Self(new(opts, resolver)?))
     }
 }

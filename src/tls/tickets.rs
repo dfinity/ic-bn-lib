@@ -94,6 +94,7 @@ impl ProducesTickets for Ticketer {
         }
 
         // Extract nonce
+        #[allow(deprecated)]
         let nonce = XNonce::from_slice(&cipher[0..NONCE_LEN]);
 
         // Try to decrypt
@@ -107,6 +108,7 @@ impl ProducesTickets for Ticketer {
 
         // Concatenate nonce & ciphertext
         let mut result = Vec::with_capacity(nonce.len() + ciphertext.len());
+        #[allow(deprecated)]
         result.extend_from_slice(nonce.as_slice());
         result.extend_from_slice(&ciphertext);
 
@@ -164,6 +166,7 @@ mod test {
 
         // Make sure that nonce is using a counter
         for i in 0..10 {
+            #[allow(deprecated)]
             let counter = u32::from_le_bytes(t.nonce().as_slice()[0..4].try_into().unwrap());
             assert_eq!(counter, i);
         }

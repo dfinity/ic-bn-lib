@@ -91,10 +91,10 @@ impl AggregatingResolver {
         let sni = ch.server_name().unwrap_or("").to_string();
 
         // Check if we have an ACME ALPN and pass it to the ACME resolver (if we have one)
-        if ch.alpn().is_some_and(|mut x| x.all(|x| x == ALPN_ACME)) {
-            if let Some(acme) = &self.acme {
-                return acme.resolve(ch);
-            }
+        if ch.alpn().is_some_and(|mut x| x.all(|x| x == ALPN_ACME))
+            && let Some(acme) = &self.acme
+        {
+            return acme.resolve(ch);
         }
 
         let alpn = ch

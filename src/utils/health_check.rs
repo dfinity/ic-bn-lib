@@ -317,7 +317,7 @@ mod test {
     #[async_trait]
     impl ChecksTarget<u8> for TestChecker {
         async fn check(&self, target: &u8) -> TargetState {
-            if target % 2 == 0 {
+            if target.is_multiple_of(2) {
                 TargetState::Degraded
             } else {
                 TargetState::Healthy

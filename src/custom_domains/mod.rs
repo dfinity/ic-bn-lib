@@ -25,6 +25,8 @@ use crate::http;
 pub struct CustomDomain {
     pub name: FQDN,
     pub canister_id: Principal,
+    /// Opaque timestamp to reflect when the domain was created, can be zero
+    pub timestamp: u64,
 }
 
 /// Provides a list of custom domains
@@ -75,6 +77,7 @@ async fn get_custom_domains_from_url(
         .map(|(k, v)| CustomDomain {
             name: k,
             canister_id: v,
+            timestamp: 0,
         })
         .collect::<Vec<_>>())
 }
@@ -140,11 +143,11 @@ impl ProvidesCustomDomains for GenericProviderTimestamped {
         let ts = self.timestamp.swap(resp.timestamp, Ordering::SeqCst);
 
         // Return the cached value if we have one & the timestamps are the same
-        if ts == resp.timestamp {
-            if let Some(v) = self.cache.load_full() {
-                info!("{self:?}: timestamp unchanged ({} domains)", v.len());
-                return Ok(v.as_ref().clone());
-            }
+        if ts == resp.timestamp
+            && let Some(v) = self.cache.load_full()
+        {
+            info!("{self:?}: timestamp unchanged ({} domains)", v.len());
+            return Ok(v.as_ref().clone());
         }
 
         // Try to parse the response URL and use it if we can do it
@@ -221,7 +224,11 @@ impl GenericProviderDiff {
             .unwrap()
             .clone()
             .into_iter()
-            .map(|(name, canister_id)| CustomDomain { name, canister_id })
+            .map(|(name, canister_id)| CustomDomain {
+                name,
+                canister_id,
+                timestamp: 0,
+            })
             .collect()
     }
 }
@@ -425,11 +432,13 @@ mod test {
             vec![
                 CustomDomain {
                     name: fqdn!("foo.bar1"),
-                    canister_id: principal!("aaaaa-aa")
+                    canister_id: principal!("aaaaa-aa"),
+                    timestamp: 0,
                 },
                 CustomDomain {
                     name: fqdn!("foo.bar2"),
-                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai")
+                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
+                    timestamp: 0,
                 },
             ]
         );
@@ -448,15 +457,18 @@ mod test {
             vec![
                 CustomDomain {
                     name: fqdn!("foo.bar2"),
-                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai")
+                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
+                    timestamp: 0,
                 },
                 CustomDomain {
                     name: fqdn!("foo.bar3"),
-                    canister_id: principal!("aaaaa-aa")
+                    canister_id: principal!("aaaaa-aa"),
+                    timestamp: 0,
                 },
                 CustomDomain {
                     name: fqdn!("foo.bar4"),
-                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai")
+                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
+                    timestamp: 0,
                 },
             ]
         );
@@ -474,7 +486,8 @@ mod test {
             domains,
             vec![CustomDomain {
                 name: fqdn!("foo.bar5"),
-                canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai")
+                canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
+                timestamp: 0,
             },]
         );
     }
@@ -499,11 +512,13 @@ mod test {
             vec![
                 CustomDomain {
                     name: fqdn!("bar.foo"),
-                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai")
+                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
+                    timestamp: 0,
                 },
                 CustomDomain {
                     name: fqdn!("foo.bar"),
-                    canister_id: principal!("aaaaa-aa")
+                    canister_id: principal!("aaaaa-aa"),
+                    timestamp: 0,
                 },
             ]
         );
@@ -522,11 +537,13 @@ mod test {
             vec![
                 CustomDomain {
                     name: fqdn!("bar.foo"),
-                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai")
+                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
+                    timestamp: 0,
                 },
                 CustomDomain {
                     name: fqdn!("foo.bar"),
-                    canister_id: principal!("aaaaa-aa")
+                    canister_id: principal!("aaaaa-aa"),
+                    timestamp: 0,
                 },
             ]
         );
@@ -545,11 +562,13 @@ mod test {
             vec![
                 CustomDomain {
                     name: fqdn!("bar.foos"),
-                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai")
+                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
+                    timestamp: 0,
                 },
                 CustomDomain {
                     name: fqdn!("foo.barr"),
-                    canister_id: principal!("aaaaa-aa")
+                    canister_id: principal!("aaaaa-aa"),
+                    timestamp: 0,
                 },
             ]
         );
@@ -568,11 +587,13 @@ mod test {
             vec![
                 CustomDomain {
                     name: fqdn!("bar.foos"),
-                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai")
+                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
+                    timestamp: 0,
                 },
                 CustomDomain {
                     name: fqdn!("foo.barr"),
-                    canister_id: principal!("aaaaa-aa")
+                    canister_id: principal!("aaaaa-aa"),
+                    timestamp: 0,
                 },
             ]
         );
@@ -596,11 +617,13 @@ mod test {
             vec![
                 CustomDomain {
                     name: fqdn!("bar.foo"),
-                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai")
+                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
+                    timestamp: 0,
                 },
                 CustomDomain {
                     name: fqdn!("foo.bar"),
-                    canister_id: principal!("aaaaa-aa")
+                    canister_id: principal!("aaaaa-aa"),
+                    timestamp: 0,
                 },
             ]
         );

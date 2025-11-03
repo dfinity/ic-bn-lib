@@ -147,7 +147,8 @@ impl DnsManager for Cloudflare {
             .into_iter()
             .filter(|r| matches!(&r.content, DnsContent::TXT { .. }))
         {
-            debug!("deleting record {} in cloudflare", record.name);
+            debug!("deleting record {} in Cloudflare", record.name);
+
             self.client
                 .request(&DeleteDnsRecord {
                     zone_identifier: &zone_id,

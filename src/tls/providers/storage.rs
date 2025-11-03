@@ -1,7 +1,7 @@
 use core::fmt;
 use std::{collections::BTreeMap, str::FromStr, sync::Arc};
 
-use anyhow::{Context, Error, anyhow};
+use anyhow::{Context, Error};
 use arc_swap::ArcSwapOption;
 use derive_new::new;
 use fqdn::{FQDN, Fqdn};
@@ -96,8 +96,8 @@ impl<T: Clone + Send + Sync> Storage<T> {
 impl<T: Clone + Send + Sync> StoresCertificates<T> for Storage<T> {
     /// Update storage contents with a new list of Certs
     fn store(&self, certs_in: Vec<Cert<T>>) -> Result<(), Error> {
-        let mut certs = BTreeMap::new();
-        let mut certs_wildcard = BTreeMap::new();
+        let mut certs: BTreeMap<FQDN, Arc<Cert<T>>> = BTreeMap::new();
+        let mut certs_wildcard: BTreeMap<FQDN, Arc<Cert<T>>> = BTreeMap::new();
 
         for cert in certs_in {
             let cert = Arc::new(cert.clone());
@@ -112,9 +112,14 @@ impl<T: Clone + Send + Sync> StoresCertificates<T> for Storage<T> {
                 let key =
                     FQDN::from_str(key).context(format!("unable to parse '{san}' as FQDN"))?;
 
-                if tree.insert(key, cert.clone()).is_some() {
-                    return Err(anyhow!("duplicate SAN detected: {san}"));
-                };
+                // Do not insert entry if it already exists and its not_after timestamp is newer
+                if let Some(v) = tree.get(&key)
+                    && v.not_after > cert.not_after
+                {
+                    continue;
+                }
+
+                tree.insert(key, cert.clone());
             }
         }
 
@@ -169,10 +174,12 @@ pub mod test {
         let certs = vec![
             Cert {
                 san: vec!["foo.bar".into(), "*.foo.bar".into()],
+                not_after: 10,
                 cert: "foo.bar.cert".into(),
             },
             Cert {
                 san: vec!["foo.baz".into()],
+                not_after: 15,
                 cert: "foo.baz.cert".into(),
             },
         ];
@@ -235,21 +242,57 @@ pub mod test {
         // Non-existant
         assert!(storage.lookup_cert(&fqdn!("foo.foo")).is_none());
 
-        // Ensure that duplicate SAN fails
-        let certs = vec![Cert {
-            san: vec!["foo.bar".into(), "foo.bar".into()],
-            cert: "foo.bar.cert".into(),
-        }];
-        assert!(storage.store(certs).is_err());
-
-        // Make sure the old info is there
-        assert_eq!(
-            storage.lookup_cert(&fqdn!("foo.bar")).unwrap().cert,
-            "foo.bar.cert"
-        );
-
         // Check any, make sure it returns the cert_default
         assert_eq!(storage.any().unwrap().cert, "foo.baz.cert");
+
+        // Ensure that newer certificates make it into the storage
+        // instead of the older ones
+        let certs = vec![
+            Cert {
+                san: vec!["foo.bar".into()],
+                not_after: 15,
+                cert: "foo.bar.old.cert".into(),
+            },
+            Cert {
+                san: vec!["foo.bar".into()],
+                not_after: 20,
+                cert: "foo.bar.new.cert".into(),
+            },
+            Cert {
+                san: vec!["foo.baz".into()],
+                not_after: 30,
+                cert: "foo.baz.new.cert".into(),
+            },
+            Cert {
+                san: vec!["foo.baz".into()],
+                not_after: 1,
+                cert: "foo.baz.old.cert".into(),
+            },
+            Cert {
+                san: vec!["*.foo.baz".into()],
+                not_after: 30,
+                cert: "foo.baz.wc.new.cert".into(),
+            },
+            Cert {
+                san: vec!["*.foo.baz".into()],
+                not_after: 1,
+                cert: "foo.baz.wc.old.cert".into(),
+            },
+        ];
+        storage.store(certs).unwrap();
+
+        assert_eq!(
+            storage.lookup_cert(&fqdn!("foo.bar")).unwrap().cert,
+            "foo.bar.new.cert"
+        );
+        assert_eq!(
+            storage.lookup_cert(&fqdn!("foo.baz")).unwrap().cert,
+            "foo.baz.new.cert"
+        );
+        assert_eq!(
+            storage.lookup_cert(&fqdn!("blah.foo.baz")).unwrap().cert,
+            "foo.baz.wc.new.cert"
+        );
 
         Ok(())
     }

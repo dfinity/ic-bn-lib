@@ -3,7 +3,7 @@ pub mod cli;
 pub mod clients_hyper;
 pub mod clients_reqwest;
 
-use std::{fmt, sync::Arc, time::Duration};
+use std::{fmt, net::SocketAddr, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use axum::body::Body as AxumBody;
@@ -111,6 +111,7 @@ pub struct Options {
     pub user_agent: String,
     pub tls_config: Option<rustls::ClientConfig>,
     pub tls_fixed_name: Option<String>,
+    pub dns_overrides: Vec<(String, SocketAddr)>,
 }
 
 impl Default for Options {
@@ -132,6 +133,7 @@ impl Default for Options {
             user_agent: "Crab".into(),
             tls_config: None,
             tls_fixed_name: None,
+            dns_overrides: vec![],
         }
     }
 }

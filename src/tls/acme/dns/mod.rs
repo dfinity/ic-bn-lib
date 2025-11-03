@@ -71,6 +71,24 @@ pub trait DnsManager: Sync + Send {
 pub struct TokenManagerDns {
     resolver: Arc<dyn Resolves>,
     manager: Arc<dyn DnsManager>,
+    delegation_domain: Option<String>,
+}
+
+impl TokenManagerDns {
+    /// Picks the correct zone to work on depending on if we work with a delegation domain
+    fn pick_zone(&self, zone: &str) -> String {
+        self.delegation_domain
+            .as_ref()
+            .map_or_else(|| zone.to_string(), |v| v.clone())
+    }
+
+    /// Picks the correct record to work on depending on if we work with a delegation domain
+    fn pick_record(&self, zone: &str) -> String {
+        self.delegation_domain.as_ref().map_or_else(
+            || ACME_RECORD.to_string(),
+            |_| format!("{ACME_RECORD}.{zone}"),
+        )
+    }
 }
 
 #[async_trait]
@@ -79,7 +97,8 @@ impl TokenManager for TokenManagerDns {
         // Try to resolve the hostname with backoff and verify that the record is there and correct.
         // Retry for up to double the DNS TTL.
 
-        let host = format!("{ACME_RECORD}.{zone}");
+        let host = format!("{}.{}", self.pick_record(zone), self.pick_zone(zone));
+
         retry_async! {
         async {
             self.resolver.flush_cache();
@@ -94,7 +113,7 @@ impl TokenManager for TokenManagerDns {
             // See if any of them matches given token
             records
                 .iter()
-                .find(|&x| x.record_type() == RecordType::TXT && x.to_string() == token)
+                .find(|&x| x.record_type() == RecordType::TXT && x.data().to_string() == token)
                 .ok_or_else(|| RetryError::Transient(anyhow!("requested record not found")))?;
 
             Ok(())
@@ -103,12 +122,19 @@ impl TokenManager for TokenManagerDns {
 
     async fn set(&self, zone: &str, token: &str) -> Result<(), Error> {
         self.manager
-            .create(zone, ACME_RECORD, Record::Txt(token.into()), TTL)
+            .create(
+                &self.pick_zone(zone),
+                &self.pick_record(zone),
+                Record::Txt(token.into()),
+                TTL,
+            )
             .await
     }
 
     async fn unset(&self, zone: &str) -> Result<(), Error> {
-        self.manager.delete(zone, ACME_RECORD).await
+        self.manager
+            .delete(&self.pick_zone(zone), &self.pick_record(zone))
+            .await
     }
 }
 
@@ -325,7 +351,7 @@ impl Run for AcmeDns {
 #[cfg(test)]
 mod test {
     use fqdn::fqdn;
-    use tempdir::TempDir;
+    use tempfile::tempdir;
 
     use super::*;
     use crate::{
@@ -337,7 +363,7 @@ mod test {
     #[tokio::test]
     async fn test_acme_dns() {
         let pebble_env = Env::new().await;
-        let dir = TempDir::new("test_acme_dns").unwrap();
+        let dir = tempdir().unwrap();
 
         let token_manager = Arc::new(TokenManagerPebble::new(
             format!("http://{}", pebble_env.addr_dns_management())
@@ -346,7 +372,7 @@ mod test {
         ));
 
         let resolver = pebble_env.resolver();
-        let token_manager_dns = Arc::new(TokenManagerDns::new(resolver, token_manager));
+        let token_manager_dns = Arc::new(TokenManagerDns::new(resolver, token_manager, None));
 
         let opts = Opts {
             acme_url: AcmeUrl::Custom(
