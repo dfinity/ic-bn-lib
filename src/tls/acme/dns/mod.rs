@@ -121,9 +121,6 @@ impl TokenManager for TokenManagerDns {
     }
 
     async fn set(&self, zone: &str, token: &str) -> Result<(), Error> {
-        // Remove any entries first
-        self.unset(zone).await?;
-
         self.manager
             .create(
                 &self.pick_zone(zone),
