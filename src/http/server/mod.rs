@@ -301,9 +301,19 @@ impl ConnInfo {
 }
 
 pub struct ListenerOpts {
-    backlog: u32,
-    mss: Option<u32>,
-    keepalive: TcpKeepalive,
+    pub backlog: u32,
+    pub mss: Option<u32>,
+    pub keepalive: TcpKeepalive,
+}
+
+impl Default for ListenerOpts {
+    fn default() -> Self {
+        Self {
+            backlog: 1024,
+            mss: None,
+            keepalive: TcpKeepalive::new(),
+        }
+    }
 }
 
 /// Connection listener
