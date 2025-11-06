@@ -66,7 +66,7 @@ hyper-rustls = { version = "0.27.5", optional = true, default-features = false, 
 ] }
 hyper-util = { workspace = true }
 ic-agent = { workspace = true }
-ic-bn-lib-common = { path = "../ic-bn-lib-common" }
+ic-bn-lib-common = { git = "https://github.com/dfinity/ic-bn-lib", rev = "23f515ec05b65960a5fea41888177467146a8cec" }
 indoc = "2.0.6"
 instant-acme = { workspace = true, optional = true }
 itertools = "0.14.0"
