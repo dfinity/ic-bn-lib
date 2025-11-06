@@ -47,6 +47,12 @@ impl FromStr for AcmeUrl {
     }
 }
 
+/// Certificate and private key pair issued by ACME
+pub struct AcmeCert {
+    pub cert: Vec<u8>,
+    pub key: Vec<u8>,
+}
+
 /// Type of DNS backend to use
 #[derive(Clone, Display, EnumString)]
 #[strum(serialize_all = "snake_case")]

@@ -1,10 +1,7 @@
 use async_trait::async_trait;
 use instant_acme::RevocationRequest;
 
-use crate::types::{
-    acme::{Error, Record},
-    tls::AcmeCert,
-};
+use crate::types::acme::{AcmeCert, Error, Record};
 
 /// ACME token manager trait to set challenges
 #[async_trait]

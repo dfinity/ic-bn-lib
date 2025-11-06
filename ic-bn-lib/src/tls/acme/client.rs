@@ -10,10 +10,7 @@ use hyper_util::{
 };
 use ic_bn_lib_common::{
     traits::acme::{AcmeCertificateClient, TokenManager},
-    types::{
-        acme::{AcmeUrl, Error},
-        tls::AcmeCert,
-    },
+    types::acme::{AcmeCert, AcmeUrl, Error},
 };
 use instant_acme::{
     Account, AccountCredentials, AuthorizationHandle, AuthorizationStatus, BodyWrapper,

@@ -29,12 +29,6 @@ pub struct Cert<T: Clone + Send + Sync> {
 /// Commonly used concrete type of the above for Rustls
 pub type CertKey = Cert<Arc<CertifiedKey>>;
 
-/// Certificate and private key pair issued by ACME
-pub struct AcmeCert {
-    pub cert: Vec<u8>,
-    pub key: Vec<u8>,
-}
-
 pub struct TlsOptions {
     pub additional_alpn: Vec<Vec<u8>>,
     pub sessions_count: u64,
