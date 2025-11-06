@@ -1,0 +1,40 @@
+[package]
+name = "ic-bn-lib-common"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+candid = { workspace = true }
+clap = { workspace = true }
+cloudflare = { workspace = true }
+derive-new = { workspace = true }
+fqdn = { workspace = true }
+hickory-proto = { workspace = true }
+hickory-resolver = { workspace = true }
+http = { workspace = true }
+http-body = { workspace = true }
+humantime = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+ic-agent = { workspace = true }
+instant-acme = { workspace = true }
+parse-size = { workspace = true }
+prometheus = { workspace = true }
+reqwest = { workspace = true }
+rcgen = { workspace = true }
+rustls = { workspace = true }
+serde = { workspace = true }
+socket2 = { workspace = true }
+strum = { workspace = true }
+strum_macros = { workspace = true }
+thiserror = { workspace = true }
+tokio-util = { workspace = true }
+tower-service = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+mockall = { workspace = true }
