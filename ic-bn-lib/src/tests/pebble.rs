@@ -386,11 +386,10 @@ mod test {
 pub mod dns {
     use anyhow::{Error, anyhow};
     use async_trait::async_trait;
+    use ic_bn_lib_common::traits::acme::TokenManager;
+
     #[cfg(feature = "acme-dns")]
-    use ic_bn_lib_common::{
-        traits::acme::{DnsManager, TokenManager},
-        types::acme::Record,
-    };
+    use ic_bn_lib_common::{traits::acme::DnsManager, types::acme::Record};
     use serde_json::json;
     use url::Url;
 
