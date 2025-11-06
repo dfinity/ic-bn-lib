@@ -19,7 +19,6 @@ use axum::{
     routing::post,
 };
 use bytes::Bytes;
-use clap::Args;
 use futures::future::BoxFuture;
 use governor::{
     Quota, RateLimiter,
@@ -33,7 +32,7 @@ use http::{
 use humantime::parse_duration;
 use ic_bn_lib_common::{
     traits::{Run, http::Client},
-    types::http::Error,
+    types::http::{Error, WafCli},
 };
 use itertools::Itertools;
 use regex::Regex;
@@ -783,33 +782,6 @@ impl Run for WafLayer {
             }
         }
     }
-}
-
-#[derive(Args)]
-pub struct WafCli {
-    /// Enables the WAF.
-    /// Requires one of sources to be defined.
-    #[clap(env, long, requires = "waf_input")]
-    pub waf_enable: bool,
-
-    /// Enables the WAF API endpoint.
-    /// Conflicts with `waf_url` and `waf_file`.
-    #[clap(env, long, group = "waf_input")]
-    pub waf_api: bool,
-
-    /// URL where to fetch WAF rules.
-    /// Conflicts with `waf_api` and `waf_file`.
-    #[clap(env, long, group = "waf_input")]
-    pub waf_url: Option<Url>,
-
-    /// File from which to load WAF rules.
-    /// Conflicts with `waf_api` and `waf_url`.
-    #[clap(env, long, group = "waf_input")]
-    pub waf_file: Option<PathBuf>,
-
-    /// Interval at which to fetch the rules from the file or URL.
-    #[clap(env, long, value_parser = parse_duration, default_value = "10s")]
-    pub waf_interval: Duration,
 }
 
 #[cfg(test)]
