@@ -33,7 +33,7 @@ async fn get_url_body(cli: &Arc<dyn Client>, url: &Url, timeout: Duration) -> Re
         .context("failed to make HTTP request")?;
 
     if !response.status().is_success() {
-        return Err(anyhow!("unsuccessful response code: {}", response.status()));
+        return Err(anyhow!("bad response code: {}", response.status()));
     }
 
     response

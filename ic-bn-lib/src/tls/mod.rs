@@ -176,7 +176,7 @@ pub fn pem_load_rustls_single(pem: PathBuf) -> Result<CertifiedKey, Error> {
     pem_convert_to_rustls_single(&pem)
 }
 
-/// Creates Rustls server config
+/// Creates Rustls server config.
 /// Must be run in Tokio environment since it spawns a task to record metrics
 pub fn prepare_server_config(
     opts: TlsOptions,
