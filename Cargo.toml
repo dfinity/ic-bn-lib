@@ -1,55 +1,23 @@
-[package]
-name = "ic-bn-lib"
-description = "Internet Computer Boundary Nodes shared modules"
+[workspace]
+resolver = "3"
+members = ["ic-bn-lib", "ic-bn-lib-common"]
+default-members = ["ic-bn-lib", "ic-bn-lib-common"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-license-file = "LICENSE"
-repository = "https://github.com/dfinity/ic-bn-lib"
-readme = "README.md"
 
-[features]
-default = []
-
-acme = [
-    "dep:instant-acme",
-    "dep:rcgen",
-    "dep:hyper-rustls",
-    "dep:tar",
-    "dep:flate2",
-    "dep:hex",
-    "dep:sha2",
-]
-acme-dns = ["acme", "dep:cloudflare"]
-acme-alpn = ["acme", "dep:rustls-acme"]
-clients-hyper = ["dep:hyper-rustls"]
-custom-domains = []
-cert-providers = ["custom-domains"]
-sev-snp = ["dep:sev"]
-vector = ["dep:vrl", "dep:prost", "dep:prost-types"]
-
-[dependencies]
-ahash = "0.8.11"
+[workspace.dependencies]
 anyhow = "1.0.93"
-arc-swap = "1.7.1"
-async-channel = "2.3.1"
 async-trait = "0.1.83"
 axum = "0.8.1"
-axum-extra = "0.10.0"
-base64 = "0.22.1"
-bytes = "1.10.0"
 candid = "0.10.10"
 clap = { version = "4.5.20", features = ["derive", "string", "env"] }
-chacha20poly1305 = "0.10.1"
 cloudflare = { version = "0.14.0", default-features = false, features = [
     "rustls-tls",
-], optional = true }
+] }
 derive-new = "0.7.0"
-flate2 = { version = "1.0", optional = true }
 fqdn = { version = "0.4.1", features = ["serde"] }
-futures = "0.3.31"
-futures-util = "0.3.31"
-governor = "0.10.0" # must match tower-governor deps
-hex = { version = "0.4.3", optional = true }
 hickory-proto = "0.25.1"
 hickory-resolver = { version = "0.25.1", features = [
     "tls-ring",
@@ -62,36 +30,18 @@ http-body = "1.0.1"
 http-body-util = "0.1.2"
 humantime = "2.2.0"
 hyper = "1.7.0"
-hyper-rustls = { version = "0.27.5", optional = true, default-features = false, features = [
-    "http1",
-    "http2",
-    "tls12",
-    "native-tokio",
-    "ring",
-    "logging",
-    "webpki-roots",
-] }
 hyper-util = { version = "0.1.10", features = ["full"] }
 ic-agent = { git = "https://github.com/dfinity/agent-rs", rev = "f34acedb5539838ffdbd4cf49a0832303977293f", features = [
     "ring",
     "_internal_dynamic-routing",
 ] }
-indoc = "2.0.6"
 instant-acme = { version = "0.8.2", default-features = false, features = [
     "ring",
     "hyper-rustls",
-], optional = true }
-itertools = "0.14.0"
-moka = { version = "0.12.8", features = ["sync", "future"] }
-nix = { version = "0.30.0", features = ["signal"] }
+] }
+mockall = "0.13.0"
 parse-size = { version = "1.1.0", features = ["std"] }
-ppp = "2.3.0"
 prometheus = "0.14.0"
-prost = { version = "0.14.1", optional = true }
-prost-types = { version = "0.14.1", optional = true }
-rand = { version = "=0.8.5", features = ["small_rng"] }
-rcgen = { version = "0.14.3", optional = true }
-regex = "1.11.2"
 reqwest = { version = "0.12.12", default-features = false, features = [
     "blocking",
     "http2",
@@ -100,70 +50,20 @@ reqwest = { version = "0.12.12", default-features = false, features = [
     "json",
     "stream",
 ] }
+rcgen = { version = "0.14.3" }
 rustls = { version = "0.23.18", default-features = false, features = [
     "ring",
     "std",
     "brotli",
 ] }
-rustls-acme = { version = "0.14.0", default-features = false, features = [
-    "webpki-roots",
-    "tls12",
-    "ring",
-], optional = true }
-rustls-pemfile = "2.2.0"
-rustls-platform-verifier = "0.6.0"
-scopeguard = "1.2.0"
 serde = { version = "1.0.214", features = ["derive"] }
-serde_json = "1.0.132"
-serde_with = "3.14.0"
-serde_yaml_ng = "0.10"
-sev = { version = "6.1.0", optional = true }
-sha1 = "0.10.6"
-sha2 = { version = "0.10.9", optional = true }
 socket2 = "0.6.0"
 strum = { version = "0.27.1", features = ["derive"] }
 strum_macros = "0.27.1"
-systemstat = "0.2.3"
-tar = { version = "0.4.44", optional = true }
-tempfile = "3.23"
 thiserror = "2.0.3"
-tokio = { version = "1.47.0", features = ["full"] }
 tokio-util = { version = "0.7.12", features = ["full"] }
-tokio-rustls = { version = "0.26.0", default-features = false, features = [
-    "tls12",
-    "logging",
-    "ring",
-] }
-tokio-io-timeout = "1.2.0"
-tower = { version = "0.5.1", features = ["util"] }
-tower_governor = { version = "0.8" }
 tower-service = "0.3.3"
-tracing = { version = "0.1.40", features = ["attributes"] }
 url = "2.5.3"
 # DO NOT upgrade, this breaks monorepo compatibility
 # Read https://github.com/uuid-rs/uuid/releases/tag/1.13.0
 uuid = { version = "=1.12.1", features = ["v7"] }
-vrl = { version = "0.26.0", default-features = false, features = [
-    "value",
-], optional = true }
-webpki-root-certs = "1.0.1"
-x509-parser = "0.17.0"
-zeroize = { version = "1.8.1", features = ["derive"] }
-zstd = "0.13.2"
-
-[dev-dependencies]
-criterion = { version = "0.6", features = ["html_reports", "async_tokio"] }
-mockall = "0.13.0"
-mock-io = { version = "0.3.2", features = ["full"] }
-# Do not upgrade unless you want to upgrade `rand` too
-rand_regex = "=0.17.0"
-tempfile = "3.20.0"
-
-[[bench]]
-name = "vector"
-harness = false
-required-features = ["vector"]
-
-[package.metadata.cargo-all-features]
-# Limit feature combinations to reduce test duration
-max_combination_size = 2

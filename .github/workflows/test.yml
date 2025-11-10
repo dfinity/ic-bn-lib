@@ -28,4 +28,4 @@ jobs:
         run: cargo clean
 
       - name: Run ACME tests
-        run: ./test-acme.sh
+        run: ./ic-bn-lib/test-acme.sh
