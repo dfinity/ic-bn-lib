@@ -31,7 +31,7 @@ http-body-util = "0.1.2"
 humantime = "2.2.0"
 hyper = "1.7.0"
 hyper-util = { version = "0.1.10", features = ["full"] }
-ic-agent = { git = "https://github.com/dfinity/agent-rs", rev = "f34acedb5539838ffdbd4cf49a0832303977293f", features = [
+ic-agent = { version = "0.44", features = [
     "ring",
     "_internal_dynamic-routing",
 ] }
