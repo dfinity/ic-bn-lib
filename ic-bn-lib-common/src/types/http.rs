@@ -30,7 +30,7 @@ pub const ALPN_H1: &[u8] = b"http/1.1";
 pub const ALPN_H2: &[u8] = b"h2";
 pub const ALPN_ACME: &[u8] = b"acme-tls/1";
 
-/// HTTP error variants
+/// HTTP error
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("HTTP body reading timed out")]
@@ -55,6 +55,7 @@ pub enum Error {
     Generic(#[from] anyhow::Error),
 }
 
+/// HTTP Cache error
 #[derive(thiserror::Error, Debug)]
 pub enum CacheError {
     #[error("unable to extract key from request: {0}")]
@@ -82,6 +83,7 @@ pub enum ProxyProtocolMode {
     Forced,
 }
 
+/// HTTP server options
 #[derive(Clone, Copy)]
 pub struct ServerOptions {
     pub backlog: u32,
@@ -143,7 +145,7 @@ impl From<&ServerOptions> for TcpKeepalive {
     }
 }
 
-/// TLS information about the connection
+/// TLS-related information about the connection
 #[derive(Clone, Debug)]
 pub struct TlsInfo {
     pub sni: Option<String>,
@@ -210,6 +212,7 @@ impl ConnInfo {
     }
 }
 
+/// Options for a `Listener`
 pub struct ListenerOpts {
     pub backlog: u32,
     pub mss: Option<u32>,
@@ -296,6 +299,7 @@ impl Stats {
     }
 }
 
+/// HTTP server metrics
 #[derive(Clone)]
 pub struct Metrics {
     pub conns: IntCounterVec,
@@ -404,6 +408,7 @@ impl Metrics {
     }
 }
 
+/// HTTP versions to use
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Display, EnumString)]
 #[strum(serialize_all = "snake_case")]
 pub enum HttpVersion {
@@ -458,6 +463,7 @@ impl Default for ClientOptions {
     }
 }
 
+/// HTTP Client CLI
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
 pub struct HttpClientCli {
     /// Timeout for HTTP connection phase
@@ -555,6 +561,7 @@ impl From<&HttpClientCli> for ClientOptions {
     }
 }
 
+/// HTTP Server CLI
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
 pub struct HttpServerCli {
     /// Backlog of incoming connections to set on the listening socket
@@ -695,6 +702,7 @@ impl From<&HttpServerCli> for TlsOptions {
     }
 }
 
+/// WAF CLI
 #[derive(Args)]
 pub struct WafCli {
     /// Enables the WAF.
@@ -722,6 +730,7 @@ pub struct WafCli {
     pub waf_interval: Duration,
 }
 
+/// Reason for bypassing the HTTP cache for the particular request
 #[derive(Debug, Clone, Display, PartialEq, Eq, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum CacheBypassReason<R: CustomBypassReason> {

@@ -8,6 +8,7 @@ pub struct EWMA {
 }
 
 impl EWMA {
+    /// Create new `EWMA`
     pub fn new(alpha: f64) -> Self {
         assert!((0.0..=1.0).contains(&alpha));
 
@@ -18,6 +19,7 @@ impl EWMA {
         }
     }
 
+    /// Record new measurement
     pub fn add(&mut self, v: f64) {
         if self.new {
             self.new = false;
@@ -29,6 +31,7 @@ impl EWMA {
         self.value = self.alpha.mul_add(v - self.value, self.value)
     }
 
+    /// Get the average
     pub const fn get(&self) -> Option<f64> {
         if self.new {
             return None;
@@ -51,6 +54,7 @@ pub struct DEWMA {
 }
 
 impl DEWMA {
+    /// Create new `DEWMA`
     pub fn new(alpha: f64, beta: f64) -> Self {
         assert!((0.0..=1.0).contains(&alpha));
         assert!((0.0..=1.0).contains(&beta));
@@ -64,6 +68,7 @@ impl DEWMA {
         }
     }
 
+    /// Add a measurement
     pub fn add(&mut self, v: f64) {
         if self.iter == 0 {
             self.iter += 1;
@@ -86,6 +91,7 @@ impl DEWMA {
             .mul_add(self.value - value_old, (1.0 - self.beta) * self.trend);
     }
 
+    /// Get the average
     pub fn get(&self, m: f64) -> Option<f64> {
         // The function is undefined for the 1st measurement
         if self.iter < 2 {

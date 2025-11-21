@@ -12,7 +12,17 @@ use strum::EnumString;
 
 use crate::types::http::Error;
 
-/// Copycat of Hickory `LookupIpStrategy` but with `FromStr` derived for CLI
+/// Default DNS servers
+pub const DEFAULT_RESOLVERS: &[IpAddr] = &[
+    IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), // Cloudflare 1.1.1.1
+    IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), // Google 8.8.8.8
+    IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), // Quad9 9.9.9.9
+    IpAddr::V6(Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)), // Cloudflare 1.1.1.1
+    IpAddr::V6(Ipv6Addr::new(0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888)), // Google 8.8.8.8
+    IpAddr::V6(Ipv6Addr::new(0x2620, 0x00fe, 0, 0, 0, 0, 0, 0x00fe)), // Quad9 9.9.9.9
+];
+
+/// Copycat of `hickory_resolver::config::LookupIpStrategy` but with `FromStr` derived for CLI
 #[derive(Clone, Copy, Debug, PartialEq, Eq, EnumString)]
 #[strum(serialize_all = "snake_case")]
 pub enum LookupStrategy {
@@ -40,6 +50,7 @@ impl From<LookupStrategy> for LookupIpStrategy {
     }
 }
 
+/// DNS protocol
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Protocol {
     Clear(u16),
@@ -68,6 +79,7 @@ impl FromStr for Protocol {
     }
 }
 
+/// DNS resolver options
 #[derive(Debug, Clone)]
 pub struct Options {
     pub protocol: Protocol,
@@ -91,6 +103,7 @@ impl Default for Options {
     }
 }
 
+/// Iterator over DNS lookup results
 pub struct SocketAddrs {
     pub iter: Box<dyn Iterator<Item = IpAddr> + Send>,
 }
@@ -103,15 +116,7 @@ impl Iterator for SocketAddrs {
     }
 }
 
-pub const DEFAULT_RESOLVERS: &[IpAddr] = &[
-    IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), // Cloudflare 1.1.1.1
-    IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), // Google 8.8.8.8
-    IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), // Quad9 9.9.9.9
-    IpAddr::V6(Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)), // Cloudflare 1.1.1.1
-    IpAddr::V6(Ipv6Addr::new(0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888)), // Google 8.8.8.8
-    IpAddr::V6(Ipv6Addr::new(0x2620, 0x00fe, 0, 0, 0, 0, 0, 0x00fe)), // Quad9 9.9.9.9
-];
-
+/// DNS CLI parameters
 #[derive(Args)]
 pub struct DnsCli {
     /// List of DNS servers to use

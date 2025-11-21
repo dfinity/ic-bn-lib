@@ -178,6 +178,7 @@ fn pebble_config(dir: &Path, listen: String) -> String {
     .to_string()
 }
 
+/// DNS options for `Pebble`'s DNS server
 pub struct DnsOpts {
     pub path: PathBuf,
     pub ip: IpAddr,
@@ -185,12 +186,14 @@ pub struct DnsOpts {
     pub port_dns: u16,
 }
 
+/// Wrapper to run `Pebble`'s DNS server
 pub struct Dns {
     process: Option<Child>,
     opts: DnsOpts,
 }
 
 impl Dns {
+    /// Create new `Dns`
     pub async fn new(opts: DnsOpts) -> Self {
         println!("Starting DNS server...");
 
@@ -228,6 +231,7 @@ impl Dns {
     }
 }
 
+/// Options for `Pebble`
 pub struct PebbleOpts {
     pub path: PathBuf,
     pub ip: IpAddr,
@@ -235,6 +239,7 @@ pub struct PebbleOpts {
     pub dns_server: String,
 }
 
+/// Wrapper to run `Pebble`
 pub struct Pebble {
     opts: PebbleOpts,
     process: Option<Child>,
@@ -242,6 +247,7 @@ pub struct Pebble {
 }
 
 impl Pebble {
+    /// Create new `Pebble`
     pub async fn new(opts: PebbleOpts) -> Self {
         println!("Starting Pebble...");
 
@@ -292,12 +298,14 @@ impl Pebble {
     }
 }
 
+/// Pebble + DNS environment
 pub struct Env {
     pub pebble: Pebble,
     pub dns: Dns,
 }
 
 impl Env {
+    /// Create new `Env` with paths to the binaries
     pub async fn new_with_paths(path_pebble: &str, path_dns: &str) -> Self {
         let dns_opts = DnsOpts {
             ip: "127.0.0.1".parse().unwrap(),
@@ -319,6 +327,7 @@ impl Env {
         Self { dns, pebble }
     }
 
+    /// Create new `Env` with paths from env vars
     pub async fn new() -> Self {
         let path_pebble = env::var("PEBBLE").unwrap_or_else(|_| "./pebble".to_owned());
         let path_dns =
@@ -352,6 +361,7 @@ impl Env {
         Arc::new(Resolver::new(opts))
     }
 
+    /// Stops the environment
     pub fn stop(&mut self) {
         if let Some(mut v) = self.pebble.process.take() {
             println!("Stopping Pebble...");

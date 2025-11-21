@@ -19,7 +19,7 @@ use tokio::sync::{
 
 use super::calc_headers_size;
 
-// Read the given body enforcing a size & time limit
+/// Read the given body enforcing a size & time limit
 pub async fn buffer_body<H: HttpBody + Send>(
     body: H,
     size_limit: usize,
@@ -50,15 +50,17 @@ where
     Ok(body)
 }
 
+/// Result of reading a body
 pub type BodyResult = Result<u64, String>;
 
-/// Wrapper that makes the provided body Sync
+/// Wrapper that makes the provided body `Sync`
 #[derive(Debug)]
 pub struct SyncBody {
     inner: Mutex<Pin<Box<Body>>>,
 }
 
 impl SyncBody {
+    /// Create a new `SyncBody`
     pub fn new(inner: Body) -> Self {
         Self {
             inner: Mutex::new(Box::pin(inner)),
@@ -99,6 +101,7 @@ pub struct NotifyingBody<D, E, S: Clone + Unpin> {
 }
 
 impl<D, E, S: Clone + Unpin> NotifyingBody<D, E, S> {
+    /// Create a new `NotifyingBody`
     pub fn new<B>(inner: B, tx: mpsc::Sender<S>, sig: S) -> Self
     where
         B: HttpBody<Data = D, Error = E> + Send + 'static,
@@ -157,7 +160,7 @@ where
     }
 }
 
-// Body that counts the bytes streamed
+/// Body that counts the number of bytes streamed
 pub struct CountingBody<D, E> {
     inner: Pin<Box<dyn HttpBody<Data = D, Error = E> + Send + 'static>>,
     tx: Option<Sender<BodyResult>>,
@@ -166,6 +169,7 @@ pub struct CountingBody<D, E> {
 }
 
 impl<D, E> CountingBody<D, E> {
+    /// Create a new `CountingBody`
     pub fn new<B>(inner: B) -> (Self, Receiver<BodyResult>)
     where
         B: HttpBody<Data = D, Error = E> + Send + 'static,
@@ -190,7 +194,7 @@ impl<D, E> CountingBody<D, E> {
         (body, rx)
     }
 
-    pub fn finish(&mut self, res: Result<u64, String>) {
+    fn finish(&mut self, res: Result<u64, String>) {
         if let Some(v) = self.tx.take() {
             let _ = v.send(res);
         }

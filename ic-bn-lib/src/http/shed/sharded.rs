@@ -16,6 +16,7 @@ use super::{
     little::{LoadShedLayer, LoadShedResponse},
 };
 
+/// Sharded version of `LoadShedLayer`
 #[derive(Debug, Clone)]
 pub struct ShardedLittleLoadShedder<T: TypeExtractor, I> {
     extractor: T,
@@ -24,6 +25,7 @@ pub struct ShardedLittleLoadShedder<T: TypeExtractor, I> {
 }
 
 impl<T: TypeExtractor, I: Send + Sync + Clone> ShardedLittleLoadShedder<T, I> {
+    /// Create new `ShardedLittleLoadShedder`
     pub const fn new(
         inner: I,
         extractor: T,
@@ -80,6 +82,7 @@ where
     }
 }
 
+/// Tower Layer for `ShardedLittleLoadShedder`
 #[derive(Debug, Clone)]
 pub struct ShardedLittleLoadShedderLayer<T: TypeExtractor>(
     ShardedOptions<T>,
@@ -87,6 +90,7 @@ pub struct ShardedLittleLoadShedderLayer<T: TypeExtractor>(
 );
 
 impl<T: TypeExtractor> ShardedLittleLoadShedderLayer<T> {
+    /// Create new `ShardedLittleLoadShedderLayer`
     pub fn new(opts: ShardedOptions<T>) -> Self {
         // Generate the shedding shards, one per provided request type
         let shards = Arc::new(BTreeMap::from_iter(opts.latencies.iter().map(|x| {

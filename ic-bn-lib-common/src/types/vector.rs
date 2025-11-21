@@ -6,6 +6,7 @@ use url::Url;
 
 use crate::parse_size_decimal_usize;
 
+/// Vector CLI
 #[derive(Args, Clone)]
 pub struct VectorCli {
     /// Setting this enables logging of HTTP requests to Vector using native protocol

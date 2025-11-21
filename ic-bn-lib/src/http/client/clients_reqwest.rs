@@ -32,6 +32,7 @@ fn extract_host(url: &Url) -> String {
     )
 }
 
+/// Create a new `reqwest::Client` from `ClientOptions` and a resolver
 pub fn new<R: Resolve + 'static>(
     opts: ClientOptions,
     resolver: Option<R>,
@@ -85,6 +86,7 @@ pub fn new<R: Resolve + 'static>(
     Ok(client.build().context("unable to create reqwest client")?)
 }
 
+/// Reqwest-based HTTP client
 #[derive(Clone, Debug)]
 pub struct ReqwestClient(reqwest::Client);
 
@@ -104,6 +106,7 @@ impl Client for ReqwestClient {
     }
 }
 
+/// Reqwest-based HTTP client that pools a number of `Client`s and uses them in a round-robin fashion
 #[derive(Clone, Debug)]
 pub struct ReqwestClientRoundRobin {
     inner: Arc<ReqwestClientRoundRobinInner>,
@@ -142,6 +145,7 @@ impl Client for ReqwestClientRoundRobin {
     }
 }
 
+/// Client that pools a defined number of `Client`s and picks the least loaded one for the next request.
 #[derive(Clone, Debug)]
 pub struct ReqwestClientLeastLoaded {
     inner: Arc<Vec<ReqwestClientLeastLoadedInner>>,

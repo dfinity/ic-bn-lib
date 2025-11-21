@@ -56,6 +56,7 @@ pub struct AcmeCert {
 /// Type of DNS backend to use
 #[derive(Clone, Display, EnumString)]
 #[strum(serialize_all = "snake_case")]
+#[non_exhaustive]
 pub enum DnsBackend {
     Cloudflare,
 }

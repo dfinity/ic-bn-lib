@@ -4,6 +4,7 @@ use async_trait::async_trait;
 
 use crate::Error;
 
+/// Trait to get system information
 #[async_trait]
 pub trait GetsSystemInfo: Send + Sync + Clone + 'static {
     async fn cpu_usage(&self) -> Result<f64, Error>;
