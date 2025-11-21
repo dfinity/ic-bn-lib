@@ -15,7 +15,7 @@ pub trait Client: Send + Sync + fmt::Debug {
     async fn execute(&self, req: reqwest::Request) -> Result<reqwest::Response, reqwest::Error>;
 }
 
-/// Generic HTTP client trait that is using HTTP types
+/// Generic HTTP client trait that is using `http` crate types
 #[async_trait]
 pub trait ClientHttp<B1, B2 = axum::body::Body>: Send + Sync + fmt::Debug {
     async fn execute(&self, req: http::Request<B1>) -> Result<http::Response<B2>, Error>;
@@ -30,6 +30,7 @@ pub trait KeyExtractor: Clone + Send + Sync + Debug + 'static {
     fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, CacheError>;
 }
 
+/// Reason for bypassing caching of the request
 pub trait CustomBypassReason:
     Debug + Clone + std::fmt::Display + Into<&'static str> + PartialEq + Eq + Send + Sync + 'static
 {

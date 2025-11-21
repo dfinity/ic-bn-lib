@@ -6,14 +6,15 @@ use rustls::{server::ClientHello, sign::CertifiedKey};
 
 use crate::types::tls::{Cert, Pem};
 
-/// Trait that the certificate providers should implement
-/// It should return a vector of PEM-encoded cert-keys pairs
+/// Trait that the certificate providers should implement.
+/// It should return a vector of PEM-encoded cert-keys pairs.
 #[async_trait]
 pub trait ProvidesCertificates: Sync + Send + std::fmt::Debug {
     /// Returns a list of certificates in PEM format
     async fn get_certificates(&self) -> Result<Vec<Pem>, Error>;
 }
 
+/// Trait that a certificate storage must implement
 pub trait StoresCertificates<T: Clone + Send + Sync>: Send + Sync {
     fn store(&self, cert_list: Vec<Cert<T>>) -> Result<(), Error>;
 }

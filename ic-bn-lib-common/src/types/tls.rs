@@ -6,7 +6,7 @@ use rustls::{
     version::{TLS12, TLS13},
 };
 
-/// A single PEM-encoded certificate+private key pair
+/// A single, concatenated, PEM-encoded certificate and private key pair
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Pem(pub Vec<u8>);
 
@@ -26,9 +26,10 @@ pub struct Cert<T: Clone + Send + Sync> {
     pub cert: T,
 }
 
-/// Commonly used concrete type of the above for Rustls
+/// Commonly used concrete type of the `Cert` for Rustls
 pub type CertKey = Cert<Arc<CertifiedKey>>;
 
+/// Options for TLS server
 pub struct TlsOptions {
     pub additional_alpn: Vec<Vec<u8>>,
     pub sessions_count: u64,

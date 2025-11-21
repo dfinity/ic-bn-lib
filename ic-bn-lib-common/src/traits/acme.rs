@@ -3,7 +3,7 @@ use instant_acme::RevocationRequest;
 
 use crate::types::acme::{AcmeCert, Error, Record};
 
-/// ACME token manager trait to set challenges
+/// ACME token manager trait to manage challenges
 #[async_trait]
 pub trait TokenManager: Sync + Send {
     async fn set(&self, id: &str, token: &str) -> Result<(), anyhow::Error>;
@@ -11,6 +11,7 @@ pub trait TokenManager: Sync + Send {
     async fn verify(&self, id: &str, token: &str) -> Result<(), anyhow::Error>;
 }
 
+/// ACME trait to manage DNS entries
 #[async_trait]
 pub trait DnsManager: Sync + Send {
     async fn create(

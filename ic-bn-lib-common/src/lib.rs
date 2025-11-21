@@ -1,6 +1,7 @@
 pub mod traits;
 pub mod types;
 
+/// Converts a string representation to a `candid::Principal`. Panics when an error occurs.
 #[macro_export]
 macro_rules! principal {
     ($id:expr) => {{ candid::Principal::from_text($id).unwrap() }};

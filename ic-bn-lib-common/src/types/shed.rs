@@ -24,6 +24,7 @@ pub enum ShedResponse<T> {
     Overload(ShedReason),
 }
 
+/// Options for system load shedder
 #[derive(Debug, Clone, Copy)]
 pub struct SystemOptions {
     pub cpu: Option<f64>,
@@ -33,6 +34,7 @@ pub struct SystemOptions {
     pub loadavg_15: Option<f64>,
 }
 
+/// Request type and latency pair
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct TypeLatency<T>(pub T, pub Duration);
 
@@ -56,6 +58,7 @@ where
     }
 }
 
+/// Options for sharded load shedder
 #[derive(Debug, Clone)]
 pub struct ShardedOptions<T: TypeExtractor> {
     pub extractor: T,
@@ -64,6 +67,7 @@ pub struct ShardedOptions<T: TypeExtractor> {
     pub latencies: Vec<TypeLatency<T::Type>>,
 }
 
+/// System load shedder CLI
 #[derive(Args, Clone, Debug, PartialEq)]
 pub struct ShedSystemCli {
     /// EWMA alpha coefficient in [0.0, 1.0] range.
@@ -104,6 +108,7 @@ impl From<ShedSystemCli> for SystemOptions {
     }
 }
 
+/// Sharded load shedder CLI
 #[derive(Args, Clone, Debug, PartialEq)]
 pub struct ShedShardedCli<T: FromStr + Clone + Send + Sync + 'static>
 where

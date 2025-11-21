@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use ic_agent::agent::route_provider::RouteProvider;
 use tokio_util::sync::CancellationToken;
 
-// A task that can be cancelled by a token
+// A runnable task that can be cancelled by a token
 #[async_trait]
 pub trait Run: Send + Sync {
     async fn run(&self, token: CancellationToken) -> Result<(), Error>;

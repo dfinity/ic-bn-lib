@@ -9,6 +9,7 @@ use tower_service::Service;
 
 use crate::types::{dns::SocketAddrs, http::Error};
 
+/// Generic trait to resolve a DNS record
 #[async_trait]
 pub trait Resolves: Send + Sync {
     async fn resolve(
@@ -20,6 +21,10 @@ pub trait Resolves: Send + Sync {
     fn flush_cache(&self);
 }
 
+/// Cloneable version of `reqwest::dns::resolve``
+pub trait CloneableDnsResolver: Resolve + Clone + Debug + 'static {}
+
+/// Trait that satisfies Hyper's DNS resolver constraints
 pub trait HyperDnsResolver:
     Service<
         Name,
@@ -30,8 +35,7 @@ pub trait HyperDnsResolver:
 {
 }
 
-pub trait CloneableDnsResolver: Resolve + Clone + Debug + 'static {}
-
+/// Cloneable version of `HyperDnsResolver``
 pub trait CloneableHyperDnsResolver:
     HyperDnsResolver + Clone + Debug + Send + Sync + 'static
 {

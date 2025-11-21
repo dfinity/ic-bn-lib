@@ -6,6 +6,7 @@ use strum::{Display, IntoStaticStr};
 
 use crate::parse_size;
 
+/// Target health state for Health Checker
 #[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, Display)]
 #[strum(serialize_all = "snake_case")]
 pub enum TargetState {
@@ -14,6 +15,7 @@ pub enum TargetState {
     Healthy,
 }
 
+/// SEV-SNP CLI
 #[derive(Args)]
 pub struct SevSnpCli {
     /// Enable SEV-SNP measurement reporting
