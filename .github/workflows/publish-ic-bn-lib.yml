@@ -24,7 +24,7 @@ jobs:
           RELEASE_TAG: ${{ github.ref }}
         run: |
           mv ic-bn-lib/Cargo.toml ic-bn-lib/Cargo.toml.orig
-          sed "s/0\\.0\\.0-git/${RELEASE_TAG#v}/" ic-bn-lib/Cargo.toml.orig > ic-bn-lib/Cargo.toml
+          sed "s/0\\.0\\.0-git/${RELEASE_TAG##*\/v}/" ic-bn-lib/Cargo.toml.orig > ic-bn-lib/Cargo.toml
 
       - run: cargo publish
         env:
