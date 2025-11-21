@@ -6,6 +6,7 @@ readme.workspace = true
 keywords.workspace = true
 description = "A collection of traits & types commonly used by ic-bn-lib and others"
 version = "0.1.0"
+documentation = "https://docs.rs/ic-bn-lib-common"
 
 [dependencies]
 anyhow = { workspace = true }
