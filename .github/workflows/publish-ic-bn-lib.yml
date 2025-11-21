@@ -25,7 +25,8 @@ jobs:
         run: |
           mv ic-bn-lib/Cargo.toml ic-bn-lib/Cargo.toml.orig
           sed "s/0\\.0\\.0-git/${RELEASE_TAG##*\/v}/" ic-bn-lib/Cargo.toml.orig > ic-bn-lib/Cargo.toml
+          rm -f ic-bn-lib/Cargo.toml.orig
 
-      - run: cargo publish --package ic-bn-lib
+      - run: cargo publish --package ic-bn-lib --allow-dirty
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
