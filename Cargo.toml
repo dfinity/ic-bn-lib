@@ -6,6 +6,12 @@ default-members = ["ic-bn-lib", "ic-bn-lib-common"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+license-file = "LICENSE"
+homepage = "https://github.com/dfinity/ic-bn-lib"
+repository = "https://github.com/dfinity/ic-bn-lib"
+readme = "README.md"
+keywords = ["internet-computer", "icp", "dfinity", "boundary-nodes"]
+categories = []
 
 [workspace.dependencies]
 anyhow = "1.0.93"

@@ -1,7 +1,11 @@
 [package]
 name = "ic-bn-lib-common"
-version.workspace = true
 edition.workspace = true
+license-file.workspace = true
+readme.workspace = true
+keywords.workspace = true
+description = "A collection of traits & types commonly used by ic-bn-lib and others"
+version = "0.1.0"
 
 [dependencies]
 anyhow = { workspace = true }
