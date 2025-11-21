@@ -84,6 +84,7 @@ impl StateInner {
     }
 }
 
+/// System info state
 #[derive(Debug)]
 pub struct State<S: GetsSystemInfo> {
     opts: SystemOptions,
@@ -100,7 +101,7 @@ impl<S: GetsSystemInfo> State<S> {
         }
     }
 
-    // Perform system info measurement
+    /// Perform system info measurement
     async fn measure(&self) -> Result<(), Error> {
         let cpu = self.sys_info.cpu_usage().await?;
         let mem = self.sys_info.memory_usage()?;
@@ -177,7 +178,7 @@ impl<S: GetsSystemInfo> State<S> {
         self.inner.read().unwrap().shed_reason
     }
 
-    // Periodically run the measurements
+    /// Periodically run the measurements
     async fn run(&self) {
         // CPU usage measurement takes 900ms so we run every second
         let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -236,6 +237,7 @@ where
     }
 }
 
+/// Layer for `SystemLoadShedder`
 #[derive(Debug, Clone)]
 pub struct SystemLoadShedderLayer<S: GetsSystemInfo>(Arc<State<S>>);
 

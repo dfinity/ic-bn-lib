@@ -49,7 +49,7 @@ impl Run for IntervalRunner {
     }
 }
 
-// Starts & tracks Tasks that implement Run
+/// Starts & tracks Tasks that implement Run
 #[derive(new)]
 pub struct TaskManager {
     #[new(default)]

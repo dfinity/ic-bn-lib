@@ -1,11 +1,14 @@
 [package]
 name = "ic-bn-lib"
+
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+readme.workspace = true
+
 description = "Internet Computer Boundary Nodes shared modules"
 version = "0.1.0"
-edition = "2024"
-license-file = "LICENSE"
-repository = "https://github.com/dfinity/ic-bn-lib"
-readme = "README.md"
+documentation = "https://docs.rs/ic-bn-lib"
 
 [features]
 default = []
@@ -66,7 +69,7 @@ hyper-rustls = { version = "0.27.5", optional = true, default-features = false, 
 ] }
 hyper-util = { workspace = true }
 ic-agent = { workspace = true }
-ic-bn-lib-common = { git = "https://github.com/dfinity/ic-bn-lib", rev = "2ab3e0998b7ffddc7a01bb8fca688fed2fbe0afc" }
+ic-bn-lib-common = "0.1"
 indoc = "2.0.6"
 instant-acme = { workspace = true, optional = true }
 itertools = "0.14.0"

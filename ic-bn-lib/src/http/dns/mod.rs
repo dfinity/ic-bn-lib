@@ -231,7 +231,7 @@ impl Service<HyperName> for StaticResolver {
 
 /// Resolver that resolves the API BN IPs using the registry.
 /// If the registry doesn't contain the requested host - use the normal fallback
-/// DNS resolver to look it up
+/// DNS resolver to look it up.
 #[derive(Debug, Clone)]
 pub struct ApiBnResolver {
     agent: Agent,

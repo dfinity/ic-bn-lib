@@ -485,6 +485,7 @@ impl Conn {
     }
 }
 
+/// Builder for a `Server`
 pub struct ServerBuilder {
     addr: Option<Addr>,
     router: Router,
@@ -525,8 +526,8 @@ impl ServerBuilder {
         self
     }
 
-    /// Sets up metrics with provided Metrics
-    /// Overrides `with_metrics_registry()`
+    /// Sets up metrics with provided Metrics.
+    /// Overrides `with_metrics_registry()`.
     pub fn with_metrics(mut self, metrics: Metrics) -> Self {
         self.metrics = Some(metrics);
         self
@@ -576,7 +577,7 @@ impl ServerBuilder {
     }
 }
 
-// Listens for new connections on addr with an optional TLS and serves provided Router
+/// Listens for new connections with an optional TLS and serves provided Router
 pub struct Server {
     addr: Addr,
     router: Router,
@@ -594,6 +595,7 @@ impl Display for Server {
 }
 
 impl Server {
+    /// Create a new `Server`
     pub fn new(
         addr: Addr,
         router: Router,
@@ -731,7 +733,7 @@ impl Server {
     }
 }
 
-// Creates a TCP listener with given opts
+/// Creates a TCP listener with given opts
 pub fn listen_tcp(addr: SocketAddr, opts: ListenerOpts) -> Result<TcpListener, Error> {
     let domain = if addr.is_ipv4() {
         Domain::IPV4
@@ -769,7 +771,7 @@ pub fn listen_tcp(addr: SocketAddr, opts: ListenerOpts) -> Result<TcpListener, E
     Ok(listener)
 }
 
-// Creates a Unix Socket listener with given opts
+/// Creates a Unix Socket listener with given opts
 pub fn listen_unix(path: PathBuf, opts: ListenerOpts) -> Result<UnixListener, Error> {
     let socket = UnixSocket::new_stream().context("unable to open UNIX socket")?;
 

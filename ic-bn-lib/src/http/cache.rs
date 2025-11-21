@@ -44,6 +44,7 @@ use crate::http::headers::X_CACHE_TTL;
 pub enum CustomBypassReasonDummy {}
 impl CustomBypassReason for CustomBypassReasonDummy {}
 
+/// Status of the cache lookup operation
 #[derive(Debug, Clone, Display, PartialEq, Eq, Default, IntoStaticStr)]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum CacheStatus<R: CustomBypassReason = CustomBypassReasonDummy> {
@@ -54,8 +55,8 @@ pub enum CacheStatus<R: CustomBypassReason = CustomBypassReasonDummy> {
     Miss,
 }
 
-// Injects itself into a given response to be accessible by middleware
 impl<B: CustomBypassReason> CacheStatus<B> {
+    /// Injects itself into a given response to be accessible by middleware
     pub fn with_response<T>(self, mut resp: Response<T>) -> Response<T> {
         resp.extensions_mut().insert(self);
         resp
@@ -67,8 +68,9 @@ enum ResponseType<R: CustomBypassReason> {
     Streamed(Response, CacheBypassReason<R>),
 }
 
+/// Cache entry
 #[derive(Clone)]
-pub struct Entry {
+struct Entry {
     response: Response<Bytes>,
     /// Time it took to generate the response for given entry.
     /// Used for x-fetch algorithm.
@@ -94,6 +96,7 @@ impl Entry {
     }
 }
 
+/// No-op cache bypasser that never bypasses
 #[derive(Debug, Clone)]
 pub struct NoopBypasser;
 
@@ -105,6 +108,7 @@ impl Bypasser for NoopBypasser {
     }
 }
 
+/// Cache metrics
 #[derive(Clone)]
 pub struct Metrics {
     lock_await: HistogramVec,
@@ -117,6 +121,7 @@ pub struct Metrics {
 }
 
 impl Metrics {
+    /// Create new `Metrics`
     pub fn new(registry: &Registry) -> Self {
         let lbls = &["cache_status", "cache_bypass_reason"];
 
@@ -177,6 +182,7 @@ impl Metrics {
     }
 }
 
+/// Cache options
 pub struct Opts {
     pub cache_size: u64,
     pub max_item_size: usize,
@@ -264,6 +270,7 @@ pub struct CacheBuilder<K: KeyExtractor, B: Bypasser> {
 }
 
 impl<K: KeyExtractor> CacheBuilder<K, NoopBypasser> {
+    /// Create new `CacheBuilder`
     pub fn new(key_extractor: K) -> Self {
         Self {
             key_extractor,
@@ -275,6 +282,7 @@ impl<K: KeyExtractor> CacheBuilder<K, NoopBypasser> {
 }
 
 impl<K: KeyExtractor, B: Bypasser> CacheBuilder<K, B> {
+    /// Create new `CacheBuilder` with a bypasser
     pub fn new_with_bypasser(key_extractor: K, bypasser: B) -> Self {
         Self {
             key_extractor,
@@ -350,6 +358,7 @@ impl<K: KeyExtractor, B: Bypasser> CacheBuilder<K, B> {
     }
 }
 
+/// HTTP Cache
 pub struct Cache<K: KeyExtractor, B: Bypasser = NoopBypasser> {
     store: MokaCache<K::Key, Arc<Entry>, RandomState>,
     locks: MokaCache<K::Key, Arc<Mutex<()>>, RandomState>,
@@ -369,6 +378,7 @@ fn weigh_entry<K: KeyExtractor>(_k: &K::Key, v: &Arc<Entry>) -> u32 {
 }
 
 impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
+    /// Create new `Cache`
     pub fn new(
         opts: Opts,
         key_extractor: K,
@@ -404,6 +414,7 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
         })
     }
 
+    /// Looks up the given entry
     pub fn get(&self, key: &K::Key, now: Instant, beta: f64) -> Option<Response> {
         let val = self.store.get(key)?;
 
@@ -417,6 +428,7 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
         Some(Response::from_parts(parts, Body::from(body)))
     }
 
+    /// Insert a new entry into the cache
     pub fn insert(
         &self,
         key: K::Key,
@@ -437,6 +449,7 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
         );
     }
 
+    /// Process the HTTP request
     pub async fn process_request(
         &self,
         request: Request,
@@ -630,30 +643,6 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
             ttl,
         ))
     }
-
-    #[cfg(test)]
-    pub fn housekeep(&self) {
-        self.store.run_pending_tasks();
-        self.locks.run_pending_tasks();
-    }
-
-    #[cfg(test)]
-    pub fn size(&self) -> u64 {
-        self.store.weighted_size()
-    }
-
-    #[cfg(test)]
-    #[allow(clippy::len_without_is_empty)]
-    pub fn len(&self) -> u64 {
-        self.store.entry_count()
-    }
-
-    #[cfg(test)]
-    pub fn clear(&self) {
-        self.store.invalidate_all();
-        self.locks.invalidate_all();
-        self.housekeep();
-    }
 }
 
 #[async_trait]
@@ -666,6 +655,30 @@ impl<K: KeyExtractor, B: Bypasser> Run for Cache<K, B> {
     }
 }
 
+#[cfg(test)]
+impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
+    pub fn housekeep(&self) {
+        self.store.run_pending_tasks();
+        self.locks.run_pending_tasks();
+    }
+
+    pub fn size(&self) -> u64 {
+        self.store.weighted_size()
+    }
+
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> u64 {
+        self.store.entry_count()
+    }
+
+    pub fn clear(&self) {
+        self.store.invalidate_all();
+        self.locks.invalidate_all();
+        self.housekeep();
+    }
+}
+
+/// Key extractor that is keyed by URI and a `Range` header
 #[derive(Clone, Debug)]
 pub struct KeyExtractorUriRange;
 

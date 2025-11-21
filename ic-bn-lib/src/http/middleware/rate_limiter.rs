@@ -23,6 +23,7 @@ pub type GovernorLayerAxum<K> = GovernorLayer<K, NoOpMiddleware<QuantaInstant>, 
 
 const BYPASS_HEADER: HeaderName = hname!("x-ratelimit-bypass-token");
 
+/// Extracts an IP from the request as a rate-limiting key
 #[derive(Clone)]
 pub struct IpKeyExtractor;
 
@@ -123,6 +124,7 @@ where
     }
 }
 
+/// Create unkeyed rate-limiter
 pub fn layer_global<R: IntoResponse + Clone + Send + Sync + 'static>(
     rps: u32,
     burst_size: u32,
@@ -138,6 +140,7 @@ pub fn layer_global<R: IntoResponse + Clone + Send + Sync + 'static>(
     )
 }
 
+/// Create ratelimiter keyed by IP
 pub fn layer_by_ip<R: IntoResponse + Clone + Send + Sync + 'static>(
     rps: u32,
     burst_size: u32,
@@ -153,6 +156,7 @@ pub fn layer_by_ip<R: IntoResponse + Clone + Send + Sync + 'static>(
     )
 }
 
+/// Create a ratelimiter with a provided key extractor
 pub fn layer<K: KeyExtractor, R: IntoResponse + Clone + Send + Sync + 'static>(
     rps: u32,
     burst_size: u32,

@@ -112,6 +112,7 @@ struct AsyncCounter<T: AsyncReadWrite> {
 }
 
 impl<T: AsyncReadWrite> AsyncCounter<T> {
+    /// Create new `AsyncCounter`
     pub fn new(inner: T) -> (Self, Arc<Stats>) {
         let stats = Arc::new(Stats::new());
 

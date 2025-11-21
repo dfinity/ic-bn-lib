@@ -11,20 +11,24 @@ use prometheus::{
     register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry,
 };
 
+/// HTTP Client stats
 #[derive(Debug, Clone)]
 pub struct ClientStats {
     pub pool_size: usize,
     pub outstanding: usize,
 }
 
+/// Trait to get `ClientStats`
 pub trait Stats {
     fn stats(&self) -> ClientStats;
 }
 
+/// `Client` that also emits `Stats`
 pub trait ClientWithStats: Client + Stats {
     fn to_client(self: Arc<Self>) -> Arc<dyn Client>;
 }
 
+/// HTTP Client metrics
 #[derive(Clone, Debug)]
 struct Metrics {
     requests: IntCounterVec,
@@ -65,6 +69,7 @@ impl Metrics {
     }
 }
 
+/// Create an HTTP header for Basic auth
 pub fn basic_auth<U, P>(username: U, password: Option<P>) -> HeaderValue
 where
     U: fmt::Display,
