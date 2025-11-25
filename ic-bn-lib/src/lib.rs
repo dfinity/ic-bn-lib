@@ -27,6 +27,7 @@ use tokio::io::AsyncWriteExt;
 pub use hyper;
 pub use hyper_util;
 pub use ic_agent;
+pub use ic_bn_lib_common;
 pub use prometheus;
 pub use reqwest;
 pub use rustls;

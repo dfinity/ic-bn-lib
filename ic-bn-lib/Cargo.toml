@@ -2,7 +2,7 @@
 name = "ic-bn-lib"
 
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 repository.workspace = true
 readme.workspace = true
 

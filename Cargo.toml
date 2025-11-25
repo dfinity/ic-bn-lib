@@ -6,7 +6,7 @@ default-members = ["ic-bn-lib", "ic-bn-lib-common"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license-file = "LICENSE"
+license = "Apache-2.0"
 homepage = "https://github.com/dfinity/ic-bn-lib"
 repository = "https://github.com/dfinity/ic-bn-lib"
 readme = "README.md"
