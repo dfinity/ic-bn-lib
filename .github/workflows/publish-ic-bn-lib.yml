@@ -30,3 +30,11 @@ jobs:
       - run: cargo publish --package ic-bn-lib --allow-dirty
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+      - name: Send Slack message
+        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            text: "New `ic-bn-lib` crate (version `${{ github.ref_name }}`) has been published to crates.io"
