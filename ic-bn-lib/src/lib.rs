@@ -31,6 +31,8 @@ pub use ic_bn_lib_common;
 pub use prometheus;
 pub use reqwest;
 pub use rustls;
+#[cfg(feature = "acme-alpn")]
+pub use rustls_acme;
 pub use uuid;
 
 /// Error to be used with `retry_async` macro
