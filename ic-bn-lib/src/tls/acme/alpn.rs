@@ -8,7 +8,10 @@ use rustls::{
     server::{ClientHello, ResolvesServerCert},
     sign::CertifiedKey,
 };
-use rustls_acme::{AcmeConfig, AcmeState, ResolvesServerCertAcme, caches::DirCache};
+use rustls_acme::{
+    AcmeConfig, AcmeState, ResolvesServerCertAcme, caches::DirCache,
+    futures_rustls::rustls::ClientConfig,
+};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -19,6 +22,7 @@ pub struct Opts {
     pub domains: Vec<String>,
     pub contact: String,
     pub cache_path: PathBuf,
+    pub tls_config: Option<ClientConfig>,
 }
 
 /// ACME client that obtains certificates using TLS-ALPN-01 challenge.
@@ -31,9 +35,13 @@ pub struct AcmeAlpn(
 
 impl AcmeAlpn {
     pub fn new(opts: Opts) -> Self {
-        let state = AcmeConfig::new(opts.domains)
-            .contact_push(opts.contact)
-            .directory(opts.acme_url.to_string());
+        let state = if let Some(v) = opts.tls_config {
+            AcmeConfig::new_with_client_config(opts.domains, Arc::new(v))
+        } else {
+            AcmeConfig::new(opts.domains)
+        }
+        .contact_push(opts.contact)
+        .directory(opts.acme_url.to_string());
 
         let state = state.cache(DirCache::new(opts.cache_path)).state();
         let resolver = state.resolver();
