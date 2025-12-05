@@ -65,27 +65,52 @@ pub async fn download(path: &Path) -> Result<(), Error> {
     let urls = json!({
         "pebble": {
             "linux": {
-                "url": format!("https://github.com/letsencrypt/pebble/releases/download/v{VER}/pebble-linux-amd64.tar.gz"),
-                "sha": "34595d915bbc2fc827affb3f58593034824df57e95353b031c8d5185724485ce",
+                "x86_64": {
+                    "url": format!("https://github.com/letsencrypt/pebble/releases/download/v{VER}/pebble-linux-amd64.tar.gz"),
+                    "sha": "34595d915bbc2fc827affb3f58593034824df57e95353b031c8d5185724485ce",
+                },
+                "aarch64": {
+                    "url": format!("https://github.com/letsencrypt/pebble/releases/download/v{VER}/pebble-linux-arm64.tar.gz"),
+                    "sha": "0e70f2537353f61cbf06aa54740bf7f7bb5f963ba00e909f23af5f85bc13fd1a",
+                }
             },
             "macos": {
-                "url": format!("https://github.com/letsencrypt/pebble/releases/download/v{VER}/pebble-darwin-arm64.tar.gz"),
-                "sha": "39e07d63dc776521f2ffe0584e5f4f081c984ac02742c882b430891d89f0c866",
+                "x86_64": {
+                    "url": format!("https://github.com/letsencrypt/pebble/releases/download/v{VER}/pebble-darwin-amd64.tar.gz"),
+                    "sha": "9b9625651f8ce47706235179503fec149f8f38bce2b2554efe8c0f2a021f877c",
+                },
+                "aarch64": {
+                    "url": format!("https://github.com/letsencrypt/pebble/releases/download/v{VER}/pebble-darwin-arm64.tar.gz"),
+                    "sha": "39e07d63dc776521f2ffe0584e5f4f081c984ac02742c882b430891d89f0c866",
+                }
             }
         },
         "pebble-challtestsrv": {
             "linux": {
-                "url": format!("https://github.com/letsencrypt/pebble/releases/download/v{VER}/pebble-challtestsrv-linux-amd64.tar.gz"),
-                "sha": "a817449d1f05ae58bcb7bf073b4cebe5d31512f859ba4b83951bd825d28d2114",
+                "x86_64": {
+                    "url": format!("https://github.com/letsencrypt/pebble/releases/download/v{VER}/pebble-challtestsrv-linux-amd64.tar.gz"),
+                    "sha": "a817449d1f05ae58bcb7bf073b4cebe5d31512f859ba4b83951bd825d28d2114",
+                },
+                "aarch64": {
+                    "url": format!("https://github.com/letsencrypt/pebble/releases/download/v{VER}/pebble-challtestsrv-linux-arm64.tar.gz"),
+                    "sha": "99a276aac8ceac121859b799708218e6dc57d7ca1dc1b8b5b586246b3c4160e6",
+                }
             },
             "macos": {
-                "url": format!("https://github.com/letsencrypt/pebble/releases/download/v{VER}/pebble-challtestsrv-darwin-arm64.tar.gz"),
-                "sha": "1bc5a6cfa062d9756e98d67825daf67f61dd655bcb6025efca2138fe836c9bbc",
+                "aarch64": {
+                    "url": format!("https://github.com/letsencrypt/pebble/releases/download/v{VER}/pebble-challtestsrv-darwin-amd64.tar.gz"),
+                    "sha": "3d1343b1bbe892145fd2da70be36e67b149e482fbff897e109b8053f4f790f40",
+                },
+                "aarch64": {
+                    "url": format!("https://github.com/letsencrypt/pebble/releases/download/v{VER}/pebble-challtestsrv-darwin-arm64.tar.gz"),
+                    "sha": "1bc5a6cfa062d9756e98d67825daf67f61dd655bcb6025efca2138fe836c9bbc",
+                }
             }
         }
     });
 
     let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
 
     let process = async |name: &str| -> Result<(), Error> {
         let path = path.join(name);
@@ -94,12 +119,14 @@ pub async fn download(path: &Path) -> Result<(), Error> {
             return Ok(());
         }
 
+        let url = &urls[name][os][arch];
+
         // Download the .tar.gz and check hash
-        let buf = download_url_async(urls[name][os]["url"].as_str().unwrap())
+        let buf = download_url_async(url["url"].as_str().unwrap())
             .await
             .context(format!("unable to download {name}"))?;
         let hash = Sha256::digest(&buf);
-        if hash[..] != hex::decode(urls[name][os]["sha"].as_str().unwrap()).unwrap()[..] {
+        if hash[..] != hex::decode(url["sha"].as_str().unwrap()).unwrap()[..] {
             return Err(anyhow!("{name} hash mismatch"));
         }
 
