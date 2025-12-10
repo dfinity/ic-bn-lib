@@ -1,6 +1,5 @@
 pub mod dir;
 pub mod file;
-pub mod issuer;
 pub mod storage;
 
 pub use dir::Provider as Dir;
@@ -12,7 +11,6 @@ use ic_bn_lib_common::{
     },
     types::tls::{CertKey, Pem},
 };
-pub use issuer::CertificatesImporter as Issuer;
 
 use std::sync::{Arc, Mutex};
 
