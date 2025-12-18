@@ -14,6 +14,7 @@ use bytes::Bytes;
 use candid::Principal;
 use derive_new::new;
 use fqdn::FQDN;
+use http::header::AUTHORIZATION;
 use ic_bn_lib_common::{
     traits::{custom_domains::ProvidesCustomDomains, http::Client},
     types::CustomDomain,
@@ -22,10 +23,18 @@ use reqwest::{Method, Request, Url};
 use serde::Deserialize;
 use tracing::{info, warn};
 
+use crate::http::client::basic_auth;
+
 /// Gets the body of the given URL
 async fn get_url_body(cli: &Arc<dyn Client>, url: &Url, timeout: Duration) -> Result<Bytes, Error> {
     let mut req = Request::new(Method::GET, url.clone());
     *req.timeout_mut() = Some(timeout);
+
+    // Add HTTP Basic auth header if the URL contains at least a username
+    if url.username() != "" {
+        let auth = basic_auth(url.username(), url.password());
+        req.headers_mut().insert(AUTHORIZATION, auth);
+    }
 
     let response = cli
         .execute(req)
@@ -122,11 +131,11 @@ impl ProvidesCustomDomains for GenericProviderTimestamped {
         let resp: TimestampedResponse = serde_json::from_slice(&body)
             .context("unable to parse response as TimestampedResponse")?;
 
-        // Swap the timestamps, get the old one
-        let ts = self.timestamp.swap(resp.timestamp, Ordering::SeqCst);
+        // Get the old timestamp
+        let old_timestamp = self.timestamp.load(Ordering::SeqCst);
 
         // Return the cached value if we have one & the timestamps are the same
-        if ts == resp.timestamp
+        if old_timestamp == resp.timestamp
             && let Some(v) = self.cache.load_full()
         {
             info!("{self:?}: timestamp unchanged ({} domains)", v.len());
@@ -152,6 +161,7 @@ impl ProvidesCustomDomains for GenericProviderTimestamped {
 
         // Store the new version in cache
         self.cache.store(Some(Arc::new(domains.clone())));
+        self.timestamp.store(resp.timestamp, Ordering::SeqCst);
 
         Ok(domains)
     }
@@ -245,6 +255,7 @@ impl ProvidesCustomDomains for GenericProviderDiff {
             .await
             .context("unable to get diff reponse")?;
 
+        // Apply the requested changes to the local snapshot
         let mut cache = self.cache.lock().unwrap();
 
         for (k, v) in resp.created {
@@ -271,6 +282,8 @@ mod test {
     use itertools::Itertools;
     use serde_json::json;
 
+    use crate::hval;
+
     use super::*;
 
     #[derive(Debug)]
@@ -278,7 +291,13 @@ mod test {
 
     #[async_trait]
     impl Client for MockClient {
-        async fn execute(&self, _: reqwest::Request) -> Result<reqwest::Response, reqwest::Error> {
+        async fn execute(&self, r: reqwest::Request) -> Result<reqwest::Response, reqwest::Error> {
+            // Check HTTP Basic Auth
+            assert_eq!(
+                r.headers().get(AUTHORIZATION),
+                Some(&hval!("Basic Zm9vOmJhcg=="))
+            );
+
             Ok(HttpResponse::new(
                 json!({"foo.bar": "aaaaa-aa", "bar.foo": "qoctq-giaaa-aaaaa-aaaea-cai"})
                     .to_string(),
@@ -585,7 +604,11 @@ mod test {
     #[tokio::test]
     async fn test_generic_provider() {
         let cli = Arc::new(MockClient);
-        let prov = GenericProvider::new(cli, "http://foo".try_into().unwrap(), Duration::ZERO);
+        let prov = GenericProvider::new(
+            cli,
+            "http://foo:bar@foo".try_into().unwrap(),
+            Duration::ZERO,
+        );
 
         let domains: Vec<CustomDomain> = prov
             .get_custom_domains()
