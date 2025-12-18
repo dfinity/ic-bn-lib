@@ -255,7 +255,7 @@ impl ProvidesCustomDomains for GenericProviderDiff {
             .await
             .context("unable to get diff reponse")?;
 
-        // Apply the request changes to the local snapshot
+        // Apply the requested changes to the local snapshot
         let mut cache = self.cache.lock().unwrap();
 
         for (k, v) in resp.created {
