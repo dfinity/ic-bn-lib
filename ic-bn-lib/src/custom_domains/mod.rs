@@ -27,13 +27,25 @@ use crate::http::client::basic_auth;
 
 /// Gets the body of the given URL
 async fn get_url_body(cli: &Arc<dyn Client>, url: &Url, timeout: Duration) -> Result<Bytes, Error> {
-    let mut req = Request::new(Method::GET, url.clone());
+    let mut url = url.clone();
+    let auth_header = if url.username() != "" {
+        let hdr = basic_auth(url.username(), url.password());
+
+        // Clear the user/pass from the URL
+        let _ = url.set_username("");
+        let _ = url.set_password(None);
+
+        Some(hdr)
+    } else {
+        None
+    };
+
+    let mut req = Request::new(Method::GET, url);
     *req.timeout_mut() = Some(timeout);
 
     // Add HTTP Basic auth header if the URL contains at least a username
-    if url.username() != "" {
-        let auth = basic_auth(url.username(), url.password());
-        req.headers_mut().insert(AUTHORIZATION, auth);
+    if let Some(v) = auth_header {
+        req.headers_mut().insert(AUTHORIZATION, v);
     }
 
     let response = cli
@@ -292,6 +304,8 @@ mod test {
     #[async_trait]
     impl Client for MockClient {
         async fn execute(&self, r: reqwest::Request) -> Result<reqwest::Response, reqwest::Error> {
+            assert_eq!(r.url().as_str(), "http://foo/beef");
+
             // Check HTTP Basic Auth
             assert_eq!(
                 r.headers().get(AUTHORIZATION),
@@ -606,7 +620,7 @@ mod test {
         let cli = Arc::new(MockClient);
         let prov = GenericProvider::new(
             cli,
-            "http://foo:bar@foo".try_into().unwrap(),
+            "http://foo:bar@foo/beef".try_into().unwrap(),
             Duration::ZERO,
         );
 
