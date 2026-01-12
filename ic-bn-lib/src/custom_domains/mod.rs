@@ -191,8 +191,43 @@ impl ProvidesCustomDomains for GenericProviderTimestamped {
 #[derive(Deserialize)]
 struct DiffResponse {
     timestamp: u64,
+    created: HashMap<String, Principal>,
+    deleted: Vec<String>,
+}
+
+struct DiffResponseParsed {
+    timestamp: u64,
     created: HashMap<FQDN, Principal>,
     deleted: Vec<FQDN>,
+}
+
+impl TryFrom<DiffResponse> for DiffResponseParsed {
+    type Error = Error;
+
+    fn try_from(v: DiffResponse) -> Result<Self, Self::Error> {
+        let mut created = HashMap::with_capacity(v.created.len());
+        let mut deleted = Vec::with_capacity(v.deleted.len());
+
+        for (domain, canister) in v.created {
+            let fqdn = FQDN::from_str(&domain)
+                .with_context(|| format!("unable to parse '{domain}' as FQDN"))?;
+
+            created.insert(fqdn, canister);
+        }
+
+        for domain in v.deleted {
+            let fqdn = FQDN::from_str(&domain)
+                .with_context(|| format!("unable to parse '{domain}' as FQDN"))?;
+
+            deleted.push(fqdn);
+        }
+
+        Ok(Self {
+            timestamp: v.timestamp,
+            created,
+            deleted,
+        })
+    }
 }
 
 #[derive(new)]
@@ -207,7 +242,7 @@ pub struct GenericProviderDiff {
 }
 
 impl GenericProviderDiff {
-    async fn get_response(&self, url: &Url) -> Result<DiffResponse, Error> {
+    async fn get_response(&self, url: &Url) -> Result<DiffResponseParsed, Error> {
         let body = get_url_body(&self.http_client, url, self.timeout)
             .await
             .context("unable to fetch custom domains JSON")?;
@@ -215,7 +250,7 @@ impl GenericProviderDiff {
         let resp: DiffResponse =
             serde_json::from_slice(&body).context("failed to parse JSON body")?;
 
-        Ok(resp)
+        resp.try_into().context("unable to parse DiffResponse")
     }
 
     /// Downloads the initial snapshot of data
@@ -363,7 +398,7 @@ mod test {
             if req.url().as_str().contains("subdomains") {
                 return Ok(HttpResponse::new(
                     if req.url().as_str() == "http://foo/subdomains1" {
-                        json!({"foo.bar": "aaaaa-aa", "bar.foo": "qoctq-giaaa-aaaaa-aaaea-cai"})
+                        json!({"2athis-domain-is-exactly-fifty-one-characters-l.com": "aaaaa-aa", "bar.foo": "qoctq-giaaa-aaaaa-aaaea-cai"})
                     } else if req.url().as_str() == "https://caffeine.ai/subdomains2" {
                         json!({"foo.barr": "aaaaa-aa", "bar.foos": "qoctq-giaaa-aaaaa-aaaea-cai"})
                     } else {
@@ -404,7 +439,7 @@ mod test {
                             "foo.bar3": "aaaaa-aa",
                             "foo.bar4": "qoctq-giaaa-aaaaa-aaaea-cai"
                         },
-                        "deleted": ["foo.bar1", "foo.bar0"],
+                        "deleted": ["2athis-domain-is-exactly-fifty-one-characters-l.com", "foo.bar0"],
                     })
                     .to_string(),
                 )
@@ -429,7 +464,7 @@ mod test {
                 json!({
                     "timestamp": 10,
                     "created": {
-                        "foo.bar1": "aaaaa-aa",
+                        "2athis-domain-is-exactly-fifty-one-characters-l.com": "aaaaa-aa",
                         "foo.bar2": "qoctq-giaaa-aaaaa-aaaea-cai"
                     },
                     "deleted": [],
@@ -458,13 +493,13 @@ mod test {
             domains,
             vec![
                 CustomDomain {
-                    name: fqdn!("foo.bar1"),
-                    canister_id: principal!("aaaaa-aa"),
+                    name: fqdn!("foo.bar2"),
+                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
                     timestamp: 0,
                 },
                 CustomDomain {
-                    name: fqdn!("foo.bar2"),
-                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
+                    name: fqdn!("2athis-domain-is-exactly-fifty-one-characters-l.com"),
+                    canister_id: principal!("aaaaa-aa"),
                     timestamp: 0,
                 },
             ]
@@ -543,7 +578,7 @@ mod test {
                     timestamp: 0,
                 },
                 CustomDomain {
-                    name: fqdn!("foo.bar"),
+                    name: fqdn!("2athis-domain-is-exactly-fifty-one-characters-l.com"),
                     canister_id: principal!("aaaaa-aa"),
                     timestamp: 0,
                 },
@@ -568,7 +603,7 @@ mod test {
                     timestamp: 0,
                 },
                 CustomDomain {
-                    name: fqdn!("foo.bar"),
+                    name: fqdn!("2athis-domain-is-exactly-fifty-one-characters-l.com"),
                     canister_id: principal!("aaaaa-aa"),
                     timestamp: 0,
                 },
