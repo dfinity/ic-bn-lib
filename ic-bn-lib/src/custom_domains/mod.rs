@@ -1,4 +1,5 @@
 use std::{
+    str::FromStr,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -6,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use ahash::HashMap;
+use ahash::{HashMap, HashMapExt};
 use anyhow::{Context as AnyhowContext, Error, anyhow};
 use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
@@ -73,10 +74,18 @@ async fn get_custom_domains_from_url(
         .await
         .context("unable to fetch custom domains list JSON")?;
 
-    let domains: HashMap<FQDN, Principal> =
+    let domains: HashMap<String, Principal> =
         serde_json::from_slice(&body).context("failed to parse JSON body")?;
 
-    Ok(domains
+    let mut domains_parsed = HashMap::with_capacity(domains.len());
+    for (domain, canister) in domains {
+        let fqdn = FQDN::from_str(&domain)
+            .with_context(|| format!("unable to parse '{domain}' as FQDN"))?;
+
+        domains_parsed.insert(fqdn, canister);
+    }
+
+    Ok(domains_parsed
         .into_iter()
         .map(|(k, v)| CustomDomain {
             name: k,
@@ -313,8 +322,10 @@ mod test {
             );
 
             Ok(HttpResponse::new(
-                json!({"foo.bar": "aaaaa-aa", "bar.foo": "qoctq-giaaa-aaaaa-aaaea-cai"})
-                    .to_string(),
+                json!({
+                    "foo.bar": "aaaaa-aa",
+                    "2athis-domain-is-exactly-fifty-one-characters-l.com": "qoctq-giaaa-aaaaa-aaaea-cai"
+                }).to_string(),
             )
             .into())
         }
@@ -636,13 +647,13 @@ mod test {
             domains,
             vec![
                 CustomDomain {
-                    name: fqdn!("bar.foo"),
-                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
+                    name: fqdn!("foo.bar"),
+                    canister_id: principal!("aaaaa-aa"),
                     timestamp: 0,
                 },
                 CustomDomain {
-                    name: fqdn!("foo.bar"),
-                    canister_id: principal!("aaaaa-aa"),
+                    name: fqdn!("2athis-domain-is-exactly-fifty-one-characters-l.com"),
+                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
                     timestamp: 0,
                 },
             ]
