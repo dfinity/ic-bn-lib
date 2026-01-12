@@ -23,7 +23,7 @@ cloudflare = { version = "0.14.0", default-features = false, features = [
     "rustls-tls",
 ] }
 derive-new = "0.7.0"
-fqdn = { version = "0.4.1", features = ["serde"] }
+fqdn = { version = "0.4" }
 hickory-proto = "0.25.1"
 hickory-resolver = { version = "0.25.1", features = [
     "tls-ring",
