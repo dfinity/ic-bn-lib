@@ -37,7 +37,7 @@ http-body-util = "0.1.2"
 humantime = "2.2.0"
 hyper = "1.7.0"
 hyper-util = { version = "0.1.10", features = ["full"] }
-ic-agent = { version = "0.44", features = [
+ic-agent = { version = "0.45", features = [
     "ring",
     "_internal_dynamic-routing",
 ] }
