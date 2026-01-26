@@ -279,6 +279,19 @@ mod test {
             }
             let result = send_request(&mut app).await.unwrap();
             assert_eq!(result.status(), expected_status, "test {idx} failed");
+            
+            // Verify Retry-After header is present on rate-limited responses
+            if expected_status == StatusCode::TOO_MANY_REQUESTS {
+                let retry_after = result.headers().get(http::header::RETRY_AFTER);
+                assert!(retry_after.is_some(), "test {idx}: Retry-After header missing on 429 response");
+                
+                // Verify the header value is a valid number and reasonable (between 1 and 10 seconds)
+                if let Some(header_value) = retry_after {
+                    let retry_secs: u32 = header_value.to_str().unwrap().parse().unwrap();
+                    assert!(retry_secs >= 1 && retry_secs <= 10, 
+                        "test {idx}: Retry-After value {retry_secs} is outside expected range [1, 10]");
+                }
+            }
         }
     }
 
