@@ -88,6 +88,7 @@ pub struct Options {
     pub cache_size: usize,
     pub timeout: Duration,
     pub tls_name: String,
+    pub dnssec_disabled: bool,
 }
 
 impl Default for Options {
@@ -99,6 +100,7 @@ impl Default for Options {
             cache_size: 1024,
             timeout: Duration::from_secs(3),
             tls_name: "cloudflare-dns.com".into(),
+            dnssec_disabled: false,
         }
     }
 }
@@ -144,6 +146,10 @@ pub struct DnsCli {
     /// Default is to look up IPv4 and IPv6 in parallel.
     #[clap(env, long, default_value = "ipv4_and_ipv6")]
     pub dns_lookup_strategy: LookupStrategy,
+
+    /// Disable DNSSEC validation for DNS queries (DNSSEC is enabled by default)
+    #[clap(env, long, default_value = "false")]
+    pub dns_dnssec_disabled: bool,
 }
 
 impl From<&DnsCli> for Options {
@@ -155,6 +161,7 @@ impl From<&DnsCli> for Options {
             cache_size: c.dns_cache_size,
             timeout: c.dns_timeout,
             tls_name: c.dns_tls_name.clone(),
+            dnssec_disabled: c.dns_dnssec_disabled,
         }
     }
 }
