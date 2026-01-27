@@ -148,7 +148,7 @@ pub struct DnsCli {
     pub dns_lookup_strategy: LookupStrategy,
 
     /// Disable DNSSEC validation for DNS queries (DNSSEC is enabled by default)
-    #[clap(env, long, default_value = "false")]
+    #[clap(env, long)]
     pub dns_dnssec_disabled: bool,
 }
 
