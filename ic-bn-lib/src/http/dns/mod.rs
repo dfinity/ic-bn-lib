@@ -59,6 +59,7 @@ impl Resolver {
         opts.ip_strategy = o.lookup_ip_strategy;
         opts.use_hosts_file = ResolveHosts::Never;
         opts.preserve_intermediates = false;
+        opts.validate = !o.dnssec_disabled;
         opts.try_tcp_on_error = true;
 
         let builder = TokioResolver::builder_with_config(cfg, TokioConnectionProvider::default())
