@@ -8,8 +8,9 @@ use std::{
 use ::governor::{clock::QuantaInstant, middleware::NoOpMiddleware};
 use anyhow::{Error, anyhow};
 use axum::{body::Body, extract::Request, response::IntoResponse, response::Response};
+use bytes::Bytes;
 use futures::future::BoxFuture;
-use http::{HeaderName, StatusCode};
+use http::{HeaderName, HeaderValue, StatusCode};
 use tower::{Layer, Service};
 use tower_governor::{
     GovernorError, GovernorLayer,
@@ -100,7 +101,15 @@ where
 
         let governor = Governor::new(inner.clone(), &self.config).error_handler(move |err| {
             match err {
-                GovernorError::TooManyRequests { .. } => rate_limited_response.clone().into_response(),
+                GovernorError::TooManyRequests { wait_time, headers: _ } => {
+                    let mut response = rate_limited_response.clone().into_response();
+                    // Add Retry-After header using timing from governor
+                    // wait_time is in milliseconds, convert to seconds (minimum 1 second)
+                    let retry_secs = ((wait_time / 1000).max(1)) as u32;
+                    let header_value = HeaderValue::from_maybe_shared(Bytes::from(retry_secs.to_string())).unwrap();
+                    response.headers_mut().insert(http::header::RETRY_AFTER, header_value);
+                    response
+                },
                 GovernorError::UnableToExtractKey => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Unable to extract rate limiting key",
@@ -268,6 +277,24 @@ mod test {
             }
             let result = send_request(&mut app).await.unwrap();
             assert_eq!(result.status(), expected_status, "test {idx} failed");
+
+            // Verify Retry-After header is present on rate-limited responses
+            if expected_status == StatusCode::TOO_MANY_REQUESTS {
+                let retry_after = result.headers().get(http::header::RETRY_AFTER);
+                assert!(
+                    retry_after.is_some(),
+                    "test {idx}: Retry-After header missing on 429 response"
+                );
+
+                // Verify the header value is a valid number and reasonable (between 1 and 10 seconds)
+                if let Some(header_value) = retry_after {
+                    let retry_secs: u32 = header_value.to_str().unwrap().parse().unwrap();
+                    assert!(
+                        retry_secs >= 1 && retry_secs <= 10,
+                        "test {idx}: Retry-After value {retry_secs} is outside expected range [1, 10]"
+                    );
+                }
+            }
         }
     }
 
