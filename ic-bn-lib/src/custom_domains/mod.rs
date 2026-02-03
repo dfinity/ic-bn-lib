@@ -329,6 +329,72 @@ impl ProvidesCustomDomains for GenericProviderDiff {
     }
 }
 
+/// Local file-based custom domain provider.
+///
+/// Reads domain-to-canister mappings from a file with one mapping per line in the format `domain:principal`.
+/// Empty lines are ignored, and whitespace is trimmed.
+///
+/// # Example File Format
+///
+/// ```text
+/// example.com:aaaaa-aa
+/// test.org:qoctq-giaaa-aaaaa-aaaea-cai
+/// my-domain.net:ryjl3-tyaaa-aaaaa-aaaba-cai
+///
+/// another-domain.com:2vxsx-fae
+/// ```
+#[derive(new)]
+pub struct LocalFileProvider {
+    file_path: String,
+}
+
+impl std::fmt::Debug for LocalFileProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "LocalFileProvider({})", self.file_path)
+    }
+}
+
+
+#[async_trait]
+impl ProvidesCustomDomains for LocalFileProvider {
+    async fn get_custom_domains(&self) -> Result<Vec<CustomDomain>, Error> {
+        let body = std::fs::read_to_string(&self.file_path).context("unable to read file")?;
+        
+        let mut domains = Vec::new();
+        for line in body.lines() {
+            // Skip empty lines
+            if line.trim().is_empty() {
+                continue;
+            }
+            
+            // Split by colon
+            let parts: Vec<&str> = line.split(':').collect();
+            if parts.len() != 2 {
+                return Err(anyhow!("invalid line format '{}', expected 'domain:principal'", line));
+            }
+            
+            let domain_str = parts[0].trim();
+            let principal_str = parts[1].trim();
+            
+            // Parse domain as FQDN
+            let name = FQDN::from_str(domain_str)
+                .with_context(|| format!("unable to parse '{}' as FQDN", domain_str))?;
+            
+            // Parse principal
+            let canister_id = Principal::from_text(principal_str)
+                .with_context(|| format!("unable to parse '{}' as principal", principal_str))?;
+            
+            domains.push(CustomDomain {
+                name,
+                canister_id,
+                timestamp: 0,
+            });
+        }
+        
+        Ok(domains)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use ::http::Response as HttpResponse;
@@ -701,5 +767,75 @@ mod test {
         let cli = Arc::new(MockClientBadCanister);
         let prov = GenericProvider::new(cli, "http://foo".try_into().unwrap(), Duration::ZERO);
         assert!(prov.get_custom_domains().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_local_file_provider_valid() {
+        use std::io::Write;
+        let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+        
+        // Write valid domain:principal pairs
+        writeln!(temp_file, "foo.bar:aaaaa-aa").unwrap();
+        writeln!(temp_file, "test.example.com:qoctq-giaaa-aaaaa-aaaea-cai").unwrap();
+        writeln!(temp_file, "2athis-domain-is-exactly-fifty-one-characters-l.com:ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap();
+        temp_file.flush().unwrap();
+
+        let prov = LocalFileProvider::new(temp_file.path().to_str().unwrap().to_string());
+        let domains: Vec<CustomDomain> = prov
+            .get_custom_domains()
+            .await
+            .unwrap()
+            .into_iter()
+            .sorted_by_key(|x| x.name.clone())
+            .collect();
+
+        assert_eq!(domains.len(), 3);
+        assert_eq!(
+            domains,
+            vec![
+                CustomDomain {
+                    name: fqdn!("foo.bar"),
+                    canister_id: principal!("aaaaa-aa"),
+                    timestamp: 0,
+                },
+                CustomDomain {
+                    name: fqdn!("test.example.com"),
+                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
+                    timestamp: 0,
+                },
+                CustomDomain {
+                    name: fqdn!("2athis-domain-is-exactly-fifty-one-characters-l.com"),
+                    canister_id: principal!("ryjl3-tyaaa-aaaaa-aaaba-cai"),
+                    timestamp: 0,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_local_file_provider_missing_colon() {
+        use std::io::Write;
+        let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+        
+        // Write invalid format (no colon)
+        writeln!(temp_file, "foo.bar aaaaa-aa").unwrap();
+        temp_file.flush().unwrap();
+
+        let prov = LocalFileProvider::new(temp_file.path().to_str().unwrap().to_string());
+        let result = prov.get_custom_domains().await;
+        
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("invalid line format"));
+    }
+
+    #[tokio::test]
+    async fn test_local_file_provider_file_not_found() {
+        let prov = LocalFileProvider::new("/nonexistent/path/to/file.txt".to_string());
+        let result = prov.get_custom_domains().await;
+        
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("unable to read file"));
     }
 }
