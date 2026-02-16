@@ -290,7 +290,7 @@ mod test {
                 if let Some(header_value) = retry_after {
                     let retry_secs: u32 = header_value.to_str().unwrap().parse().unwrap();
                     assert!(
-                        retry_secs >= 1 && retry_secs <= 10,
+                        (1..=10).contains(&retry_secs),
                         "test {idx}: Retry-After value {retry_secs} is outside expected range [1, 10]"
                     );
                 }
