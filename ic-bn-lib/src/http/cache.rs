@@ -51,8 +51,8 @@ pub enum CacheStatus<R: CustomBypassReason = CustomBypassReasonDummy> {
     #[default]
     Disabled,
     Bypass(CacheBypassReason<R>),
-    Hit,
-    Miss,
+    Hit(i64),
+    Miss(i64),
 }
 
 impl<B: CustomBypassReason> CacheStatus<B> {
@@ -415,7 +415,7 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
     }
 
     /// Looks up the given entry
-    pub fn get(&self, key: &K::Key, now: Instant, beta: f64) -> Option<Response> {
+    pub fn get(&self, key: &K::Key, now: Instant, beta: f64) -> Option<(Response, i64)> {
         let val = self.store.get(key)?;
 
         // Run x-fetch if configured and simulate the cache miss if we need to refresh the entry
@@ -424,8 +424,18 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
             return None;
         }
 
-        let (parts, body) = val.response.clone().into_parts();
-        Some(Response::from_parts(parts, Body::from(body)))
+        let (mut parts, body) = val.response.clone().into_parts();
+        let ttl_left = if now < val.expires {
+            (val.expires - now).as_secs() as i64
+        } else {
+            -((now - val.expires).as_secs() as i64)
+        };
+
+        if ttl_left >= 0 {
+            parts.headers.insert(X_CACHE_TTL, ttl_left.into());
+        }
+
+        Some((Response::from_parts(parts, Body::from(body)), ttl_left))
     }
 
     /// Insert a new entry into the cache
@@ -517,11 +527,11 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
             ));
         };
 
-        if let Some(v) = self.get(&key, now, self.opts.xfetch_beta) {
-            return Ok((CacheStatus::Hit, v));
+        if let Some((v, ttl_left)) = self.get(&key, now, self.opts.xfetch_beta) {
+            return Ok((CacheStatus::Hit(ttl_left), v));
         }
 
-        // Get synchronization lock to handle parallel requests.
+        // Get synchronization lock to handle parallel requests
         let lock = self
             .locks
             .get_with_by_ref(&key, || Arc::new(Mutex::new(())));
@@ -538,7 +548,7 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
             _ = sleep(self.opts.lock_timeout) => {}
         }
 
-        // Record prometheus metrics for the time spent waiting for the lock.
+        // Record prometheus metrics for the time spent waiting for the lock
         self.metrics
             .lock_await
             .with_label_values(&[if lock_obtained { "yes" } else { "no" }])
@@ -546,8 +556,8 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
 
         // Check again the cache in case some other request filled it
         // while we were waiting for the lock
-        if let Some(v) = self.get(&key, now, 0.0) {
-            return Ok((CacheStatus::Hit, v));
+        if let Some((v, ttl_left)) = self.get(&key, now, 0.0) {
+            return Ok((CacheStatus::Hit(ttl_left), v));
         }
 
         // Otherwise pass the request forward
@@ -558,10 +568,11 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
                 let delta = now.elapsed();
                 self.insert(key, now + delta, ttl, delta, v.clone());
 
+                let ttl = ttl.as_secs();
                 let (mut parts, body) = v.into_parts();
-                parts.headers.insert(X_CACHE_TTL, ttl.as_secs().into());
+                parts.headers.insert(X_CACHE_TTL, ttl.into());
                 let response = Response::from_parts(parts, Body::from(body));
-                (CacheStatus::Miss, response)
+                (CacheStatus::Miss(ttl as i64), response)
             }
 
             // Otherwise just pass it up
@@ -618,7 +629,7 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
                     ));
                 }
 
-                // Use TTL from max-age capping it to max_ttl
+                // Use TTL from max-age while capping it to max_ttl
                 Some(CacheControl::MaxAge(v)) => v.min(self.opts.max_ttl),
 
                 // Otherwise use default
@@ -1002,7 +1013,7 @@ mod tests {
         let result = app.call(req).await.unwrap();
         let cache_status = result.extensions().get::<CacheStatus>().cloned().unwrap();
         assert_eq!(result.status(), StatusCode::OK);
-        assert_eq!(cache_status, CacheStatus::Miss);
+        assert!(matches!(cache_status, CacheStatus::Miss(_)));
         cache.housekeep();
         assert_eq!(cache.len(), 1);
 
@@ -1011,7 +1022,7 @@ mod tests {
         let result = app.call(req).await.unwrap();
         let cache_status = result.extensions().get::<CacheStatus>().cloned().unwrap();
         assert_eq!(result.status(), StatusCode::OK);
-        assert_eq!(cache_status, CacheStatus::Miss);
+        assert!(matches!(cache_status, CacheStatus::Miss(_)));
         cache.housekeep();
         assert_eq!(cache.len(), 2);
 
@@ -1020,7 +1031,7 @@ mod tests {
         let result = app.call(req).await.unwrap();
         let cache_status = result.extensions().get::<CacheStatus>().cloned().unwrap();
         assert_eq!(result.status(), StatusCode::OK);
-        assert_eq!(cache_status, CacheStatus::Hit);
+        assert!(matches!(cache_status, CacheStatus::Hit(_)));
         let (_, body) = result.into_parts();
         let body = to_bytes(body, usize::MAX).await.unwrap().to_vec();
         let body = String::from_utf8_lossy(&body);
@@ -1033,7 +1044,7 @@ mod tests {
         let result = app.call(req).await.unwrap();
         let cache_status = result.extensions().get::<CacheStatus>().cloned().unwrap();
         assert_eq!(result.status(), StatusCode::OK);
-        assert_eq!(cache_status, CacheStatus::Hit);
+        assert!(matches!(cache_status, CacheStatus::Hit(_)));
         let (_, body) = result.into_parts();
         let body = to_bytes(body, usize::MAX).await.unwrap().to_vec();
         let body = String::from_utf8_lossy(&body);
@@ -1048,7 +1059,7 @@ mod tests {
         let result = app.call(req).await.unwrap();
         let cache_status = result.extensions().get::<CacheStatus>().cloned().unwrap();
         assert_eq!(result.status(), StatusCode::OK);
-        assert_eq!(cache_status, CacheStatus::Miss);
+        assert!(matches!(cache_status, CacheStatus::Miss(_)));
 
         // Before cache_size limit is reached all requests should be stored in cache.
         cache.clear();
@@ -1056,12 +1067,12 @@ mod tests {
         // First dispatch round, all requests miss cache.
         for idx in 0..req_count {
             let status = dispatch_get_request(&mut app, format!("/{idx}")).await;
-            assert_eq!(status.unwrap(), CacheStatus::Miss);
+            assert!(matches!(status, Some(CacheStatus::Miss(_))));
         }
         // Second dispatch round, all requests hit the cache.
         for idx in 0..req_count {
             let status = dispatch_get_request(&mut app, format!("/{idx}")).await;
-            assert_eq!(status.unwrap(), CacheStatus::Hit);
+            assert!(matches!(status, Some(CacheStatus::Hit(_))));
         }
 
         // Once cache_size limit is reached some requests should be evicted.
@@ -1070,7 +1081,7 @@ mod tests {
         // First dispatch round, all cache misses.
         for idx in 0..req_count {
             let status = dispatch_get_request(&mut app, format!("/{idx}")).await;
-            assert_eq!(status.unwrap(), CacheStatus::Miss);
+            assert!(matches!(status, Some(CacheStatus::Miss(_))));
         }
 
         // Second dispatch round, some requests hit the cache, some don't
@@ -1078,9 +1089,9 @@ mod tests {
         let mut count_hits = 0;
         for idx in 0..req_count {
             let status = dispatch_get_request(&mut app, format!("/{idx}")).await;
-            if status == Some(CacheStatus::Miss) {
+            if matches!(status, Some(CacheStatus::Miss(_))) {
                 count_misses += 1;
-            } else if status == Some(CacheStatus::Hit) {
+            } else if matches!(status, Some(CacheStatus::Hit(_))) {
                 count_hits += 1;
             }
         }
@@ -1166,7 +1177,7 @@ mod tests {
             .unwrap()
             .parse::<u64>()
             .unwrap();
-        assert_eq!(cache_status, CacheStatus::Miss);
+        assert!(matches!(cache_status, CacheStatus::Miss(_)));
         assert_eq!(ttl, 86400);
         assert_eq!(result.status(), StatusCode::OK);
         cache.housekeep();
@@ -1186,7 +1197,7 @@ mod tests {
             .unwrap()
             .parse::<u64>()
             .unwrap();
-        assert_eq!(cache_status, CacheStatus::Miss);
+        assert!(matches!(cache_status, CacheStatus::Miss(_)));
         assert_eq!(ttl, 86400);
         assert_eq!(result.status(), StatusCode::OK);
         cache.housekeep();
@@ -1204,7 +1215,7 @@ mod tests {
             .unwrap()
             .parse::<u64>()
             .unwrap();
-        assert_eq!(cache_status, CacheStatus::Miss);
+        assert!(matches!(cache_status, CacheStatus::Miss(_)));
         assert_eq!(ttl, 10);
         assert_eq!(result.status(), StatusCode::OK);
         cache.housekeep();
@@ -1244,7 +1255,7 @@ mod tests {
             .unwrap();
         let result = app.call(req).await.unwrap();
         let cache_status = result.extensions().get::<CacheStatus>().cloned().unwrap();
-        assert_eq!(cache_status, CacheStatus::Miss);
+        assert!(matches!(cache_status, CacheStatus::Miss(_)));
         assert_eq!(result.status(), StatusCode::OK);
         cache.housekeep();
         assert_eq!(cache.len(), 1);
@@ -1255,7 +1266,7 @@ mod tests {
             .unwrap();
         let result = app.call(req).await.unwrap();
         let cache_status = result.extensions().get::<CacheStatus>().cloned().unwrap();
-        assert_eq!(cache_status, CacheStatus::Miss,);
+        assert!(matches!(cache_status, CacheStatus::Miss(_)));
         assert_eq!(result.status(), StatusCode::OK);
         cache.housekeep();
         assert_eq!(cache.len(), 2);
@@ -1274,7 +1285,7 @@ mod tests {
             .unwrap()
             .parse::<u64>()
             .unwrap();
-        assert_eq!(cache_status, CacheStatus::Miss);
+        assert!(matches!(cache_status, CacheStatus::Miss(_)));
         assert_eq!(ttl, 10);
         assert_eq!(result.status(), StatusCode::OK);
         cache.housekeep();
@@ -1292,7 +1303,7 @@ mod tests {
             .unwrap()
             .parse::<u64>()
             .unwrap();
-        assert_eq!(cache_status, CacheStatus::Miss);
+        assert!(matches!(cache_status, CacheStatus::Miss(_)));
         assert_eq!(ttl, 10);
         assert_eq!(result.status(), StatusCode::OK);
         cache.housekeep();
@@ -1333,8 +1344,8 @@ mod tests {
             for task in tasks {
                 task.await
                     .map(|res| match res {
-                        Some(CacheStatus::Hit) => count_hits += 1,
-                        Some(CacheStatus::Miss) => count_misses += 1,
+                        Some(CacheStatus::Hit(_)) => count_hits += 1,
+                        Some(CacheStatus::Miss(_)) => count_misses += 1,
                         _ => panic!("Unexpected cache status"),
                     })
                     .expect("failed to complete task");
