@@ -74,7 +74,7 @@ ic-bn-lib-common = "0.1"
 indoc = "2.0.6"
 instant-acme = { workspace = true, optional = true }
 itertools = "0.14.0"
-moka = { version = "0.12.8", features = ["sync", "future"] }
+moka = { version = "=0.12.12", features = ["sync", "future"] }
 nix = { version = "0.30.0", features = ["signal"] }
 ppp = "2.3.0"
 prometheus = { workspace = true }
