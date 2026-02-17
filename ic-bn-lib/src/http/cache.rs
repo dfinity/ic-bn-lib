@@ -538,7 +538,7 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
 
         let mut lock_obtained = false;
         select! {
-            // Only one parallel request should execute the response and populate the cache.
+            // Only one parallel request should execute and populate the cache.
             // Other requests will wait for the lock to be released and get results from the cache.
             _ = lock.lock() => {
                 lock_obtained = true;
