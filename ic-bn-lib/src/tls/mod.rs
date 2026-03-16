@@ -293,6 +293,8 @@ mod test {
 
     #[test]
     fn test_prepare_client_config() {
+        // rustls 0.23+ requires a process-level CryptoProvider to be installed
+        let _ = rustls::crypto::ring::default_provider().install_default();
         prepare_client_config(&[&rustls::version::TLS13, &rustls::version::TLS12]);
     }
 
