@@ -345,6 +345,8 @@ mod test {
     #[ignore]
     #[tokio::test]
     async fn test_acme_dns() {
+        // rustls 0.23+ requires a process-level CryptoProvider to be installed
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let pebble_env = Env::new().await;
         let dir = tempdir().unwrap();
 
