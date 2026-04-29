@@ -45,9 +45,11 @@ pub enum RequestType {
     Status,
     QueryV2,
     QueryV3,
+    QuerySubnetV3,
     CallV2,
     CallV3,
     CallV4,
+    CallSubnetV4,
     ReadStateV2,
     ReadStateV3,
     ReadStateSubnetV2,
@@ -56,10 +58,23 @@ pub enum RequestType {
 
 impl RequestType {
     pub const fn is_query(&self) -> bool {
-        matches!(self, Self::QueryV2 | Self::QueryV3)
+        matches!(self, Self::QueryV2 | Self::QueryV3 | Self::QuerySubnetV3)
     }
 
     pub const fn is_call(&self) -> bool {
-        matches!(self, Self::CallV2 | Self::CallV3 | Self::CallV4)
+        matches!(
+            self,
+            Self::CallV2 | Self::CallV3 | Self::CallV4 | Self::CallSubnetV4
+        )
+    }
+
+    pub const fn is_read_state(&self) -> bool {
+        matches!(
+            self,
+            Self::ReadStateV2
+                | Self::ReadStateV3
+                | Self::ReadStateSubnetV2
+                | Self::ReadStateSubnetV3
+        )
     }
 }
