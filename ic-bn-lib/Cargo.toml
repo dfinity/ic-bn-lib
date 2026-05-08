@@ -38,7 +38,7 @@ arc-swap = "1.7.1"
 async-channel = "2.3.1"
 async-trait = { workspace = true }
 axum = { workspace = true }
-axum-extra = "0.10.0"
+axum-extra = "0.12.6"
 base64 = "0.22.1"
 bytes = "1.10.0"
 candid = { workspace = true }
@@ -74,13 +74,13 @@ ic-bn-lib-common = "0.1"
 indoc = "2.0.6"
 instant-acme = { workspace = true, optional = true }
 itertools = "0.14.0"
-moka = { version = "=0.12.12", features = ["sync", "future"] }
+moka = { version = "0.12.15", features = ["sync", "future"] }
 nix = { version = "0.30.0", features = ["signal"] }
 ppp = "2.3.0"
 prometheus = { workspace = true }
 prost = { version = "0.14.1", optional = true }
 prost-types = { version = "0.14.1", optional = true }
-rand = { version = "=0.8.5", features = ["small_rng"] }
+rand = { version = "0.8.5", features = ["small_rng"] }
 rcgen = { workspace = true, optional = true }
 regex = "1.11.2"
 reqwest = { workspace = true }
@@ -89,21 +89,24 @@ rustls = { version = "0.23.18", default-features = false, features = [
     "std",
     "brotli",
 ] }
-rustls-acme = { version = "0.14.0", default-features = false, features = [
+rustls-acme = { version = "0.15.1", default-features = false, features = [
     "webpki-roots",
     "tls12",
     "ring",
 ], optional = true }
 rustls-pemfile = "2.2.0"
-rustls-platform-verifier = "0.6.0"
+rustls-platform-verifier = "0.7.0"
 scopeguard = "1.2.0"
 serde = { workspace = true }
 serde_json = "1.0.132"
 serde_with = "3.14.0"
 serde_yaml_ng = "0.10"
-sev = { version = "6.1.0", optional = true }
-sha1 = "0.10.6"
-sha2 = { version = "0.10.9", optional = true }
+sev = { version = "7.1.0", optional = true, default-features = false, features = [
+    "snp",
+    "crypto_nossl",
+] }
+sha1 = "0.11.0"
+sha2 = { version = "0.11.0", optional = true }
 socket2 = "0.6.0"
 strum = { workspace = true }
 strum_macros = { workspace = true }
@@ -127,11 +130,11 @@ url = { workspace = true }
 # DO NOT upgrade, this breaks monorepo compatibility
 # Read https://github.com/uuid-rs/uuid/releases/tag/1.13.0
 uuid = { version = "=1.12.1", features = ["v7"] }
-vrl = { version = "0.26.0", default-features = false, features = [
+vrl = { version = "0.32.0", default-features = false, features = [
     "value",
 ], optional = true }
 webpki-root-certs = "1.0.1"
-x509-parser = "0.17.0"
+x509-parser = "0.18.1"
 zeroize = { version = "1.8.1", features = ["derive"] }
 zstd = "0.13.2"
 

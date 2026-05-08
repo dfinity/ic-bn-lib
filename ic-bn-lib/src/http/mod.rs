@@ -15,11 +15,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use axum::{
-    extract::OriginalUri,
-    response::{IntoResponse, Redirect},
-};
-use axum_extra::extract::Host;
+use axum::response::{IntoResponse, Redirect};
 use http::{HeaderMap, Method, Request, StatusCode, Uri, Version, header::HOST, uri::PathAndQuery};
 use ic_bn_lib_common::types::http::Stats;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -206,9 +202,12 @@ pub fn url_to_uri(url: &Url) -> Result<Uri, UrlToUriError> {
 
 /// Redirects any request to an HTTPS scheme
 pub async fn redirect_to_https(
-    Host(host): Host,
-    OriginalUri(uri): OriginalUri,
+    request: axum::extract::Request,
 ) -> Result<impl IntoResponse, impl IntoResponse> {
+    let host = extract_authority(&request)
+        .ok_or((StatusCode::BAD_REQUEST, "Unable to extract authority"))?;
+    let uri = request.uri().clone();
+
     let fallback_path = PathAndQuery::from_static("/");
     let pq = uri.path_and_query().unwrap_or(&fallback_path).as_str();
 
@@ -225,7 +224,12 @@ pub async fn redirect_to_https(
 
 #[cfg(test)]
 mod test {
-    use http::{Uri, header::HOST};
+    use axum::{Router, body::Body};
+    use http::{
+        Uri,
+        header::{HOST, LOCATION},
+    };
+    use tower::ServiceExt;
 
     use crate::hval;
 
@@ -339,5 +343,17 @@ mod test {
 
         let url = "unix:/foo/bar".parse().unwrap();
         assert!(url_to_uri(&url).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_redirect_to_https() {
+        let mut request = axum::extract::Request::new(Body::empty());
+        *request.uri_mut() = Uri::from_static("http://foo/bar/baz.bin?a=b");
+
+        let router = Router::new().fallback(redirect_to_https);
+
+        let response = router.oneshot(request).await.unwrap();
+        let location = response.headers().get(LOCATION).unwrap().to_str().unwrap();
+        assert_eq!(location, "https://foo/bar/baz.bin?a=b");
     }
 }
