@@ -7,9 +7,7 @@ use ahash::RandomState;
 use anyhow::Error;
 use axum::{extract::State, response::IntoResponse};
 use bytes::Bytes;
-use clap::Args;
 use http::StatusCode;
-use humantime::parse_duration;
 use moka::sync::{Cache, CacheBuilder};
 use sev::firmware::guest::Firmware;
 

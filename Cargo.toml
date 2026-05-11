@@ -65,8 +65,8 @@ rustls = { version = "0.23.18", default-features = false, features = [
 ] }
 serde = { version = "1.0.214", features = ["derive"] }
 socket2 = "0.6.0"
-strum = { version = "0.27.1", features = ["derive"] }
-strum_macros = "0.27.1"
+strum = { version = "0.28", features = ["derive"] }
+strum_macros = "0.28"
 thiserror = "2.0.3"
 tokio-util = { version = "0.7.12", features = ["full"] }
 tower-service = "0.3.3"
