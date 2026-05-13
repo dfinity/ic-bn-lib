@@ -4,6 +4,7 @@
 #![warn(tail_expr_drop_order)]
 #![allow(clippy::cognitive_complexity)]
 #![allow(clippy::field_reassign_with_default)]
+#![allow(clippy::collapsible_if)]
 
 #[cfg(feature = "custom-domains")]
 pub mod custom_domains;
