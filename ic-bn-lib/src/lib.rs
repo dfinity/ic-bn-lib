@@ -8,7 +8,9 @@
 #[cfg(feature = "custom-domains")]
 pub mod custom_domains;
 pub mod http;
+pub mod network;
 pub mod pubsub;
+pub mod smtp;
 pub mod tasks;
 pub mod tests;
 pub mod tls;

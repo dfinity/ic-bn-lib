@@ -2,9 +2,7 @@ pub mod proxy_protocol;
 
 use std::{
     fmt::Display,
-    io,
     net::SocketAddr,
-    os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::{
         Arc,
@@ -39,10 +37,8 @@ use prometheus::{
 use proxy_protocol::{ProxyHeader, ProxyProtocolStream};
 use rustls::sign::SingleCertAndKey;
 use scopeguard::defer;
-use socket2::{Domain, Socket, Type};
 use tokio::{
     io::AsyncWriteExt,
-    net::{TcpListener, UnixListener, UnixSocket},
     pin, select,
     sync::mpsc::channel,
     time::{sleep, timeout},
@@ -54,90 +50,18 @@ use tower_service::Service;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use super::{AsyncCounter, AsyncReadWrite, body::NotifyingBody};
-use crate::tls::{pem_convert_to_rustls, prepare_server_config};
+use super::body::NotifyingBody;
+use crate::{
+    network::{AsyncCounter, AsyncReadWrite, listener::Listener, tls_handshake},
+    tls::{pem_convert_to_rustls, prepare_server_config},
+};
 
 const YEAR: Duration = Duration::from_secs(86400 * 365);
-
-/// Connection listener
-pub enum Listener {
-    Tcp(TcpListener),
-    Unix(UnixListener),
-}
-
-impl Listener {
-    /// Create a new Listener
-    pub fn new(addr: Addr, opts: ListenerOpts) -> Result<Self, Error> {
-        Ok(match addr {
-            Addr::Tcp(v) => Self::Tcp(listen_tcp(v, opts)?),
-            Addr::Unix(v) => Self::Unix(listen_unix(v, opts)?),
-        })
-    }
-
-    /// Accept the connection
-    async fn accept(&self) -> Result<(Box<dyn AsyncReadWrite>, Addr), io::Error> {
-        Ok(match self {
-            Self::Tcp(v) => {
-                let x = v.accept().await?;
-                (Box::new(x.0), Addr::Tcp(x.1))
-            }
-            Self::Unix(v) => {
-                let x = v.accept().await?;
-                (
-                    Box::new(x.0),
-                    Addr::Unix(x.1.as_pathname().map(|x| x.into()).unwrap_or_default()),
-                )
-            }
-        })
-    }
-
-    pub fn local_addr(&self) -> Option<SocketAddr> {
-        match &self {
-            Self::Tcp(v) => v.local_addr().ok(),
-            Self::Unix(_) => None,
-        }
-    }
-}
-
-impl From<TcpListener> for Listener {
-    /// Creates a Listener from TcpListener
-    fn from(v: TcpListener) -> Self {
-        Self::Tcp(v)
-    }
-}
-
-impl From<UnixListener> for Listener {
-    /// Creates a Listener from UnixListener
-    fn from(v: UnixListener) -> Self {
-        Self::Unix(v)
-    }
-}
 
 #[derive(Clone)]
 enum RequestState {
     Start,
     End,
-}
-
-async fn tls_handshake(
-    rustls_cfg: Arc<rustls::ServerConfig>,
-    stream: impl AsyncReadWrite,
-) -> Result<(impl AsyncReadWrite, TlsInfo), Error> {
-    let tls_acceptor = TlsAcceptor::from(rustls_cfg);
-
-    // Perform the TLS handshake
-    let start = Instant::now();
-    let stream = tls_acceptor
-        .accept(stream)
-        .await
-        .context("TLS accept failed")?;
-    let duration = start.elapsed();
-
-    let conn = stream.get_ref().1;
-    let mut tls_info = TlsInfo::try_from(conn)?;
-    tls_info.handshake_dur = duration;
-
-    Ok((stream, tls_info))
 }
 
 struct Conn {
@@ -638,7 +562,8 @@ impl Server {
             keepalive: (&self.options).into(),
         };
 
-        let listener = Listener::new(self.addr.clone(), opts)?;
+        let listener =
+            Listener::new(self.addr.clone(), opts).context("unable to create listener")?;
         self.serve_with_listener(listener, token).await
     }
 
@@ -733,64 +658,6 @@ impl Server {
     }
 }
 
-/// Creates a TCP listener with given opts
-pub fn listen_tcp(addr: SocketAddr, opts: ListenerOpts) -> Result<TcpListener, Error> {
-    let domain = if addr.is_ipv4() {
-        Domain::IPV4
-    } else {
-        Domain::IPV6
-    };
-
-    let socket = Socket::new(domain, Type::STREAM, None).context("unable to create socket")?;
-    socket
-        .set_tcp_nodelay(true)
-        .context("unable to set TCP_NODELAY")?;
-
-    if let Some(v) = opts.mss {
-        socket.set_tcp_mss(v).context("unable to set TCP MSS")?;
-    }
-
-    socket
-        .set_reuse_address(true)
-        .context("unable to set SO_REUSEADDR")?;
-    socket
-        .set_tcp_keepalive(&opts.keepalive)
-        .context("unable to set keepalive on the socket")?;
-    socket
-        .set_nonblocking(true)
-        .context("unable to set socket into non-blocking mode")?;
-
-    socket.bind(&addr.into()).context("unable to bind socket")?;
-    socket
-        .listen(opts.backlog as i32)
-        .context("unable to listen on the socket")?;
-
-    let listener = TcpListener::from_std(socket.into())
-        .context("unable to convert socket from the standard one")?;
-
-    Ok(listener)
-}
-
-/// Creates a Unix Socket listener with given opts
-pub fn listen_unix(path: PathBuf, opts: ListenerOpts) -> Result<UnixListener, Error> {
-    let socket = UnixSocket::new_stream().context("unable to open UNIX socket")?;
-
-    if path.exists() {
-        std::fs::remove_file(&path).context("unable to remove UNIX socket")?;
-    }
-
-    socket.bind(&path).context("unable to bind socket")?;
-
-    let socket = socket
-        .listen(opts.backlog)
-        .context("unable to listen socket")?;
-
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))
-        .context("unable to set permissions on socket")?;
-
-    Ok(socket)
-}
-
 #[async_trait]
 impl Run for Server {
     async fn run(&self, token: CancellationToken) -> Result<(), anyhow::Error> {
@@ -802,6 +669,8 @@ impl Run for Server {
 #[cfg(test)]
 mod test {
     use http::StatusCode;
+
+    use crate::network::listener::listen_tcp;
 
     use super::*;
 

@@ -74,6 +74,8 @@ ic-bn-lib-common = "0.1"
 indoc = "2.0.6"
 instant-acme = { workspace = true, optional = true }
 itertools = "0.14.0"
+mail-auth = { workspace = true }
+mail-parser = { workspace = true }
 moka = { version = "0.12.15", features = ["sync", "future"] }
 nix = { version = "0.30.0", features = ["signal"] }
 ppp = "2.3.0"
@@ -107,6 +109,7 @@ sev = { version = "7.1.0", optional = true, default-features = false, features =
 ] }
 sha1 = "0.11.0"
 sha2 = { version = "0.11.0", optional = true }
+smtp-proto = { workspace = true }
 socket2 = "0.6.0"
 strum = { workspace = true }
 strum_macros = { workspace = true }
