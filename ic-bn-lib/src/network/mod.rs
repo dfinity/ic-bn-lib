@@ -8,19 +8,19 @@ use std::{
 
 use ic_bn_lib_common::types::http::{Stats, TlsInfo};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio_rustls::TlsAcceptor;
+use tokio_rustls::{TlsAcceptor, server::TlsStream};
 
 pub mod listener;
 
-/// Blanket async read+write trait for streams Box-ing
+/// Blanket async read+write trait for streams `Box`-ing
 pub trait AsyncReadWrite: AsyncRead + AsyncWrite + Send + Sync + Unpin {}
 impl<T: AsyncRead + AsyncWrite + Send + Sync + Unpin> AsyncReadWrite for T {}
 
 /// Performs TLS handshake on the given stream
-pub async fn tls_handshake(
+pub async fn tls_handshake<T: AsyncReadWrite>(
     rustls_cfg: Arc<rustls::ServerConfig>,
-    stream: impl AsyncReadWrite,
-) -> Result<(impl AsyncReadWrite, TlsInfo), io::Error> {
+    stream: T,
+) -> io::Result<(TlsStream<T>, TlsInfo)> {
     let tls_acceptor = TlsAcceptor::from(rustls_cfg);
 
     // Perform the TLS handshake
@@ -28,6 +28,7 @@ pub async fn tls_handshake(
     let stream = tls_acceptor.accept(stream).await?;
     let duration = start.elapsed();
 
+    // Obtain TLS info
     let conn = stream.get_ref().1;
     let mut tls_info = TlsInfo::try_from(conn).map_err(io::Error::other)?;
     tls_info.handshake_dur = duration;

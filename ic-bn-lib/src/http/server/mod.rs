@@ -44,7 +44,6 @@ use tokio::{
     time::{sleep, timeout},
 };
 use tokio_io_timeout::TimeoutStream;
-use tokio_rustls::TlsAcceptor;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tower_service::Service;
 use tracing::{debug, info, warn};

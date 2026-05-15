@@ -117,6 +117,7 @@ systemstat = "0.2.3"
 tar = { version = "0.4.44", optional = true }
 tempfile = "3.23"
 thiserror = { workspace = true }
+tracing-subscriber = "0.3"
 tokio = { version = "1.47.0", features = ["full"] }
 tokio-util = { workspace = true }
 tokio-rustls = { version = "0.26.0", default-features = false, features = [
@@ -157,3 +158,7 @@ required-features = ["vector"]
 [package.metadata.cargo-all-features]
 # Limit feature combinations to reduce test duration
 max_combination_size = 2
+
+[[bin]]
+name = "smtp-server"
+path = "tools/smtp_server.rs"

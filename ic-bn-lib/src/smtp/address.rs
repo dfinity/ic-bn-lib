@@ -33,6 +33,10 @@ impl FromStr for EmailAddress {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let (local, domain) = s.rsplit_once('@').ok_or(EmailAddressError::AtMissing)?;
+        if domain.is_empty() {
+            return Err(EmailAddressError::DomainIncorrect("Empty domain".into()));
+        }
+
         let domain = FQDN::from_ascii_str(domain)
             .map_err(|e| EmailAddressError::DomainIncorrect(e.to_string()))?;
 

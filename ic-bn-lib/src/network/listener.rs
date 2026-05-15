@@ -14,7 +14,7 @@ pub enum Listener {
 
 impl Listener {
     /// Create a new Listener
-    pub fn new(addr: Addr, opts: ListenerOpts) -> Result<Self, io::Error> {
+    pub fn new(addr: Addr, opts: ListenerOpts) -> io::Result<Self> {
         Ok(match addr {
             Addr::Tcp(v) => Self::Tcp(listen_tcp(v, opts)?),
             Addr::Unix(v) => Self::Unix(listen_unix(v, opts)?),
@@ -22,7 +22,7 @@ impl Listener {
     }
 
     /// Accept the connection
-    pub async fn accept(&self) -> Result<(Box<dyn AsyncReadWrite>, Addr), io::Error> {
+    pub async fn accept(&self) -> io::Result<(Box<dyn AsyncReadWrite>, Addr)> {
         Ok(match self {
             Self::Tcp(v) => {
                 let x = v.accept().await?;
@@ -61,7 +61,7 @@ impl From<UnixListener> for Listener {
 }
 
 /// Creates a TCP listener with given opts
-pub fn listen_tcp(addr: SocketAddr, opts: ListenerOpts) -> Result<TcpListener, io::Error> {
+pub fn listen_tcp(addr: SocketAddr, opts: ListenerOpts) -> io::Result<TcpListener> {
     let domain = if addr.is_ipv4() {
         Domain::IPV4
     } else {
@@ -85,7 +85,7 @@ pub fn listen_tcp(addr: SocketAddr, opts: ListenerOpts) -> Result<TcpListener, i
 }
 
 /// Creates a Unix Socket listener with given opts
-pub fn listen_unix(path: PathBuf, opts: ListenerOpts) -> Result<UnixListener, io::Error> {
+pub fn listen_unix(path: PathBuf, opts: ListenerOpts) -> io::Result<UnixListener> {
     let socket = UnixSocket::new_stream()?;
 
     if path.exists() {
