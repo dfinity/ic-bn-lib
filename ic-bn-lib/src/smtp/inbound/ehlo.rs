@@ -28,8 +28,8 @@ impl<S: AsyncReadWrite> Session<S> {
         };
 
         // Check if EHLO hostname resolves if configured
-        if self.params.verify_ehlo_hostname {
-            match self.params.authenticator.resolver().lookup_ip(host).await {
+        if self.cfg.verify_ehlo_hostname {
+            match self.cfg.authenticator.resolver().lookup_ip(host).await {
                 Ok(v) => {
                     if v.iter().next().is_none() {
                         return self
@@ -57,13 +57,13 @@ impl<S: AsyncReadWrite> Session<S> {
         self.data.mail_from = None;
         self.data.rcpt_to = AHashSet::new();
 
-        let mut response = EhloResponse::new(self.params.hostname.as_str());
+        let mut response = EhloResponse::new(self.cfg.hostname.as_str());
         response.capabilities =
             EXT_ENHANCED_STATUS_CODES | EXT_8BIT_MIME | EXT_SMTP_UTF8 | EXT_CHUNKING;
-        response.size = self.params.max_message_size;
+        response.size = self.cfg.max_message_size;
 
         // Send STARTTLS cap only if we support TLS & we're not already in TLS mode
-        if self.tls_info.is_none() && self.params.tls_config.is_some() {
+        if self.tls_info.is_none() && self.cfg.tls_enabled() {
             response.capabilities |= EXT_START_TLS;
         }
 

@@ -54,11 +54,14 @@ impl Display for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "ehlo: {}, from: {}, to: {}, msg: {}",
+            "id: {}, ehlo: {}, from: {}, to: {}, msg: {}",
+            self.id,
             self.ehlo_hostname,
             self.mail_from,
             self.rcpt_to.iter().map(|x| x.to_string()).join(", "),
             String::from_utf8_lossy(&self.body)
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
         )
     }
 }

@@ -11,29 +11,35 @@ use tracing::{info, warn};
 
 use crate::{
     network::listener::listen_tcp,
-    smtp::inbound::{SessionError, SessionParams, SessionResult, manager::SessionManager},
+    smtp::inbound::{SessionConfig, SessionError, SessionResult, manager::SessionManager},
 };
 
-/// Listens for new connections and creates sessions
+/// Listens for new SMTP connections and creates sessions
 pub struct Server {
     listen_addr: SocketAddr,
     listener: TcpListener,
-    params: Arc<SessionParams>,
+    params: Arc<SessionConfig>,
     tracker: TaskTracker,
 }
 
 impl Display for Server {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SMTPServer({})", self.listen_addr)
+        write!(f, "SMTP/Server({})", self.listen_addr)
     }
 }
 
 impl Server {
-    pub fn new(listen_addr: SocketAddr, params: SessionParams) -> Result<Self, SessionError> {
+    pub fn new(listen_addr: SocketAddr, cfg: SessionConfig) -> Result<Self, SessionError> {
         let listener = listen_tcp(listen_addr, ListenerOpts::default())?;
+        Self::new_with_listener(listener, cfg)
+    }
 
+    pub fn new_with_listener(
+        listener: TcpListener,
+        params: SessionConfig,
+    ) -> Result<Self, SessionError> {
         Ok(Self {
-            listen_addr,
+            listen_addr: listener.local_addr()?,
             listener,
             params: Arc::new(params),
             tracker: TaskTracker::new(),

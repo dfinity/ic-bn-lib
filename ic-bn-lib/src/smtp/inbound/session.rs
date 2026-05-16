@@ -1,8 +1,5 @@
 use std::{
     borrow::Cow,
-    fmt::Display,
-    net::IpAddr,
-    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -16,41 +13,18 @@ use tokio::{
     select,
 };
 use tokio_util::{sync::CancellationToken, time::FutureExt};
-use tracing::info;
 use uuid::Uuid;
 
 use crate::{
     network::AsyncReadWrite,
     smtp::{
         DeliveryError, Message,
-        inbound::{
-            Session, SessionCounters, SessionData, SessionError, SessionParams, SessionResult,
-            SessionState, SessionUpgrade,
-        },
+        inbound::{Session, SessionError, SessionResult, SessionState, SessionUpgrade},
     },
 };
 
-impl<S: AsyncReadWrite> Display for Session<S> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SMTP({}): ", self.remote_ip)
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 impl<S: AsyncReadWrite> Session<S> {
-    pub fn new(remote_ip: IpAddr, stream: S, params: Arc<SessionParams>) -> Self {
-        Self {
-            id: Uuid::now_v7(),
-            remote_ip,
-            stream,
-            state: SessionState::Greeting,
-            data: SessionData::default(),
-            counters: SessionCounters::new(params.max_session_duration),
-            params,
-            tls_info: None,
-        }
-    }
-
     /// Writes given bytes to the session & flushes the buffer
     pub async fn write(&mut self, bytes: &[u8]) -> SessionResult<()> {
         self.stream.write_all(bytes).await?;
@@ -64,21 +38,22 @@ impl<S: AsyncReadWrite> Session<S> {
         // The client needs to wait silently until we send our greeting.
         // If something comes in - then the client isn't respecting the protocol,
         // we consider him malicious and drop the connection.
-        if let Some(v) = self.params.helo_delay {
-            match self.stream.read_u8().timeout(v).await {
-                Ok(Ok(_)) => {
-                    self.write(b"501 5.7.1 Client sent command before greeting banner.\r\n")
-                        .await?;
-                    return Err(SessionError::ProtocolError(
-                        "Command before greeting banner".into(),
-                    ));
+        if let Some(v) = self.cfg.helo_delay {
+            let mut buf = vec![0; 128];
+            match self.stream.read(&mut buf).timeout(v).await {
+                Ok(Ok(bytes_read)) => {
+                    if bytes_read > 0 {
+                        self.write(b"501 5.7.1 Client sent command before greeting banner.\r\n")
+                            .await?;
+                        return Err(SessionError::SendsBeforeGreeting);
+                    }
                 }
                 Ok(Err(e)) => return Err(e.into()),
                 Err(_) => {}
             }
         }
 
-        let greeting = format!("220 {} ESMTP IC SMTP Gateway\r\n", self.params.hostname);
+        let greeting = format!("220 {} ESMTP IC SMTP Gateway\r\n", self.cfg.hostname);
         self.write(greeting.as_bytes()).await?;
 
         Ok(())
@@ -151,28 +126,34 @@ impl<S: AsyncReadWrite> Session<S> {
     }
 
     async fn ingest(&mut self, bytes: &[u8]) -> SessionResult<SessionUpgrade> {
-        // Check if we alread are over transfer quota
-        if self.counters.bytes_ingested + bytes.len() >= self.params.max_session_data {
+        // Check if we are over session transfer quota
+        if self.counters.bytes_ingested + bytes.len() >= self.cfg.max_session_data {
             self.write(b"452 4.7.28 Session transfer quota exceeded.\r\n")
                 .await?;
             return Err(SessionError::TransferQuotaExceeded(
-                self.params.max_session_data,
+                self.cfg.max_session_data,
             ));
         }
 
-        // Check if we already are over session time quota
+        // Check if we are over session time quota
         if Instant::now() > self.counters.valid_until {
             self.write(b"452 4.3.2 Session open for too long.\r\n")
                 .await?;
             return Err(SessionError::TtlExceeded(
-                self.params.max_session_duration.as_secs(),
+                self.cfg.max_session_duration.as_secs(),
             ));
+        }
+
+        // Check if we are over error limit
+        if self.counters.errors > self.cfg.max_errors {
+            self.write(b"452 4.3.2 Too many errors.\r\n").await?;
+            return Err(SessionError::TooManyErrors);
         }
 
         self.counters.bytes_ingested += bytes.len();
         let mut iter = bytes.iter();
-        // We can't take mutable ref to self.state & self at the same time, so we extract state
-        // temporarily
+        // We can't take mutable ref to self.state & self at the same time,
+        // so we extract state temporarily.
         let mut state = std::mem::replace(&mut self.state, SessionState::None);
 
         loop {
@@ -199,8 +180,9 @@ impl<S: AsyncReadWrite> Session<S> {
                                 chunk_size,
                                 is_last,
                             } => {
+                                // Check if we will be past max message limit with this chunk
                                 state = if self.data.message.len() + chunk_size
-                                    > self.params.max_message_size
+                                    > self.cfg.max_message_size
                                 {
                                     SessionState::DataTooLarge(DummyDataReceiver::new_bdat(
                                         chunk_size,
@@ -220,7 +202,7 @@ impl<S: AsyncReadWrite> Session<S> {
                                 if self.tls_info.is_some() {
                                     self.write(b"504 5.7.4 Already in TLS mode.\r\n").await?;
                                     self.counters.errors += 1;
-                                } else if self.params.tls_config.is_none() {
+                                } else if !self.cfg.tls_enabled() {
                                     self.write(b"502 5.7.0 TLS not available.\r\n").await?;
                                     self.counters.errors += 1;
                                 } else {
@@ -243,7 +225,7 @@ impl<S: AsyncReadWrite> Session<S> {
                 }
                 SessionState::Data(rx) => {
                     // Check if the message already exceeds allowed size
-                    if self.data.message.len() + bytes.len() > self.params.max_message_size {
+                    if self.data.message.len() + bytes.len() > self.cfg.max_message_size {
                         state = SessionState::DataTooLarge(DummyDataReceiver::new_data(rx));
                         continue;
                     } else if rx.ingest(&mut iter, &mut self.data.message) {
@@ -279,6 +261,7 @@ impl<S: AsyncReadWrite> Session<S> {
                         state = SessionState::default();
                         self.counters.errors += 1;
                     } else {
+                        // No line-feed found yet
                         break;
                     }
                 }
@@ -316,7 +299,7 @@ impl<S: AsyncReadWrite> Session<S> {
         loop {
             select! {
                 // Read from the client with a timeout
-                res = self.stream.read(&mut buf).timeout(self.params.timeout) => {
+                res = self.stream.read(&mut buf).timeout(self.cfg.timeout) => {
                     match res {
                         Ok(Ok(bytes_read)) => {
                             self.ingest(&buf[..bytes_read]).await?;
@@ -349,24 +332,30 @@ impl<S: AsyncReadWrite> Session<S> {
     pub(crate) async fn message_too_big(&mut self) -> SessionResult<()> {
         let msg = format!(
             "552 5.3.4 Message too big for, we accept up to {} bytes.\r\n",
-            self.params.max_message_size
+            self.cfg.max_message_size
         );
         return self.write(msg.as_bytes()).await;
     }
 
     async fn queue_message(&mut self) -> SessionResult<()> {
+        #[cfg(not(test))]
         let id = Uuid::now_v7();
+        #[cfg(test)]
+        let id = Uuid::nil();
 
         let message_size = self.data.message.len();
+
+        // SAFETY: Code makes sure these are all Some().
+        // It's better to panic in tests if they are not.
         let message = Message {
             id,
-            ehlo_hostname: self.data.ehlo_hostname.take().unwrap(),
+            ehlo_hostname: self.data.ehlo_hostname.clone().unwrap(),
             mail_from: self.data.mail_from.take().unwrap(),
             rcpt_to: self.data.rcpt_to.drain().collect(),
             body: std::mem::take(&mut self.data.message),
         };
 
-        if let Err(e) = self.params.delivery_agent.deliver_mail(message).await {
+        if let Err(e) = self.cfg.delivery_agent.deliver_mail(message).await {
             let msg = match e {
                 DeliveryError::Permanent(v) => {
                     format!("550 5.5.0 Permanent delivery error: {v}")
@@ -392,7 +381,7 @@ impl<S: AsyncReadWrite> Session<S> {
     }
 
     async fn can_accept_message(&mut self) -> SessionResult<bool> {
-        if self.counters.messages_queued >= self.params.max_messages_per_session {
+        if self.counters.messages_queued >= self.cfg.max_messages_per_session {
             self.write(b"452 4.4.5 Maximum number of messages per session exceeded.\r\n")
                 .await?;
             return Err(SessionError::TooManyMessagesPerSession);
@@ -406,7 +395,7 @@ impl<S: AsyncReadWrite> Session<S> {
         Ok(true)
     }
 
-    /// Resets the message-related fields to initial state
+    /// Resets the message-related fields to their initial state
     fn reset_message(&mut self) {
         self.data.mail_from = None;
         self.data.rcpt_to.clear();
@@ -414,6 +403,8 @@ impl<S: AsyncReadWrite> Session<S> {
     }
 
     pub async fn shutdown(&mut self) -> SessionResult<()> {
+        self.write(b"421 4.3.0 Server shutting down.\r\n").await?;
+
         self.stream
             .shutdown()
             .timeout(Duration::from_secs(10))

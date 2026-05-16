@@ -8,7 +8,9 @@ use tracing::{debug, info};
 
 use crate::{
     network::{AsyncReadWrite, tls_handshake},
-    smtp::inbound::{Session, SessionData, SessionParams, SessionResult, SessionUpgrade},
+    smtp::inbound::{
+        Session, SessionConfig, SessionData, SessionResult, SessionTlsMode, SessionUpgrade,
+    },
 };
 
 /// Manages the lifetime of a single SMTP session.
@@ -23,7 +25,7 @@ impl SessionManager {
         &self,
         stream: S,
         remote_addr: SocketAddr,
-        params: Arc<SessionParams>,
+        params: Arc<SessionConfig>,
         shutdown_token: CancellationToken,
     ) {
         let mut session = Session::new(remote_addr.ip(), stream, params);
@@ -63,10 +65,14 @@ impl SessionManager {
 impl<S: AsyncReadWrite> Session<S> {
     /// Converts the plain-text session into a TLS one by doing a TLS handshake
     pub async fn into_tls(self) -> SessionResult<Session<TlsStream<S>>> {
-        // SAFETY: Code makes sure that we end up here only if tls_config is Some.
-        // If we ever panic here - it should mean that the core logic is flawed.
-        let (stream, tls_info) =
-            tls_handshake(self.params.tls_config.clone().unwrap(), self.stream).await?;
+        // SAFETY: We should end up here only if TLS is enabled.
+        // It's better to panic otherwise.
+        let tls_config = match &self.cfg.tls_mode {
+            SessionTlsMode::Allowed(v) | SessionTlsMode::Required(v) => v.clone(),
+            SessionTlsMode::Disabled => unreachable!(),
+        };
+
+        let (stream, tls_info) = tls_handshake(tls_config, self.stream).await?;
 
         Ok(Session {
             id: self.id,
@@ -78,7 +84,7 @@ impl<S: AsyncReadWrite> Session<S> {
             // https://datatracker.ietf.org/doc/html/rfc3207#section-4.2
             data: SessionData::default(),
             counters: self.counters,
-            params: self.params,
+            cfg: self.cfg,
             tls_info: Some(tls_info),
         })
     }

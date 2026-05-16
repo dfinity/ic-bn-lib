@@ -34,7 +34,7 @@ impl<S: AsyncReadWrite> Session<S> {
             return self.ext_unsupported("MT-PRIORITY").await;
         }
 
-        if from.size > 0 && from.size > self.params.max_message_size {
+        if from.size > self.cfg.max_message_size {
             return self.message_too_big().await;
         }
 
@@ -54,9 +54,9 @@ impl<S: AsyncReadWrite> Session<S> {
         };
 
         // Validate reverse IP if configured
-        if self.params.verify_reverse_ip {
+        if self.cfg.verify_reverse_ip {
             let result = self
-                .params
+                .cfg
                 .authenticator
                 .verify_iprev(Parameters::from(self.remote_ip))
                 .await
@@ -73,14 +73,14 @@ impl<S: AsyncReadWrite> Session<S> {
             }
         }
 
-        if self.params.verify_spf {
+        if self.cfg.verify_spf {
             let output = self
-                .params
+                .cfg
                 .authenticator
                 .verify_spf(SpfParameters::verify_mail_from(
                     self.remote_ip,
                     &helo_hostname.to_string(),
-                    &self.params.hostname,
+                    &self.cfg.hostname,
                     &from.address,
                 ))
                 .await;

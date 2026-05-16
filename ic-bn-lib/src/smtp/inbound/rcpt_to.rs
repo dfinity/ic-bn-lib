@@ -22,10 +22,6 @@ impl<S: AsyncReadWrite> Session<S> {
                 .await;
         }
 
-        if self.data.rcpt_to.len() >= self.params.max_recipients {
-            return self.write(b"455 4.5.3 Too many recipients.\r\n").await;
-        }
-
         // Check if DSN-related stuff was requested
         if (to.flags
             & (RCPT_NOTIFY_DELAY | RCPT_NOTIFY_NEVER | RCPT_NOTIFY_SUCCESS | RCPT_NOTIFY_FAILURE))
@@ -43,8 +39,12 @@ impl<S: AsyncReadWrite> Session<S> {
             return self.write(b"250 2.1.5 OK\r\n").await;
         }
 
+        if self.data.rcpt_to.len() >= self.cfg.max_recipients {
+            return self.write(b"455 4.5.3 Too many recipients.\r\n").await;
+        }
+
         match self
-            .params
+            .cfg
             .recipient_resolver
             .resolve_recipient(&address)
             .await
