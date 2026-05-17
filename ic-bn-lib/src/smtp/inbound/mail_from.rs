@@ -16,13 +16,17 @@ impl<S: AsyncReadWrite> Session<S> {
     pub async fn handle_mail_from(&mut self, from: MailFrom<Cow<'_, str>>) -> SessionResult<()> {
         let Some(helo_hostname) = &self.data.ehlo_hostname else {
             return self
-                .write(b"503 5.5.1 Polite people say EHLO first.\r\n")
+                .reply("503", "5.5.1", "Polite people say EHLO first.")
                 .await;
         };
 
         if self.data.mail_from.is_some() {
             return self
-                .write(b"503 5.5.1 Multiple MAIL FROM commands are not allowed.\r\n")
+                .reply(
+                    "503",
+                    "5.5.1",
+                    "Multiple MAIL FROM commands are not allowed.",
+                )
                 .await;
         }
 
@@ -49,7 +53,7 @@ impl<S: AsyncReadWrite> Session<S> {
         // Validate address
         let Ok(address) = EmailAddress::from_str(&from.address) else {
             return self
-                .write(b"550 5.7.1 Sender address is incorrect.\r\n")
+                .reply("550", "5.7.1", "Sender address is incorrect.")
                 .await;
         };
 
@@ -63,13 +67,13 @@ impl<S: AsyncReadWrite> Session<S> {
                 .result;
 
             if !matches!(result, IprevResult::Pass) {
-                let message = if matches!(result, IprevResult::TempError(_)) {
-                    &b"451 4.7.25 Temporary error validating reverse DNS.\r\n"[..]
+                let (code, ext, msg) = if matches!(result, IprevResult::TempError(_)) {
+                    ("451", "4.7.25", "Temporary error validating reverse DNS.")
                 } else {
-                    &b"550 5.7.25 Reverse DNS validation failed.\r\n"[..]
+                    ("550", "5.7.25", "Reverse DNS validation failed.")
                 };
 
-                return self.write(message).await;
+                return self.reply(code, ext, msg).await;
             }
         }
 
@@ -89,21 +93,22 @@ impl<S: AsyncReadWrite> Session<S> {
                 SpfResult::Pass | SpfResult::Neutral | SpfResult::None => {}
                 SpfResult::TempError => {
                     return self
-                        .write(b"451 4.7.24 Temporary SPF validation error.\r\n")
+                        .reply("451", "4.7.24", "Temporary SPF validation error.")
                         .await;
                 }
                 SpfResult::Fail | SpfResult::PermError | SpfResult::SoftFail => {
-                    let mut msg = "550 5.7.23 SPF validation failed".to_string();
+                    let mut msg = "SPF validation failed".to_string();
                     if let Some(v) = output.explanation() {
                         write!(msg, ": {v}.").ok();
                     }
                     write!(msg, "\r\n").ok();
-                    return self.write(msg.as_bytes()).await;
+
+                    return self.reply("550", "5.7.23", &msg).await;
                 }
             }
         }
 
-        self.write(b"250 2.1.0 OK\r\n").await?;
+        self.reply("250", "2.1.0", "OK").await?;
         self.data.mail_from = Some(address);
         Ok(())
     }

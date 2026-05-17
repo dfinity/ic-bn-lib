@@ -13,6 +13,7 @@ use std::{
 };
 
 use ahash::AHashSet;
+use bytes::Bytes;
 use fqdn::FQDN;
 use ic_bn_lib_common::types::http::TlsInfo;
 use mail_auth::MessageAuthenticator;
@@ -76,29 +77,37 @@ pub enum SessionTlsMode {
 
 /// SMTP session config
 pub struct SessionConfig {
-    pub hostname: String,
+    hostname: String,
+    greeting: Bytes,
+
     pub max_message_size: usize,
     pub max_recipients: usize,
     pub max_session_duration: Duration,
     pub max_session_data: usize,
     pub max_errors: usize,
     pub max_messages_per_session: usize,
+
     pub verify_ehlo_hostname: bool,
     pub verify_sender_domain: bool,
     pub verify_reverse_ip: bool,
     pub verify_spf: bool,
     pub helo_delay: Option<Duration>,
+
     pub timeout: Duration,
     pub tls_mode: SessionTlsMode,
+
     pub authenticator: Arc<MessageAuthenticator>,
     pub recipient_resolver: Arc<dyn ResolvesRecipient>,
     pub delivery_agent: Arc<dyn DeliversMail>,
 }
 
-impl Default for SessionConfig {
-    fn default() -> Self {
+impl SessionConfig {
+    pub fn new(hostname: &str) -> Self {
+        let greeting = format!("220 {hostname} ESMTP IC SMTP Gateway\r\n");
+
         Self {
-            hostname: "".into(),
+            hostname: hostname.into(),
+            greeting: Bytes::from(greeting),
             max_message_size: 10 * 1024 * 1024,
             max_recipients: 5,
             max_session_duration: Duration::from_secs(600),
@@ -118,9 +127,7 @@ impl Default for SessionConfig {
             delivery_agent: Arc::new(DummyDeliveryAgent),
         }
     }
-}
 
-impl SessionConfig {
     pub const fn tls_enabled(&self) -> bool {
         matches!(
             self.tls_mode,
@@ -224,14 +231,35 @@ impl<S: AsyncReadWrite> Session<S> {
 mod tests {
     use std::str::FromStr;
 
+    use async_trait::async_trait;
+    use fqdn::fqdn;
     use tokio_util::sync::CancellationToken;
+
+    use crate::smtp::{DeliveryError, Message};
 
     use super::*;
 
+    #[derive(Debug)]
+    pub struct TestDeliveryAgent(Option<Message>, Option<DeliveryError>);
+
+    #[async_trait]
+    impl DeliversMail for TestDeliveryAgent {
+        async fn deliver_mail(&self, message: Message) -> Result<(), DeliveryError> {
+            if let Some(e) = &self.1 {
+                return Err(e.clone());
+            }
+
+            if let Some(v) = &self.0 {
+                assert_eq!(v, &message);
+            }
+
+            Ok(())
+        }
+    }
+
     fn create_session<S: AsyncReadWrite>(stream: S, helo_delay: Option<Duration>) -> Session<S> {
-        let mut cfg = SessionConfig::default();
-        cfg.hostname = "test".into();
-        cfg.max_errors = 3;
+        let mut cfg = SessionConfig::new("test");
+        cfg.max_errors = 5;
         cfg.max_message_size = 512;
         cfg.helo_delay = helo_delay;
         cfg.max_messages_per_session = 3;
@@ -245,8 +273,11 @@ mod tests {
         let mut builder = tokio_test::io::Builder::new();
 
         builder.write(b"220 test ESMTP IC SMTP Gateway\r\n")
+            .read(b"HELO foo.bar\r\n")
+            .write(b"250 test you had me at HELO\r\n")
             .read(b"EHLO foo.bar\r\n")
             .write(b"250-test you had me at EHLO\r\n250-SMTPUTF8\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250 8BITMIME\r\n");
+
         builder
     }
 
@@ -262,8 +293,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_ehlo_required() {
+        let stream = tokio_test::io::Builder::new()
+            .write(b"220 test ESMTP IC SMTP Gateway\r\n")
+            .read(b"MAIL FROM:<a@b>\r\n")
+            .write(b"503 5.5.1 Polite people say EHLO first.\r\n")
+            .read(b"QUIT\r\n")
+            .write(b"221 2.0.0 Bye.\r\n")
+            .build();
+
+        let mut session = create_session(stream, None);
+
+        assert!(matches!(
+            session.handle(CancellationToken::new()).await.unwrap_err(),
+            SessionError::Quit
+        ));
+    }
+
+    #[tokio::test]
     async fn test_basic_session() {
         let mut builder = create_basic_stream();
+        builder
+            .read(b"RCPT TO:<a@a>\r\n")
+            .write(b"503 5.5.1 MAIL FROM is required first.\r\n")
+            .read(b"MAIL FROM:<a@a>\r\n")
+            .write(b"250 2.1.0 OK\r\n")
+            .read(b"MAIL FROM:<a@a>\r\n")
+            .write(b"503 5.5.1 Multiple MAIL FROM commands are not allowed.\r\n")
+            .read(b"DATA\r\n")
+            .write(b"503 5.5.1 RCPT TO is required first.\r\n")
+            .read(b"RSET\r\n")
+            .write(b"250 2.0.0 OK\r\n")
+            .read(b"NOOP\r\n")
+            .write(b"250 2.0.0 OK\r\n")
+            .read(b"FOOB\r\n")
+            .write(b"500 5.5.1 Invalid command.\r\n")
+            .read(b"HELP\r\n")
+            .write(b"502 5.5.1 Command not implemented.\r\n");
+
         stream_send_message(&mut builder);
         let stream = builder
             .read(b"QUIT\r\n")
@@ -290,6 +357,78 @@ mod tests {
         assert!(matches!(
             session.handle(CancellationToken::new()).await.unwrap_err(),
             SessionError::SendsBeforeGreeting
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_data() {
+        let mut builder = create_basic_stream();
+        stream_send_message(&mut builder);
+
+        let stream = builder
+            .read(b"QUIT\r\n")
+            .write(b"221 2.0.0 Bye.\r\n")
+            .build();
+
+        let agent = TestDeliveryAgent(
+            Some(Message {
+                id: Uuid::nil(),
+                ehlo_hostname: fqdn!("foo.bar"),
+                mail_from: EmailAddress::from_str("foo@bar").unwrap(),
+                rcpt_to: vec![EmailAddress::from_str("dead@beef").unwrap()],
+                body: b"foobarmessage".to_vec(),
+            }),
+            None,
+        );
+
+        let mut cfg = SessionConfig::new("test");
+        cfg.delivery_agent = Arc::new(agent);
+        let mut session = Session::new(IpAddr::from_str("1.1.1.1").unwrap(), stream, Arc::new(cfg));
+
+        assert!(matches!(
+            session.handle(CancellationToken::new()).await.unwrap_err(),
+            SessionError::Quit
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_bdat() {
+        let stream = create_basic_stream()
+            .read(b"MAIL FROM:<foo@bar>\r\n")
+            .write(b"250 2.1.0 OK\r\n")
+            .read(b"RCPT TO:<baz@baz>\r\n")
+            .write(b"250 2.1.5 OK\r\n")
+            .read(b"BDAT 10\r\n")
+            .read(b"0123456789")
+            .write(b"250 2.6.0 Chunk accepted.\r\n")
+            .read(b"BDAT 10\r\n")
+            .read(b"9876543210")
+            .write(b"250 2.6.0 Chunk accepted.\r\n")
+            .read(b"BDAT 10 LAST\r\n")
+            .read(b"0123456789")
+            .write(b"250 2.0.0 Message (30 bytes) queued with id 00000000-0000-0000-0000-000000000000\r\n")
+            .read(b"QUIT\r\n")
+            .write(b"221 2.0.0 Bye.\r\n")
+            .build();
+
+        let agent = TestDeliveryAgent(
+            Some(Message {
+                id: Uuid::nil(),
+                ehlo_hostname: fqdn!("foo.bar"),
+                mail_from: EmailAddress::from_str("foo@bar").unwrap(),
+                rcpt_to: vec![EmailAddress::from_str("baz@baz").unwrap()],
+                body: b"012345678998765432100123456789".to_vec(),
+            }),
+            None,
+        );
+
+        let mut cfg = SessionConfig::new("test");
+        cfg.delivery_agent = Arc::new(agent);
+        let mut session = Session::new(IpAddr::from_str("1.1.1.1").unwrap(), stream, Arc::new(cfg));
+
+        assert!(matches!(
+            session.handle(CancellationToken::new()).await.unwrap_err(),
+            SessionError::Quit
         ));
     }
 
@@ -364,6 +503,32 @@ mod tests {
         assert!(matches!(
             session.handle(CancellationToken::new()).await.unwrap_err(),
             SessionError::TooManyMessagesPerSession
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_max_errors() {
+        let stream = tokio_test::io::Builder::new()
+            .write(b"220 test ESMTP IC SMTP Gateway\r\n")
+            .read(b"FOO\r\n")
+            .write(b"500 5.5.1 Invalid command.\r\n")
+            .read(b"FOO\r\n")
+            .write(b"500 5.5.1 Invalid command.\r\n")
+            .read(b"FOO\r\n")
+            .write(b"500 5.5.1 Invalid command.\r\n")
+            .read(b"FOO\r\n")
+            .write(b"500 5.5.1 Invalid command.\r\n")
+            .read(b"FOO\r\n")
+            .write(b"500 5.5.1 Invalid command.\r\n")
+            .read(b"FOO\r\n")
+            .write(b"452 4.3.2 Too many errors.\r\n")
+            .build();
+
+        let mut session = create_session(stream, None);
+
+        assert!(matches!(
+            session.handle(CancellationToken::new()).await.unwrap_err(),
+            SessionError::TooManyErrors
         ));
     }
 }

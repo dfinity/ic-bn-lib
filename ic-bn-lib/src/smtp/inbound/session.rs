@@ -23,6 +23,8 @@ use crate::{
     },
 };
 
+const MAX_REPLY_LEN: usize = 256;
+
 #[allow(clippy::too_many_arguments)]
 impl<S: AsyncReadWrite> Session<S> {
     /// Writes given bytes to the session & flushes the buffer
@@ -30,6 +32,53 @@ impl<S: AsyncReadWrite> Session<S> {
         self.stream.write_all(bytes).await?;
         self.stream.flush().await?;
         Ok(())
+    }
+
+    /// Replies with given codes & message.
+    ///
+    /// It accepts replies up to `MAX_REPLY_LEN` long since it uses
+    /// a stack array to avoid heap allocation for performance reasons.
+    /// If ever this module would need more - increase the constant.
+    pub(crate) async fn reply(&mut self, code: &str, ext: &str, msg: &str) -> SessionResult<()> {
+        let len = code.len() + ext.len() + msg.len() + 4;
+        assert!(
+            len <= MAX_REPLY_LEN,
+            "Reply longer than supported - increase MAX_REPLY_LEN"
+        );
+
+        // Poor man's `format!`
+        let mut buf = [0; MAX_REPLY_LEN];
+        let (mut i, mut j) = (0, code.len());
+        buf[i..j].copy_from_slice(code.as_bytes());
+        buf[j] = b' ';
+        i += code.len() + 1;
+        j += ext.len() + 1;
+        buf[i..j].copy_from_slice(ext.as_bytes());
+        buf[j] = b' ';
+        i += ext.len() + 1;
+        j += msg.len() + 1;
+        buf[i..j].copy_from_slice(msg.as_bytes());
+        buf[j] = b'\r';
+        buf[j + 1] = b'\n';
+
+        self.write(&buf[..len]).await
+    }
+
+    pub(crate) async fn ext_unsupported(&mut self, ext: &str) -> SessionResult<()> {
+        self.reply(
+            "501",
+            "5.5.4",
+            &format!("{ext} extension is not supported."),
+        )
+        .await
+    }
+
+    pub(crate) async fn message_too_big(&mut self) -> SessionResult<()> {
+        let msg = format!(
+            "Message too big for, we accept up to {} bytes.",
+            self.cfg.max_message_size
+        );
+        return self.reply("552", "5.3.4", &msg).await;
     }
 
     /// Sends greeting message
@@ -43,8 +92,12 @@ impl<S: AsyncReadWrite> Session<S> {
             match self.stream.read(&mut buf).timeout(v).await {
                 Ok(Ok(bytes_read)) => {
                     if bytes_read > 0 {
-                        self.write(b"501 5.7.1 Client sent command before greeting banner.\r\n")
-                            .await?;
+                        self.reply(
+                            "501",
+                            "5.7.1",
+                            "Client sent command before greeting banner.",
+                        )
+                        .await?;
                         return Err(SessionError::SendsBeforeGreeting);
                     }
                 }
@@ -53,50 +106,46 @@ impl<S: AsyncReadWrite> Session<S> {
             }
         }
 
-        let greeting = format!("220 {} ESMTP IC SMTP Gateway\r\n", self.cfg.hostname);
-        self.write(greeting.as_bytes()).await?;
-
-        Ok(())
+        self.write(&self.cfg.greeting.clone()).await
     }
 
     async fn handle_error(&mut self, error: SmtpError) -> SessionResult<()> {
-        match error {
+        let (code, ext, msg) = match error {
             SmtpError::UnknownCommand | SmtpError::InvalidResponse { .. } => {
-                self.write(b"500 5.5.1 Invalid command.\r\n").await?;
+                ("500", "5.5.1", "Invalid command.".to_string())
             }
             SmtpError::InvalidSenderAddress => {
-                self.write(b"501 5.1.8 Bad sender's system address.\r\n")
-                    .await?;
+                ("501", "5.1.8", "Bad sender's system address.".to_string())
             }
-            SmtpError::InvalidRecipientAddress => {
-                self.write(b"501 5.1.3 Bad destination mailbox address syntax.\r\n")
-                    .await?;
-            }
+            SmtpError::InvalidRecipientAddress => (
+                "501",
+                "5.1.3",
+                "Bad destination mailbox address syntax.".to_string(),
+            ),
             SmtpError::SyntaxError { syntax } => {
-                self.write(format!("501 5.5.2 Syntax error, expected: {syntax}\r\n").as_bytes())
-                    .await?;
+                ("501", "5.5.2", format!("Syntax error, expected: {syntax}"))
             }
             SmtpError::InvalidParameter { param } => {
-                self.write(format!("501 5.5.4 Invalid parameter {param:?}.\r\n").as_bytes())
-                    .await?;
+                ("501", "5.5.4", format!("Invalid parameter {param:?}."))
             }
             SmtpError::UnsupportedParameter { param } => {
-                self.write(format!("504 5.5.4 Unsupported parameter {param:?}.\r\n").as_bytes())
-                    .await?;
+                ("504", "5.5.4", format!("Unsupported parameter {param:?}."))
             }
-            SmtpError::ResponseTooLong => {
-                self.state = SessionState::RequestTooLarge(DummyLineReceiver::default());
-            }
-            SmtpError::NeedsMoreData { .. } => {}
-        }
+            // These are handled one level above
+            SmtpError::ResponseTooLong | SmtpError::NeedsMoreData { .. } => unreachable!(),
+        };
 
-        Ok(())
+        self.counters.errors += 1;
+        self.reply(code, ext, &msg).await
     }
 
     async fn handle_request(&mut self, req: Request<Cow<'_, str>>) -> SessionResult<()> {
         match req {
-            Request::Ehlo { host } | Request::Helo { host } => {
-                self.handle_ehlo(&host).await?;
+            Request::Ehlo { host } => {
+                self.handle_ehlo(&host, true).await?;
+            }
+            Request::Helo { host } => {
+                self.handle_ehlo(&host, false).await?;
             }
             Request::Mail { from } => {
                 self.handle_mail_from(from).await?;
@@ -106,17 +155,17 @@ impl<S: AsyncReadWrite> Session<S> {
             }
             Request::Rset => {
                 self.reset_message();
-                self.write(b"250 2.0.0 OK\r\n").await?;
+                self.reply("250", "2.0.0", "OK").await?;
             }
             Request::Quit => {
-                self.write(b"221 2.0.0 Bye.\r\n").await?;
+                self.reply("221", "2.0.0", "Bye.").await?;
                 return Err(SessionError::Quit);
             }
             Request::Noop { .. } => {
-                self.write(b"250 2.0.0 OK\r\n").await?;
+                self.reply("250", "2.0.0", "OK").await?;
             }
             _ => {
-                self.write(b"502 5.5.1 Command not implemented.\r\n")
+                self.reply("502", "5.5.1", "Command not implemented.")
                     .await?;
                 self.counters.errors += 1;
             }
@@ -128,7 +177,7 @@ impl<S: AsyncReadWrite> Session<S> {
     async fn ingest(&mut self, bytes: &[u8]) -> SessionResult<SessionUpgrade> {
         // Check if we are over session transfer quota
         if self.counters.bytes_ingested + bytes.len() >= self.cfg.max_session_data {
-            self.write(b"452 4.7.28 Session transfer quota exceeded.\r\n")
+            self.reply("452", "4.7.28", "Session transfer quota exceeded.")
                 .await?;
             return Err(SessionError::TransferQuotaExceeded(
                 self.cfg.max_session_data,
@@ -137,7 +186,7 @@ impl<S: AsyncReadWrite> Session<S> {
 
         // Check if we are over session time quota
         if Instant::now() > self.counters.valid_until {
-            self.write(b"452 4.3.2 Session open for too long.\r\n")
+            self.reply("452", "4.3.2", "Session open for too long.")
                 .await?;
             return Err(SessionError::TtlExceeded(
                 self.cfg.max_session_duration.as_secs(),
@@ -145,8 +194,8 @@ impl<S: AsyncReadWrite> Session<S> {
         }
 
         // Check if we are over error limit
-        if self.counters.errors > self.cfg.max_errors {
-            self.write(b"452 4.3.2 Too many errors.\r\n").await?;
+        if self.counters.errors >= self.cfg.max_errors {
+            self.reply("452", "4.3.2", "Too many errors.").await?;
             return Err(SessionError::TooManyErrors);
         }
 
@@ -200,13 +249,13 @@ impl<S: AsyncReadWrite> Session<S> {
                             }
                             Request::StartTls => {
                                 if self.tls_info.is_some() {
-                                    self.write(b"504 5.7.4 Already in TLS mode.\r\n").await?;
+                                    self.reply("504", "5.7.4", "Already in TLS mode.").await?;
                                     self.counters.errors += 1;
                                 } else if !self.cfg.tls_enabled() {
-                                    self.write(b"502 5.7.0 TLS not available.\r\n").await?;
+                                    self.reply("502", "5.7.0", "TLS not available.").await?;
                                     self.counters.errors += 1;
                                 } else {
-                                    self.write(b"220 2.0.0 Ready to start TLS.\r\n").await?;
+                                    self.reply("220", "2.0.0", "Ready to start TLS.").await?;
                                     return Ok(SessionUpgrade::StartTls);
                                 }
                             }
@@ -217,9 +266,12 @@ impl<S: AsyncReadWrite> Session<S> {
                         // In case of NeedsMoreData error we just leave
                         // and wait for new data to be ingested
                         Err(SmtpError::NeedsMoreData { .. }) => break,
+                        Err(SmtpError::ResponseTooLong) => {
+                            state = SessionState::RequestTooLarge(DummyLineReceiver::default());
+                            continue;
+                        }
                         Err(e) => {
                             self.handle_error(e).await?;
-                            self.counters.errors += 1;
                         }
                     }
                 }
@@ -243,7 +295,7 @@ impl<S: AsyncReadWrite> Session<S> {
                             if rx.is_last {
                                 self.queue_message().await?;
                             } else {
-                                self.write(b"250 2.6.0 Chunk accepted.\r\n").await?;
+                                self.reply("250", "2.6.0", "Chunk accepted.").await?;
                             }
                         } else {
                             self.data.message = Vec::with_capacity(0);
@@ -257,7 +309,7 @@ impl<S: AsyncReadWrite> Session<S> {
                 SessionState::RequestTooLarge(rx) => {
                     // If line-feed found - issue error, otherwise keep ingesting
                     if rx.ingest(&mut iter) {
-                        self.write(b"554 5.3.4 Line is too long.\r\n").await?;
+                        self.reply("554", "5.3.4", "Line is too long.").await?;
                         state = SessionState::default();
                         self.counters.errors += 1;
                     } else {
@@ -308,7 +360,7 @@ impl<S: AsyncReadWrite> Session<S> {
                             return Err(e.into());
                         }
                         Err(_) => {
-                            self.write(b"221 2.0.0 Disconnecting due to inactivity.\r\n").await?;
+                            self.reply("221", "2.0.0", "Disconnecting due to inactivity.").await?;
                             return Err(SessionError::Timeout);
                         }
                     }
@@ -321,20 +373,6 @@ impl<S: AsyncReadWrite> Session<S> {
         }
 
         Ok(SessionUpgrade::No)
-    }
-
-    pub(crate) async fn ext_unsupported(&mut self, ext: &str) -> SessionResult<()> {
-        self.write(b"501 5.5.4 ").await?;
-        self.write(ext.as_bytes()).await?;
-        return self.write(b" extension is not supported.\r\n").await;
-    }
-
-    pub(crate) async fn message_too_big(&mut self) -> SessionResult<()> {
-        let msg = format!(
-            "552 5.3.4 Message too big for, we accept up to {} bytes.\r\n",
-            self.cfg.max_message_size
-        );
-        return self.write(msg.as_bytes()).await;
     }
 
     async fn queue_message(&mut self) -> SessionResult<()> {
@@ -356,22 +394,24 @@ impl<S: AsyncReadWrite> Session<S> {
         };
 
         if let Err(e) = self.cfg.delivery_agent.deliver_mail(message).await {
-            let msg = match e {
+            let (code, ext, msg) = match e {
                 DeliveryError::Permanent(v) => {
-                    format!("550 5.5.0 Permanent delivery error: {v}")
+                    ("550", "5.5.0", format!("Permanent delivery error: {v}"))
                 }
                 DeliveryError::Temporary(v) => {
-                    format!("450 4.5.0 Temporary delivery error: {v}")
+                    ("450", "4.5.0", format!("Temporary delivery error: {v}"))
                 }
             };
 
-            self.write(msg.as_bytes()).await?;
+            self.reply(code, ext, &msg).await?;
             self.reset_message();
             return Ok(());
         }
 
-        self.write(
-            format!("250 2.0.0 Message ({message_size} bytes) queued with id {id}\r\n").as_bytes(),
+        self.reply(
+            "250",
+            "2.0.0",
+            &format!("Message ({message_size} bytes) queued with id {id}"),
         )
         .await?;
 
@@ -382,11 +422,15 @@ impl<S: AsyncReadWrite> Session<S> {
 
     async fn can_accept_message(&mut self) -> SessionResult<bool> {
         if self.counters.messages_queued >= self.cfg.max_messages_per_session {
-            self.write(b"452 4.4.5 Maximum number of messages per session exceeded.\r\n")
-                .await?;
+            self.reply(
+                "452",
+                "4.4.5",
+                "Maximum number of messages per session exceeded.",
+            )
+            .await?;
             return Err(SessionError::TooManyMessagesPerSession);
         } else if self.data.rcpt_to.is_empty() {
-            self.write(b"503 5.5.1 RCPT TO is required first.\r\n")
+            self.reply("503", "5.5.1", "RCPT TO is required first.")
                 .await?;
             self.counters.errors += 1;
             return Ok(false);
@@ -396,15 +440,14 @@ impl<S: AsyncReadWrite> Session<S> {
     }
 
     /// Resets the message-related fields to their initial state
-    fn reset_message(&mut self) {
+    pub(crate) fn reset_message(&mut self) {
         self.data.mail_from = None;
         self.data.rcpt_to.clear();
         self.data.message.clear();
     }
 
+    /// Closes the connection
     pub async fn shutdown(&mut self) -> SessionResult<()> {
-        self.write(b"421 4.3.0 Server shutting down.\r\n").await?;
-
         self.stream
             .shutdown()
             .timeout(Duration::from_secs(10))

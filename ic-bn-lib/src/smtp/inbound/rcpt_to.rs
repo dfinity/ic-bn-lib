@@ -18,7 +18,7 @@ impl<S: AsyncReadWrite> Session<S> {
     pub async fn handle_rcpt_to(&mut self, to: RcptTo<Cow<'_, str>>) -> SessionResult<()> {
         if self.data.mail_from.is_none() {
             return self
-                .write(b"503 5.5.1 MAIL FROM is required first.\r\n")
+                .reply("503", "5.5.1", "MAIL FROM is required first.")
                 .await;
         }
 
@@ -32,15 +32,15 @@ impl<S: AsyncReadWrite> Session<S> {
         }
 
         let Ok(address) = EmailAddress::from_str(&to.address) else {
-            return self.write(b"550 5.1.2 Incorrect address.\r\n").await;
+            return self.reply("550", "5.1.2", "Incorrect address.").await;
         };
 
         if self.data.rcpt_to.contains(&address) {
-            return self.write(b"250 2.1.5 OK\r\n").await;
+            return self.reply("250", "2.1.5", "OK").await;
         }
 
         if self.data.rcpt_to.len() >= self.cfg.max_recipients {
-            return self.write(b"455 4.5.3 Too many recipients.\r\n").await;
+            return self.reply("455", "4.5.3", "Too many recipients.").await;
         }
 
         match self
@@ -63,19 +63,21 @@ impl<S: AsyncReadWrite> Session<S> {
 
             Err(e) => match e {
                 RecipientResolveError::UnknownDomain => {
-                    return self.write(b"550 5.1.2 Relay not allowed.\r\n").await;
+                    return self
+                        .reply("550", "5.1.2", "Unknown recipient domain.")
+                        .await;
                 }
                 RecipientResolveError::UnknownRecipient => {
-                    return self.write(b"550 5.1.2 Mailbox does not exist.\r\n").await;
+                    return self.reply("550", "5.1.2", "Mailbox does not exist.").await;
                 }
                 RecipientResolveError::Other(_) => {
                     return self
-                        .write(b"451 4.4.3 Unable to verify address at this time.\r\n")
+                        .reply("451", "4.4.3", "Unable to verify address at this time.")
                         .await;
                 }
             },
         }
 
-        self.write(b"250 2.1.5 OK\r\n").await
+        self.reply("250", "2.1.5", "OK").await
     }
 }

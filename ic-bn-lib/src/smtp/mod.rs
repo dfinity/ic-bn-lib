@@ -32,7 +32,7 @@ pub enum RecipientResolveError {
 }
 
 /// Delivery error
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Clone, Debug)]
 pub enum DeliveryError {
     #[error("{0}")]
     Temporary(String),
@@ -41,7 +41,7 @@ pub enum DeliveryError {
 }
 
 /// Low-level E-Mail representation
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq, Hash)]
 pub struct Message {
     pub id: Uuid,
     pub ehlo_hostname: FQDN,
