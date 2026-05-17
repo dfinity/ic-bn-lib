@@ -51,13 +51,14 @@ impl<S: AsyncReadWrite> Session<S> {
         {
             Ok(v) => match v {
                 RecipientPolicy::Accept => {
-                    self.data.rcpt_to.insert(address);
+                    self.data.rcpt_to.push(address);
                 }
                 RecipientPolicy::Rewrite(new_address) => {
-                    self.data.rcpt_to.insert(new_address);
+                    self.data.rcpt_to.push(new_address);
                 }
-                RecipientPolicy::Expand(new_addresses) => {
-                    self.data.rcpt_to.extend(new_addresses);
+                RecipientPolicy::Expand(additional_addresses) => {
+                    self.data.rcpt_to.push(address);
+                    self.data.rcpt_to.extend(additional_addresses);
                 }
             },
 

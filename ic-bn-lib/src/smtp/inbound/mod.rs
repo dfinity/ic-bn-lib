@@ -12,7 +12,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ahash::AHashSet;
 use bytes::Bytes;
 use fqdn::FQDN;
 use ic_bn_lib_common::types::http::TlsInfo;
@@ -170,7 +169,7 @@ impl Default for SessionState {
 pub struct SessionData {
     pub ehlo_hostname: Option<FQDN>,
     pub mail_from: Option<EmailAddress>,
-    pub rcpt_to: AHashSet<EmailAddress>,
+    pub rcpt_to: Vec<EmailAddress>,
     pub message: Vec<u8>,
 }
 
@@ -229,13 +228,23 @@ impl<S: AsyncReadWrite> Session<S> {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{net::SocketAddr, str::FromStr};
 
     use async_trait::async_trait;
     use fqdn::fqdn;
+    use rustls::{ClientConfig, pki_types::ServerName};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
+    use tokio_rustls::TlsConnector;
     use tokio_util::sync::CancellationToken;
 
-    use crate::smtp::{DeliveryError, Message};
+    use crate::{
+        smtp::{
+            DeliveryError, Message, RecipientPolicy, RecipientResolveError,
+            inbound::manager::SessionManager,
+        },
+        tests::{TEST_CERT_1, TEST_KEY_1},
+        tls::{resolver::StubResolver, verify::NoopServerCertVerifier},
+    };
 
     use super::*;
 
@@ -254,6 +263,32 @@ mod tests {
             }
 
             Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct TestRecipientResolver(
+        EmailAddress,
+        Option<EmailAddress>,
+        Option<Vec<EmailAddress>>,
+    );
+
+    #[async_trait]
+    impl ResolvesRecipient for TestRecipientResolver {
+        async fn resolve_recipient(
+            &self,
+            rcpt: &EmailAddress,
+        ) -> Result<RecipientPolicy, RecipientResolveError> {
+            assert_eq!(rcpt, &self.0);
+            if let Some(v) = &self.1 {
+                return Ok(RecipientPolicy::Rewrite(v.clone()));
+            }
+
+            if let Some(v) = &self.2 {
+                return Ok(RecipientPolicy::Expand(v.clone()));
+            }
+
+            Ok(RecipientPolicy::Accept)
         }
     }
 
@@ -361,45 +396,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_data() {
-        let mut builder = create_basic_stream();
-        stream_send_message(&mut builder);
-
-        let stream = builder
-            .read(b"QUIT\r\n")
-            .write(b"221 2.0.0 Bye.\r\n")
-            .build();
-
-        let agent = TestDeliveryAgent(
-            Some(Message {
-                id: Uuid::nil(),
-                ehlo_hostname: fqdn!("foo.bar"),
-                mail_from: EmailAddress::from_str("foo@bar").unwrap(),
-                rcpt_to: vec![EmailAddress::from_str("dead@beef").unwrap()],
-                body: b"foobarmessage".to_vec(),
-            }),
-            None,
-        );
-
-        let mut cfg = SessionConfig::new("test");
-        cfg.delivery_agent = Arc::new(agent);
-        let mut session = Session::new(IpAddr::from_str("1.1.1.1").unwrap(), stream, Arc::new(cfg));
-
-        assert!(matches!(
-            session.handle(CancellationToken::new()).await.unwrap_err(),
-            SessionError::Quit
-        ));
-    }
-
-    #[tokio::test]
     async fn test_bdat() {
         let stream = create_basic_stream()
             .read(b"MAIL FROM:<foo@bar>\r\n")
             .write(b"250 2.1.0 OK\r\n")
-            .read(b"RCPT TO:<baz@baz>\r\n")
+            .read(b"RCPT TO:<dead@beef>\r\n")
             .write(b"250 2.1.5 OK\r\n")
             .read(b"BDAT 10\r\n")
-            .read(b"0123456789")
+            .read(b"01234")
+            .read(b"56789")
             .write(b"250 2.6.0 Chunk accepted.\r\n")
             .read(b"BDAT 10\r\n")
             .read(b"9876543210")
@@ -415,15 +420,105 @@ mod tests {
             Some(Message {
                 id: Uuid::nil(),
                 ehlo_hostname: fqdn!("foo.bar"),
-                mail_from: EmailAddress::from_str("foo@bar").unwrap(),
-                rcpt_to: vec![EmailAddress::from_str("baz@baz").unwrap()],
+                mail_from: "foo@bar".try_into().unwrap(),
+                rcpt_to: vec!["bar@baz".try_into().unwrap()],
                 body: b"012345678998765432100123456789".to_vec(),
             }),
+            None,
+        );
+        let resolver = TestRecipientResolver(
+            "dead@beef".try_into().unwrap(),
+            Some("bar@baz".try_into().unwrap()),
             None,
         );
 
         let mut cfg = SessionConfig::new("test");
         cfg.delivery_agent = Arc::new(agent);
+        cfg.recipient_resolver = Arc::new(resolver);
+
+        let mut session = Session::new(IpAddr::from_str("1.1.1.1").unwrap(), stream, Arc::new(cfg));
+
+        assert!(matches!(
+            session.handle(CancellationToken::new()).await.unwrap_err(),
+            SessionError::Quit
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_data() {
+        let mut builder = create_basic_stream();
+        stream_send_message(&mut builder);
+
+        let stream = builder
+            .read(b"QUIT\r\n")
+            .write(b"221 2.0.0 Bye.\r\n")
+            .build();
+
+        let agent = TestDeliveryAgent(
+            Some(Message {
+                id: Uuid::nil(),
+                ehlo_hostname: fqdn!("foo.bar"),
+                mail_from: EmailAddress::from_str("foo@bar").unwrap(),
+                rcpt_to: vec![EmailAddress::from_str("bar@baz").unwrap()],
+                body: b"foobarmessage".to_vec(),
+            }),
+            None,
+        );
+        let resolver = TestRecipientResolver(
+            "dead@beef".try_into().unwrap(),
+            Some("bar@baz".try_into().unwrap()),
+            None,
+        );
+
+        let mut cfg = SessionConfig::new("test");
+        cfg.delivery_agent = Arc::new(agent);
+        cfg.recipient_resolver = Arc::new(resolver);
+
+        let mut session = Session::new(IpAddr::from_str("1.1.1.1").unwrap(), stream, Arc::new(cfg));
+
+        assert!(matches!(
+            session.handle(CancellationToken::new()).await.unwrap_err(),
+            SessionError::Quit
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_expand() {
+        let mut builder = create_basic_stream();
+        stream_send_message(&mut builder);
+
+        let stream = builder
+            .read(b"QUIT\r\n")
+            .write(b"221 2.0.0 Bye.\r\n")
+            .build();
+
+        let agent = TestDeliveryAgent(
+            Some(Message {
+                id: Uuid::nil(),
+                ehlo_hostname: fqdn!("foo.bar"),
+                mail_from: EmailAddress::from_str("foo@bar").unwrap(),
+                rcpt_to: vec![
+                    EmailAddress::from_str("dead@beef").unwrap(),
+                    EmailAddress::from_str("dead@dead").unwrap(),
+                    EmailAddress::from_str("bar@bax").unwrap(),
+                ],
+                body: b"foobarmessage".to_vec(),
+            }),
+            None,
+        );
+        let resolver = TestRecipientResolver(
+            "dead@beef".try_into().unwrap(),
+            None,
+            Some(vec![
+                "dead@dead".try_into().unwrap(),
+                "bar@bax".try_into().unwrap(),
+            ]),
+        );
+
+        let mut cfg = SessionConfig::new("test");
+        cfg.delivery_agent = Arc::new(agent);
+        cfg.recipient_resolver = Arc::new(resolver);
+
         let mut session = Session::new(IpAddr::from_str("1.1.1.1").unwrap(), stream, Arc::new(cfg));
 
         assert!(matches!(
@@ -530,5 +625,81 @@ mod tests {
             session.handle(CancellationToken::new()).await.unwrap_err(),
             SessionError::TooManyErrors
         ));
+    }
+
+    #[tokio::test]
+    async fn test_starttls() {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .unwrap();
+
+        let (stream1, mut stream2) = duplex(128);
+        let rustls_server_cfg = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(
+                StubResolver::new(TEST_CERT_1.as_bytes(), TEST_KEY_1.as_bytes()).unwrap(),
+            ));
+
+        let mut cfg = SessionConfig::new("test");
+        cfg.tls_mode = SessionTlsMode::Required(Arc::new(rustls_server_cfg));
+
+        let session_manager = SessionManager::new();
+        tokio::spawn(async move {
+            session_manager
+                .handle_connection(
+                    stream1,
+                    SocketAddr::from_str("1.1.1.1:123").unwrap(),
+                    Arc::new(cfg),
+                    CancellationToken::new(),
+                )
+                .await;
+        });
+
+        let mut buf = vec![0; 256];
+
+        let r = stream2.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..r], b"220 test ESMTP IC SMTP Gateway\r\n");
+
+        // Make sure there's a 250-STARTTLS in EHLO
+        stream2.write_all(b"EHLO foo.bar\r\n").await.unwrap();
+        let r = stream2.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..r], b"250-test you had me at EHLO\r\n250-STARTTLS\r\n250-SMTPUTF8\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250 8BITMIME\r\n");
+
+        // Make sure TLS is required by server
+        stream2.write_all(b"MAIL FROM:<a@b>\r\n").await.unwrap();
+        let r = stream2.read(&mut buf).await.unwrap();
+        assert_eq!(
+            &buf[..r],
+            b"503 5.5.1 TLS is required to submit mail on this server.\r\n"
+        );
+
+        stream2.write_all(b"STARTTLS\r\n").await.unwrap();
+        let r = stream2.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..r], b"220 2.0.0 Ready to start TLS.\r\n");
+
+        let rustls_client_cfg = ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoopServerCertVerifier::default()))
+            .with_no_client_auth();
+        let tls_connector = TlsConnector::from(Arc::new(rustls_client_cfg));
+        let mut tls_stream = tls_connector
+            .connect(ServerName::try_from("foo").unwrap(), stream2)
+            .await
+            .unwrap();
+
+        // Make sure there's NO 250-STARTTLS in EHLO anymore inside TLS session
+        tls_stream.write_all(b"EHLO foo.bar\r\n").await.unwrap();
+        let r = tls_stream.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..r], b"250-test you had me at EHLO\r\n250-SMTPUTF8\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250 8BITMIME\r\n");
+
+        // No TLS-in-TLS allowed
+        tls_stream.write_all(b"STARTTLS\r\n").await.unwrap();
+        let r = tls_stream.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..r], b"504 5.7.4 Already in TLS mode.\r\n");
+
+        // Now MAIL FROM should work
+        tls_stream.write_all(b"MAIL FROM:<a@b>\r\n").await.unwrap();
+        let r = tls_stream.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..r], b"250 2.1.0 OK\r\n");
     }
 }

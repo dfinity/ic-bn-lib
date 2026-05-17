@@ -30,6 +30,16 @@ impl<S: AsyncReadWrite> Session<S> {
                 .await;
         }
 
+        if self.cfg.tls_required() && self.tls_info.is_none() {
+            return self
+                .reply(
+                    "503",
+                    "5.5.1",
+                    "TLS is required to submit mail on this server.",
+                )
+                .await;
+        }
+
         if (from.flags & (MAIL_BY_NOTIFY | MAIL_BY_RETURN)) != 0 {
             return self.ext_unsupported("DELIVERBY").await;
         }

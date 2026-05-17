@@ -13,6 +13,7 @@ use tokio::{
     select,
 };
 use tokio_util::{sync::CancellationToken, time::FutureExt};
+use tracing::debug;
 use uuid::Uuid;
 
 use crate::{
@@ -29,6 +30,7 @@ const MAX_REPLY_LEN: usize = 256;
 impl<S: AsyncReadWrite> Session<S> {
     /// Writes given bytes to the session & flushes the buffer
     pub async fn write(&mut self, bytes: &[u8]) -> SessionResult<()> {
+        debug!("{self}: Writing: {}", String::from_utf8_lossy(bytes));
         self.stream.write_all(bytes).await?;
         self.stream.flush().await?;
         Ok(())
@@ -175,6 +177,8 @@ impl<S: AsyncReadWrite> Session<S> {
     }
 
     async fn ingest(&mut self, bytes: &[u8]) -> SessionResult<SessionUpgrade> {
+        debug!("{self}: Read: {}", String::from_utf8_lossy(bytes));
+
         // Check if we are over session transfer quota
         if self.counters.bytes_ingested + bytes.len() >= self.cfg.max_session_data {
             self.reply("452", "4.7.28", "Session transfer quota exceeded.")
@@ -256,6 +260,7 @@ impl<S: AsyncReadWrite> Session<S> {
                                     self.counters.errors += 1;
                                 } else {
                                     self.reply("220", "2.0.0", "Ready to start TLS.").await?;
+                                    self.state = state;
                                     return Ok(SessionUpgrade::StartTls);
                                 }
                             }
@@ -354,7 +359,10 @@ impl<S: AsyncReadWrite> Session<S> {
                 res = self.stream.read(&mut buf).timeout(self.cfg.timeout) => {
                     match res {
                         Ok(Ok(bytes_read)) => {
-                            self.ingest(&buf[..bytes_read]).await?;
+                            let upgrade = self.ingest(&buf[..bytes_read]).await?;
+                            if matches!(upgrade, SessionUpgrade::StartTls) {
+                                return Ok(upgrade);
+                            }
                         }
                         Ok(Err(e)) => {
                             return Err(e.into());
@@ -389,7 +397,7 @@ impl<S: AsyncReadWrite> Session<S> {
             id,
             ehlo_hostname: self.data.ehlo_hostname.clone().unwrap(),
             mail_from: self.data.mail_from.take().unwrap(),
-            rcpt_to: self.data.rcpt_to.drain().collect(),
+            rcpt_to: self.data.rcpt_to.drain(..).collect(),
             body: std::mem::take(&mut self.data.message),
         };
 

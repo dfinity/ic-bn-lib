@@ -3,7 +3,7 @@ use std::{fmt::Display, str::FromStr};
 use derive_new::new;
 use fqdn::FQDN;
 
-#[derive(thiserror::Error, Debug, PartialEq, Eq)]
+#[derive(thiserror::Error, Clone, Debug, PartialEq, Eq)]
 pub enum EmailAddressError {
     #[error("@ is missing")]
     AtMissing,
@@ -16,7 +16,7 @@ pub enum EmailAddressError {
 /// Currently we don't validate the local part at all
 /// and just consider everything to the right from the
 /// rightmost @ as a domain part.
-#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Hash, new)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, new)]
 pub struct EmailAddress {
     pub local: String,
     pub domain: FQDN,
@@ -44,6 +44,14 @@ impl FromStr for EmailAddress {
             local: local.into(),
             domain,
         })
+    }
+}
+
+impl TryFrom<&str> for EmailAddress {
+    type Error = EmailAddressError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::from_str(value)
     }
 }
 
