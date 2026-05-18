@@ -82,7 +82,9 @@ impl<S: AsyncReadWrite> Session<S> {
         // It's better to panic otherwise.
         let tls_config = match &self.cfg.tls_mode {
             SessionTlsMode::Allowed(v) | SessionTlsMode::Required(v) => v.clone(),
-            SessionTlsMode::Disabled => unreachable!(),
+            SessionTlsMode::Disabled => {
+                unreachable!("Session::into_tls() called with TLS disabled")
+            }
         };
 
         let (stream, tls_info) = tls_handshake(tls_config, self.stream).await?;
