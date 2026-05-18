@@ -11,7 +11,7 @@ use tracing::{info, warn};
 
 use crate::{
     network::listener::listen_tcp,
-    smtp::inbound::{SessionConfig, SessionError, SessionResult, manager::SessionManager},
+    smtp::inbound::{SessionConfig, manager::SessionManager},
 };
 
 /// Listens for new SMTP connections and creates sessions

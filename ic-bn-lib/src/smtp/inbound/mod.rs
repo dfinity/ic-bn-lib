@@ -68,6 +68,7 @@ pub enum SessionUpgrade {
 pub type SessionResult<T> = Result<T, SessionError>;
 
 /// Session TLS mode
+#[derive(Clone, Debug)]
 pub enum SessionTlsMode {
     Disabled,
     Allowed(Arc<ServerConfig>),
@@ -85,6 +86,7 @@ impl SessionTlsMode {
 }
 
 /// SMTP session config
+#[derive(Clone)]
 pub struct SessionConfig {
     hostname: String,
     greeting: Bytes,
@@ -315,7 +317,7 @@ mod tests {
             .read(b"HELO foo.bar\r\n")
             .write(b"250 test you had me at HELO\r\n")
             .read(b"EHLO foo.bar\r\n")
-            .write(b"250-test you had me at EHLO\r\n250-SMTPUTF8\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250 8BITMIME\r\n");
+            .write(b"250-test you had me at EHLO\r\n250-SMTPUTF8\r\n250-SIZE 512\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250 8BITMIME\r\n");
 
         builder
     }
@@ -439,6 +441,7 @@ mod tests {
         );
 
         let mut cfg = SessionConfig::new("test");
+        cfg.max_message_size = 512;
         cfg.delivery_agent = Arc::new(agent);
         cfg.recipient_resolver = Arc::new(resolver);
 
@@ -477,6 +480,7 @@ mod tests {
         );
 
         let mut cfg = SessionConfig::new("test");
+        cfg.max_message_size = 512;
         cfg.delivery_agent = Arc::new(agent);
         cfg.recipient_resolver = Arc::new(resolver);
 
@@ -522,6 +526,7 @@ mod tests {
         );
 
         let mut cfg = SessionConfig::new("test");
+        cfg.max_message_size = 512;
         cfg.delivery_agent = Arc::new(agent);
         cfg.recipient_resolver = Arc::new(resolver);
 
@@ -687,6 +692,7 @@ mod tests {
 
         let mut cfg = SessionConfig::new("test");
         cfg.tls_mode = SessionTlsMode::Required(Arc::new(rustls_server_cfg));
+        cfg.max_message_size = 512;
 
         tokio::spawn(async move {
             SessionManager::handle_connection(
@@ -703,10 +709,10 @@ mod tests {
         let r = stream2.read(&mut buf).await.unwrap();
         assert_eq!(&buf[..r], b"220 test ESMTP IC SMTP Gateway\r\n");
 
-        // Make sure there's a 250-STARTTLS in EHLO
+        // Make sure there are 250-STARTTLS and 250-REQUIRETLS in EHLO
         stream2.write_all(b"EHLO foo.bar\r\n").await.unwrap();
         let r = stream2.read(&mut buf).await.unwrap();
-        assert_eq!(&buf[..r], b"250-test you had me at EHLO\r\n250-STARTTLS\r\n250-SMTPUTF8\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250 8BITMIME\r\n");
+        assert_eq!(&buf[..r], b"250-test you had me at EHLO\r\n250-STARTTLS\r\n250-SMTPUTF8\r\n250-SIZE 512\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250 8BITMIME\r\n");
 
         // Make sure TLS is required by the server due to SessionTlsMode::Required
         stream2.write_all(b"MAIL FROM:<a@b>\r\n").await.unwrap();
@@ -731,10 +737,10 @@ mod tests {
             .await
             .unwrap();
 
-        // Make sure there's no 250-STARTTLS in EHLO anymore inside TLS session
+        // Make sure there's no 250-STARTTLS and 250-REQUIRETLS in EHLO anymore inside TLS session
         tls_stream.write_all(b"EHLO foo.bar\r\n").await.unwrap();
         let r = tls_stream.read(&mut buf).await.unwrap();
-        assert_eq!(&buf[..r], b"250-test you had me at EHLO\r\n250-SMTPUTF8\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250 8BITMIME\r\n");
+        assert_eq!(&buf[..r], b"250-test you had me at EHLO\r\n250-SMTPUTF8\r\n250-SIZE 512\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250 8BITMIME\r\n");
 
         // No TLS-in-TLS allowed
         tls_stream.write_all(b"STARTTLS\r\n").await.unwrap();

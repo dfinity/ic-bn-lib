@@ -285,7 +285,7 @@ impl<S: AsyncReadWrite> Session<S> {
                 }
                 SessionState::Data(rx) => {
                     // Check if the message already exceeds allowed size
-                    if self.data.message.len() + bytes.len() > self.cfg.max_message_size {
+                    if self.data.message.len() + iter.len() > self.cfg.max_message_size {
                         state = SessionState::DataTooLarge(DummyDataReceiver::new_data(rx));
                         continue;
                     } else if rx.ingest(&mut iter, &mut self.data.message) {
