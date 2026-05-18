@@ -317,7 +317,7 @@ mod tests {
             .read(b"HELO foo.bar\r\n")
             .write(b"250 test you had me at HELO\r\n")
             .read(b"EHLO foo.bar\r\n")
-            .write(b"250-test you had me at EHLO\r\n250-SMTPUTF8\r\n250-SIZE 512\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250 8BITMIME\r\n");
+            .write(b"250-test you had me at EHLO\r\n250-SMTPUTF8\r\n250-SIZE 512\r\n250-PIPELINING\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250 8BITMIME\r\n");
 
         builder
     }
@@ -339,6 +339,26 @@ mod tests {
             .write(b"220 test ESMTP IC SMTP Gateway\r\n")
             .read(b"MAIL FROM:<a@b>\r\n")
             .write(b"503 5.5.1 Polite people say EHLO first.\r\n")
+            .read(b"QUIT\r\n")
+            .write(b"221 2.0.0 Bye.\r\n")
+            .build();
+
+        let mut session = create_session(stream, None);
+
+        assert!(matches!(
+            session.handle(CancellationToken::new()).await.unwrap_err(),
+            SessionError::Quit
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_pipelining() {
+        let mut builder = create_basic_stream();
+        let stream = builder
+            .read(b"MAIL FROM:<a@a>\r\nRCPT TO:<a@b>\r\nDATA\r\n")
+            .write(b"250 2.1.0 OK\r\n250 2.1.5 OK\r\n354 Start mail input; end with <CRLF>.<CRLF>\r\n")
+            .read(b"foobarmessage\r\n.\r\n")
+            .write(b"250 2.0.0 Message (13 bytes) queued with id 00000000-0000-0000-0000-000000000000\r\n")
             .read(b"QUIT\r\n")
             .write(b"221 2.0.0 Bye.\r\n")
             .build();
@@ -682,7 +702,7 @@ mod tests {
             .ok();
 
         // Use an in-memory pipe
-        let (stream1, mut stream2) = duplex(128);
+        let (stream1, mut stream2) = duplex(8192);
 
         let rustls_server_cfg = ServerConfig::builder()
             .with_no_client_auth()
@@ -704,7 +724,7 @@ mod tests {
             .await;
         });
 
-        let mut buf = vec![0; 256];
+        let mut buf = vec![0; 8192];
 
         let r = stream2.read(&mut buf).await.unwrap();
         assert_eq!(&buf[..r], b"220 test ESMTP IC SMTP Gateway\r\n");
@@ -712,7 +732,7 @@ mod tests {
         // Make sure there are 250-STARTTLS and 250-REQUIRETLS in EHLO
         stream2.write_all(b"EHLO foo.bar\r\n").await.unwrap();
         let r = stream2.read(&mut buf).await.unwrap();
-        assert_eq!(&buf[..r], b"250-test you had me at EHLO\r\n250-STARTTLS\r\n250-SMTPUTF8\r\n250-SIZE 512\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250 8BITMIME\r\n");
+        assert_eq!(&buf[..r], b"250-test you had me at EHLO\r\n250-STARTTLS\r\n250-SMTPUTF8\r\n250-SIZE 512\r\n250-PIPELINING\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250 8BITMIME\r\n");
 
         // Make sure TLS is required by the server due to SessionTlsMode::Required
         stream2.write_all(b"MAIL FROM:<a@b>\r\n").await.unwrap();
@@ -740,7 +760,7 @@ mod tests {
         // Make sure there's no 250-STARTTLS and 250-REQUIRETLS in EHLO anymore inside TLS session
         tls_stream.write_all(b"EHLO foo.bar\r\n").await.unwrap();
         let r = tls_stream.read(&mut buf).await.unwrap();
-        assert_eq!(&buf[..r], b"250-test you had me at EHLO\r\n250-SMTPUTF8\r\n250-SIZE 512\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250 8BITMIME\r\n");
+        assert_eq!(&buf[..r], b"250-test you had me at EHLO\r\n250-SMTPUTF8\r\n250-SIZE 512\r\n250-PIPELINING\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250 8BITMIME\r\n");
 
         // No TLS-in-TLS allowed
         tls_stream.write_all(b"STARTTLS\r\n").await.unwrap();

@@ -3,8 +3,8 @@ use std::str::FromStr;
 use fqdn::FQDN;
 use mail_auth::hickory_resolver::proto::ProtoErrorKind;
 use smtp_proto::{
-    EXT_8BIT_MIME, EXT_CHUNKING, EXT_ENHANCED_STATUS_CODES, EXT_SIZE, EXT_SMTP_UTF8, EXT_START_TLS,
-    EhloResponse,
+    EXT_8BIT_MIME, EXT_CHUNKING, EXT_ENHANCED_STATUS_CODES, EXT_PIPELINING, EXT_SIZE,
+    EXT_SMTP_UTF8, EXT_START_TLS, EhloResponse,
 };
 
 use crate::{
@@ -73,8 +73,12 @@ impl<S: AsyncReadWrite> Session<S> {
         }
 
         let mut response = EhloResponse::new(self.cfg.hostname.as_str());
-        response.capabilities =
-            EXT_ENHANCED_STATUS_CODES | EXT_8BIT_MIME | EXT_SMTP_UTF8 | EXT_CHUNKING | EXT_SIZE;
+        response.capabilities = EXT_ENHANCED_STATUS_CODES
+            | EXT_8BIT_MIME
+            | EXT_SMTP_UTF8
+            | EXT_CHUNKING
+            | EXT_SIZE
+            | EXT_PIPELINING;
         response.size = self.cfg.max_message_size;
 
         // Send STARTTLS cap only if we support TLS & we're not already in TLS mode
