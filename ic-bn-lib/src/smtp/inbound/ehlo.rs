@@ -20,7 +20,8 @@ impl<S: AsyncReadWrite> Session<S> {
             return self.reply("550", "5.5.0", "Invalid EHLO hostname.").await;
         };
 
-        // If EHLO hostname is already set to the same value - just reply directly
+        // If EHLO hostname is already set to the same value - just reply directly,
+        // avoid redundant checks
         if let Some(v) = &self.data.ehlo_hostname
             && v == &ehlo_hostname
         {
@@ -77,7 +78,7 @@ impl<S: AsyncReadWrite> Session<S> {
         response.size = self.cfg.max_message_size;
 
         // Send STARTTLS cap only if we support TLS & we're not already in TLS mode
-        if self.tls_info.is_none() && self.cfg.tls_enabled() {
+        if self.tls_info.is_none() && self.cfg.tls_mode.enabled() {
             response.capabilities |= EXT_START_TLS;
         }
 

@@ -74,6 +74,16 @@ pub enum SessionTlsMode {
     Required(Arc<ServerConfig>),
 }
 
+impl SessionTlsMode {
+    pub const fn enabled(&self) -> bool {
+        matches!(self, Self::Allowed(_) | Self::Required(_))
+    }
+
+    pub const fn required(&self) -> bool {
+        matches!(self, Self::Required(_))
+    }
+}
+
 /// SMTP session config
 pub struct SessionConfig {
     hostname: String,
@@ -125,17 +135,6 @@ impl SessionConfig {
             recipient_resolver: Arc::new(DummyRecipientResolver),
             delivery_agent: Arc::new(DummyDeliveryAgent),
         }
-    }
-
-    pub const fn tls_enabled(&self) -> bool {
-        matches!(
-            self.tls_mode,
-            SessionTlsMode::Allowed(_) | SessionTlsMode::Required(_)
-        )
-    }
-
-    pub const fn tls_required(&self) -> bool {
-        matches!(self.tls_mode, SessionTlsMode::Required(_))
     }
 }
 
@@ -207,7 +206,12 @@ pub struct Session<S: AsyncReadWrite> {
 
 impl<S: AsyncReadWrite> Display for Session<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SMTP/Session({})", self.remote_ip)
+        write!(
+            f,
+            "SMTP/Session({}){}",
+            self.remote_ip,
+            if self.tls_info.is_some() { "/TLS" } else { "" }
+        )
     }
 }
 
@@ -298,7 +302,7 @@ mod tests {
         cfg.max_message_size = 512;
         cfg.helo_delay = helo_delay;
         cfg.max_messages_per_session = 3;
-        cfg.max_session_data = 1024;
+        cfg.max_session_data = 8192;
         cfg.max_recipients = 3;
 
         Session::new(IpAddr::from_str("1.1.1.1").unwrap(), stream, Arc::new(cfg))
@@ -407,7 +411,9 @@ mod tests {
             .read(b"56789")
             .write(b"250 2.6.0 Chunk accepted.\r\n")
             .read(b"BDAT 10\r\n")
-            .read(b"9876543210")
+            .read(b"987")
+            .read(b"654")
+            .read(b"3210")
             .write(b"250 2.6.0 Chunk accepted.\r\n")
             .read(b"BDAT 10 LAST\r\n")
             .read(b"0123456789")
@@ -616,6 +622,8 @@ mod tests {
             .read(b"FOO\r\n")
             .write(b"500 5.5.1 Invalid command.\r\n")
             .read(b"FOO\r\n")
+            .write(b"500 5.5.1 Invalid command.\r\n")
+            .read(b"FOO\r\n")
             .write(b"452 4.3.2 Too many errors.\r\n")
             .build();
 
@@ -628,12 +636,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_request_too_large() {
+        let stream = tokio_test::io::Builder::new()
+            .write(b"220 test ESMTP IC SMTP Gateway\r\n")
+            .read(format!("EHLO {}", "1".repeat(2048)).as_bytes())
+            .read(format!("{}\r\n", "1".repeat(2048)).as_bytes())
+            .write(b"554 5.3.4 Line is too long.\r\n")
+            .read(b"QUIT\r\n")
+            .write(b"221 2.0.0 Bye.\r\n")
+            .build();
+
+        let mut session = create_session(stream, None);
+
+        assert!(matches!(
+            session.handle(CancellationToken::new()).await.unwrap_err(),
+            SessionError::Quit
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_max_session_transfer_quota() {
+        let stream = tokio_test::io::Builder::new()
+            .write(b"220 test ESMTP IC SMTP Gateway\r\n")
+            .read(format!("EHLO {}\r\n", "1".repeat(8192)).as_bytes())
+            .write(b"452 4.7.28 Session transfer quota exceeded.\r\n")
+            .build();
+
+        let mut session = create_session(stream, None);
+
+        assert!(matches!(
+            session.handle(CancellationToken::new()).await.unwrap_err(),
+            SessionError::TransferQuotaExceeded(_)
+        ));
+    }
+
+    #[tokio::test]
     async fn test_starttls() {
         rustls::crypto::ring::default_provider()
             .install_default()
-            .unwrap();
+            .ok();
 
+        // Use an in-memory pipe
         let (stream1, mut stream2) = duplex(128);
+
         let rustls_server_cfg = ServerConfig::builder()
             .with_no_client_auth()
             .with_cert_resolver(Arc::new(
@@ -643,16 +688,14 @@ mod tests {
         let mut cfg = SessionConfig::new("test");
         cfg.tls_mode = SessionTlsMode::Required(Arc::new(rustls_server_cfg));
 
-        let session_manager = SessionManager::new();
         tokio::spawn(async move {
-            session_manager
-                .handle_connection(
-                    stream1,
-                    SocketAddr::from_str("1.1.1.1:123").unwrap(),
-                    Arc::new(cfg),
-                    CancellationToken::new(),
-                )
-                .await;
+            SessionManager::handle_connection(
+                stream1,
+                SocketAddr::from_str("1.1.1.1:123").unwrap(),
+                Arc::new(cfg),
+                CancellationToken::new(),
+            )
+            .await;
         });
 
         let mut buf = vec![0; 256];
@@ -665,7 +708,7 @@ mod tests {
         let r = stream2.read(&mut buf).await.unwrap();
         assert_eq!(&buf[..r], b"250-test you had me at EHLO\r\n250-STARTTLS\r\n250-SMTPUTF8\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250 8BITMIME\r\n");
 
-        // Make sure TLS is required by server
+        // Make sure TLS is required by the server due to SessionTlsMode::Required
         stream2.write_all(b"MAIL FROM:<a@b>\r\n").await.unwrap();
         let r = stream2.read(&mut buf).await.unwrap();
         assert_eq!(
@@ -673,6 +716,7 @@ mod tests {
             b"503 5.5.1 TLS is required to submit mail on this server.\r\n"
         );
 
+        // Fire up TLS handshake
         stream2.write_all(b"STARTTLS\r\n").await.unwrap();
         let r = stream2.read(&mut buf).await.unwrap();
         assert_eq!(&buf[..r], b"220 2.0.0 Ready to start TLS.\r\n");
@@ -687,7 +731,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Make sure there's NO 250-STARTTLS in EHLO anymore inside TLS session
+        // Make sure there's no 250-STARTTLS in EHLO anymore inside TLS session
         tls_stream.write_all(b"EHLO foo.bar\r\n").await.unwrap();
         let r = tls_stream.read(&mut buf).await.unwrap();
         assert_eq!(&buf[..r], b"250-test you had me at EHLO\r\n250-SMTPUTF8\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250 8BITMIME\r\n");
@@ -701,5 +745,10 @@ mod tests {
         tls_stream.write_all(b"MAIL FROM:<a@b>\r\n").await.unwrap();
         let r = tls_stream.read(&mut buf).await.unwrap();
         assert_eq!(&buf[..r], b"250 2.1.0 OK\r\n");
+
+        // All good
+        tls_stream.write_all(b"QUIT\r\n").await.unwrap();
+        let r = tls_stream.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..r], b"221 2.0.0 Bye.\r\n");
     }
 }

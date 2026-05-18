@@ -29,15 +29,14 @@ impl Display for Server {
 }
 
 impl Server {
-    pub fn new(listen_addr: SocketAddr, cfg: SessionConfig) -> Result<Self, SessionError> {
+    /// Creates a new `Server` to listen on `listen_addr`
+    pub fn new(listen_addr: SocketAddr, cfg: SessionConfig) -> io::Result<Self> {
         let listener = listen_tcp(listen_addr, ListenerOpts::default())?;
         Self::new_with_listener(listener, cfg)
     }
 
-    pub fn new_with_listener(
-        listener: TcpListener,
-        params: SessionConfig,
-    ) -> Result<Self, SessionError> {
+    /// Creates a new `Server` from a pre-built `TcpListener`
+    pub fn new_with_listener(listener: TcpListener, params: SessionConfig) -> io::Result<Self> {
         Ok(Self {
             listen_addr: listener.local_addr()?,
             listener,
@@ -46,7 +45,7 @@ impl Server {
         })
     }
 
-    async fn handle_accept(
+    async fn handle_connection(
         &self,
         res: io::Result<(TcpStream, SocketAddr)>,
         token: &CancellationToken,
@@ -55,11 +54,9 @@ impl Server {
             Ok((stream, addr)) => {
                 info!("{self}: New connection from {addr}");
 
-                let (manager, params, token) =
-                    (SessionManager, self.params.clone(), token.child_token());
-
+                let (params, token) = (self.params.clone(), token.child_token());
                 self.tracker.spawn(async move {
-                    manager.handle_connection(stream, addr, params, token).await;
+                    SessionManager::handle_connection(stream, addr, params, token).await;
                 });
             }
 
@@ -70,18 +67,22 @@ impl Server {
         }
     }
 
-    pub async fn serve(&self, token: CancellationToken) -> SessionResult<()> {
+    /// Main connection handling loop
+    pub async fn serve(&self, token: CancellationToken) -> io::Result<()> {
         loop {
             select! {
                 res = self.listener.accept() => {
-                    self.handle_accept(res, &token).await;
+                    self.handle_connection(res, &token).await;
                 }
 
                 () = token.cancelled() => {
+                    warn!("{self}: Server shutting down, closing connections");
+
                     self.tracker.close();
-                    if self.tracker.wait().timeout(Duration::from_secs(60)).await.is_err() {
+                    if self.tracker.wait().timeout(Duration::from_secs(30)).await.is_err() {
                         warn!("{self}: Timed out waiting for connections to close");
                     }
+
                     break;
                 }
             }

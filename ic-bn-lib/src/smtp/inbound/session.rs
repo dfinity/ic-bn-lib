@@ -176,11 +176,12 @@ impl<S: AsyncReadWrite> Session<S> {
         Ok(())
     }
 
+    /// Main SMTP state machine
     async fn ingest(&mut self, bytes: &[u8]) -> SessionResult<SessionUpgrade> {
         debug!("{self}: Read: {}", String::from_utf8_lossy(bytes));
 
         // Check if we are over session transfer quota
-        if self.counters.bytes_ingested + bytes.len() >= self.cfg.max_session_data {
+        if self.counters.bytes_ingested + bytes.len() > self.cfg.max_session_data {
             self.reply("452", "4.7.28", "Session transfer quota exceeded.")
                 .await?;
             return Err(SessionError::TransferQuotaExceeded(
@@ -198,7 +199,7 @@ impl<S: AsyncReadWrite> Session<S> {
         }
 
         // Check if we are over error limit
-        if self.counters.errors >= self.cfg.max_errors {
+        if self.counters.errors > self.cfg.max_errors {
             self.reply("452", "4.3.2", "Too many errors.").await?;
             return Err(SessionError::TooManyErrors);
         }
@@ -241,7 +242,7 @@ impl<S: AsyncReadWrite> Session<S> {
                                         chunk_size,
                                     ))
                                 } else {
-                                    // Allocate the needed capacity for the chunk
+                                    // Preallocate the needed capacity for the chunk if need be
                                     let free =
                                         self.data.message.capacity() - self.data.message.len();
                                     if free < chunk_size {
@@ -255,7 +256,7 @@ impl<S: AsyncReadWrite> Session<S> {
                                 if self.tls_info.is_some() {
                                     self.reply("504", "5.7.4", "Already in TLS mode.").await?;
                                     self.counters.errors += 1;
-                                } else if !self.cfg.tls_enabled() {
+                                } else if !self.cfg.tls_mode.enabled() {
                                     self.reply("502", "5.7.0", "TLS not available.").await?;
                                     self.counters.errors += 1;
                                 } else {
@@ -268,13 +269,15 @@ impl<S: AsyncReadWrite> Session<S> {
                                 self.handle_request(other_request).await?;
                             }
                         },
-                        // In case of NeedsMoreData error we just leave
-                        // and wait for new data to be ingested
-                        Err(SmtpError::NeedsMoreData { .. }) => break,
                         Err(SmtpError::ResponseTooLong) => {
                             state = SessionState::RequestTooLarge(DummyLineReceiver::default());
                             continue;
                         }
+                        // In case of NeedsMoreData error we just leave
+                        // and wait for new data to be ingested
+                        Err(SmtpError::NeedsMoreData { .. }) => break,
+
+                        // Handle other errors separately
                         Err(e) => {
                             self.handle_error(e).await?;
                         }
@@ -397,7 +400,7 @@ impl<S: AsyncReadWrite> Session<S> {
             id,
             ehlo_hostname: self.data.ehlo_hostname.clone().unwrap(),
             mail_from: self.data.mail_from.take().unwrap(),
-            rcpt_to: self.data.rcpt_to.drain(..).collect(),
+            rcpt_to: std::mem::take(&mut self.data.rcpt_to),
             body: std::mem::take(&mut self.data.message),
         };
 

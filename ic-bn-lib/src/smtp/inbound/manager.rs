@@ -1,6 +1,5 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use derive_new::new;
 use tokio::io::AsyncWriteExt;
 use tokio_rustls::server::TlsStream;
 use tokio_util::sync::CancellationToken;
@@ -9,20 +8,19 @@ use tracing::{debug, info};
 use crate::{
     network::{AsyncReadWrite, tls_handshake},
     smtp::inbound::{
-        Session, SessionConfig, SessionData, SessionResult, SessionTlsMode, SessionUpgrade,
+        Session, SessionConfig, SessionData, SessionError, SessionResult, SessionTlsMode,
+        SessionUpgrade,
     },
 };
 
 /// Manages the lifetime of a single SMTP session.
 ///
-/// Needed because the SMTP session can transition into TLS state
+/// It's needed because the SMTP session can transition into TLS state
 /// which requires external orchestration.
-#[derive(new)]
 pub struct SessionManager;
 
 impl SessionManager {
     pub async fn handle_connection<S: AsyncReadWrite>(
-        &self,
         stream: S,
         remote_addr: SocketAddr,
         params: Arc<SessionConfig>,
@@ -37,28 +35,43 @@ impl SessionManager {
                 }
 
                 SessionUpgrade::StartTls => {
-                    let log_name = session.to_string();
-                    match session.into_tls().await {
-                        Ok(mut session) => {
-                            if let Err(e) = session.handle(shutdown_token.child_token()).await {
-                                info!("{session}: error: {e:#}");
-                                session.stream.shutdown().await.ok();
-                            }
-                        }
-                        Err(e) => {
-                            info!("{log_name}: TLS handshake failed: {e:#}");
-                        }
-                    };
+                    Self::starttls(session, shutdown_token.child_token()).await
                 }
             },
 
             Err(e) => {
-                info!("{session}: error: {e:#}, closing connection");
+                if !matches!(e, SessionError::Quit) {
+                    info!("{session}: error: {e:#}");
+                }
+
                 if let Err(e) = session.shutdown().await {
                     debug!("{session}: error closing connection: {e:#}");
                 };
             }
         }
+    }
+
+    /// Converts session into TLS mode
+    async fn starttls<S: AsyncReadWrite>(session: Session<S>, shutdown_token: CancellationToken) {
+        let session_name = session.to_string();
+
+        match session.into_tls().await {
+            Ok(mut session) => {
+                if let Err(e) = session.handle(shutdown_token.child_token()).await {
+                    if !matches!(e, SessionError::Quit) {
+                        info!("{session}: error: {e:#}");
+                    }
+
+                    if let Err(e) = session.shutdown().await {
+                        debug!("{session}: error closing connection: {e:#}");
+                    };
+                }
+            }
+
+            Err(e) => {
+                info!("{session_name}: TLS handshake failed: {e:#}");
+            }
+        };
     }
 }
 

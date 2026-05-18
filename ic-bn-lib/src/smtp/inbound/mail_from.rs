@@ -30,7 +30,7 @@ impl<S: AsyncReadWrite> Session<S> {
                 .await;
         }
 
-        if self.cfg.tls_required() && self.tls_info.is_none() {
+        if self.cfg.tls_mode.required() && self.tls_info.is_none() {
             return self
                 .reply(
                     "503",
