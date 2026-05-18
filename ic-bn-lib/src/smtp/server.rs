@@ -55,9 +55,9 @@ impl Server {
                 info!("{self}: New connection from {addr}");
 
                 let (params, token) = (self.params.clone(), token.child_token());
-                self.tracker.spawn(async move {
-                    SessionManager::handle_connection(stream, addr, params, token).await;
-                });
+                self.tracker.spawn(SessionManager::handle_connection(
+                    stream, addr, params, token,
+                ));
             }
 
             Err(e) => {

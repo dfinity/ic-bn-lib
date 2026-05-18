@@ -1,5 +1,6 @@
 use std::{
     borrow::Cow,
+    io::Write,
     time::{Duration, Instant},
 };
 
@@ -48,21 +49,8 @@ impl<S: AsyncReadWrite> Session<S> {
             "Reply longer than supported - increase MAX_REPLY_LEN"
         );
 
-        // Poor man's `format!`
         let mut buf = [0; MAX_REPLY_LEN];
-        let (mut i, mut j) = (0, code.len());
-        buf[i..j].copy_from_slice(code.as_bytes());
-        buf[j] = b' ';
-        i += code.len() + 1;
-        j += ext.len() + 1;
-        buf[i..j].copy_from_slice(ext.as_bytes());
-        buf[j] = b' ';
-        i += ext.len() + 1;
-        j += msg.len() + 1;
-        buf[i..j].copy_from_slice(msg.as_bytes());
-        buf[j] = b'\r';
-        buf[j + 1] = b'\n';
-
+        write!(&mut buf[..], "{code} {ext} {msg}\r\n")?;
         self.write(&buf[..len]).await
     }
 
@@ -90,7 +78,7 @@ impl<S: AsyncReadWrite> Session<S> {
         // If something comes in - then the client isn't respecting the protocol,
         // we consider him malicious and drop the connection.
         if let Some(v) = self.cfg.helo_delay {
-            let mut buf = vec![0; 128];
+            let mut buf = [0; 256];
             match self.stream.read(&mut buf).timeout(v).await {
                 Ok(Ok(bytes_read)) => {
                     if bytes_read > 0 {
