@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use candid::Principal;
 use derive_new::new;
-use fqdn::FQDN;
+use fqdn::{FQDN, Fqdn};
 use http::header::AUTHORIZATION;
 use ic_bn_lib_common::{
     traits::{custom_domains::ProvidesCustomDomains, http::Client},
@@ -27,6 +27,11 @@ use serde::Deserialize;
 use tracing::{info, warn};
 
 use crate::http::client::basic_auth;
+
+/// Looks up a custom domain by a hostname
+pub trait LooksupCustomDomain: Sync + Send + std::fmt::Debug {
+    fn lookup_custom_domain(&self, hostname: &Fqdn) -> Option<CustomDomain>;
+}
 
 /// Gets the body of the given URL
 async fn get_url_body(cli: &Arc<dyn Client>, url: &Url, timeout: Duration) -> Result<Bytes, Error> {
