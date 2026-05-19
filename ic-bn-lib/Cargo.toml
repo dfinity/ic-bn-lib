@@ -144,6 +144,7 @@ zstd = "0.13.2"
 
 [dev-dependencies]
 criterion = { version = "0.6", features = ["html_reports", "async_tokio"] }
+mail-send = { workspace = true }
 mockall = { workspace = true }
 mock-io = { version = "0.3.2", features = ["full"] }
 # Do not upgrade unless you want to upgrade `rand` too

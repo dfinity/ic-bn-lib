@@ -234,19 +234,23 @@ impl<S: AsyncReadWrite> Session<S> {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::SocketAddr, str::FromStr};
+    use std::{net::SocketAddr, str::FromStr, sync::Mutex};
 
     use async_trait::async_trait;
     use fqdn::fqdn;
+    use ic_bn_lib_common::types::http::ListenerOpts;
+    use mail_parser::{Addr, Address, MessageParser};
+    use mail_send::{SmtpClientBuilder, mail_builder::MessageBuilder};
     use rustls::{ClientConfig, pki_types::ServerName};
     use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
     use tokio_rustls::TlsConnector;
     use tokio_util::sync::CancellationToken;
 
     use crate::{
+        network::listener::listen_tcp,
         smtp::{
             DeliveryError, Message, RecipientPolicy, RecipientResolveError,
-            inbound::manager::SessionManager,
+            inbound::manager::SessionManager, server::Server,
         },
         tests::{TEST_CERT_1, TEST_KEY_1},
         tls::{resolver::StubResolver, verify::NoopServerCertVerifier},
@@ -254,8 +258,8 @@ mod tests {
 
     use super::*;
 
-    #[derive(Debug)]
-    pub struct TestDeliveryAgent(Option<Message>, Option<DeliveryError>);
+    #[derive(Debug, Default)]
+    pub struct TestDeliveryAgent(Mutex<Option<Message>>, Option<DeliveryError>);
 
     #[async_trait]
     impl DeliversMail for TestDeliveryAgent {
@@ -264,10 +268,7 @@ mod tests {
                 return Err(e.clone());
             }
 
-            if let Some(v) = &self.0 {
-                assert_eq!(v, &message);
-            }
-
+            *self.0.lock().unwrap() = Some(message);
             Ok(())
         }
     }
@@ -444,16 +445,7 @@ mod tests {
             .write(b"221 2.0.0 Bye.\r\n")
             .build();
 
-        let agent = TestDeliveryAgent(
-            Some(Message {
-                id: Uuid::nil(),
-                ehlo_hostname: fqdn!("foo.bar"),
-                mail_from: "foo@bar".try_into().unwrap(),
-                rcpt_to: vec!["bar@baz".try_into().unwrap()],
-                body: b"012345678998765432100123456789".to_vec(),
-            }),
-            None,
-        );
+        let agent = Arc::new(TestDeliveryAgent::default());
         let resolver = TestRecipientResolver(
             "dead@beef".try_into().unwrap(),
             Some("bar@baz".try_into().unwrap()),
@@ -462,7 +454,7 @@ mod tests {
 
         let mut cfg = SessionConfig::new("test");
         cfg.max_message_size = 512;
-        cfg.delivery_agent = Arc::new(agent);
+        cfg.delivery_agent = agent.clone();
         cfg.recipient_resolver = Arc::new(resolver);
 
         let mut session = Session::new(IpAddr::from_str("1.1.1.1").unwrap(), stream, Arc::new(cfg));
@@ -471,6 +463,18 @@ mod tests {
             session.handle(CancellationToken::new()).await.unwrap_err(),
             SessionError::Quit
         ));
+
+        // Make sure the agent gets the correct mail
+        assert_eq!(
+            agent.0.lock().unwrap().clone(),
+            Some(Message {
+                id: Uuid::nil(),
+                ehlo_hostname: fqdn!("foo.bar"),
+                mail_from: "foo@bar".try_into().unwrap(),
+                rcpt_to: vec!["bar@baz".try_into().unwrap()],
+                body: b"012345678998765432100123456789".to_vec(),
+            })
+        );
     }
 
     #[tokio::test]
@@ -483,16 +487,7 @@ mod tests {
             .write(b"221 2.0.0 Bye.\r\n")
             .build();
 
-        let agent = TestDeliveryAgent(
-            Some(Message {
-                id: Uuid::nil(),
-                ehlo_hostname: fqdn!("foo.bar"),
-                mail_from: EmailAddress::from_str("foo@bar").unwrap(),
-                rcpt_to: vec![EmailAddress::from_str("bar@baz").unwrap()],
-                body: b"foobarmessage".to_vec(),
-            }),
-            None,
-        );
+        let agent = Arc::new(TestDeliveryAgent::default());
         let resolver = TestRecipientResolver(
             "dead@beef".try_into().unwrap(),
             Some("bar@baz".try_into().unwrap()),
@@ -501,7 +496,7 @@ mod tests {
 
         let mut cfg = SessionConfig::new("test");
         cfg.max_message_size = 512;
-        cfg.delivery_agent = Arc::new(agent);
+        cfg.delivery_agent = agent.clone();
         cfg.recipient_resolver = Arc::new(resolver);
 
         let mut session = Session::new(IpAddr::from_str("1.1.1.1").unwrap(), stream, Arc::new(cfg));
@@ -510,6 +505,18 @@ mod tests {
             session.handle(CancellationToken::new()).await.unwrap_err(),
             SessionError::Quit
         ));
+
+        // Make sure the agent gets the correct mail
+        assert_eq!(
+            agent.0.lock().unwrap().clone(),
+            Some(Message {
+                id: Uuid::nil(),
+                ehlo_hostname: fqdn!("foo.bar"),
+                mail_from: EmailAddress::from_str("foo@bar").unwrap(),
+                rcpt_to: vec![EmailAddress::from_str("bar@baz").unwrap()],
+                body: b"foobarmessage".to_vec(),
+            })
+        )
     }
 
     #[tokio::test]
@@ -522,20 +529,7 @@ mod tests {
             .write(b"221 2.0.0 Bye.\r\n")
             .build();
 
-        let agent = TestDeliveryAgent(
-            Some(Message {
-                id: Uuid::nil(),
-                ehlo_hostname: fqdn!("foo.bar"),
-                mail_from: EmailAddress::from_str("foo@bar").unwrap(),
-                rcpt_to: vec![
-                    EmailAddress::from_str("dead@beef").unwrap(),
-                    EmailAddress::from_str("dead@dead").unwrap(),
-                    EmailAddress::from_str("bar@bax").unwrap(),
-                ],
-                body: b"foobarmessage".to_vec(),
-            }),
-            None,
-        );
+        let agent = Arc::new(TestDeliveryAgent::default());
         let resolver = TestRecipientResolver(
             "dead@beef".try_into().unwrap(),
             None,
@@ -547,7 +541,7 @@ mod tests {
 
         let mut cfg = SessionConfig::new("test");
         cfg.max_message_size = 512;
-        cfg.delivery_agent = Arc::new(agent);
+        cfg.delivery_agent = agent.clone();
         cfg.recipient_resolver = Arc::new(resolver);
 
         let mut session = Session::new(IpAddr::from_str("1.1.1.1").unwrap(), stream, Arc::new(cfg));
@@ -556,6 +550,22 @@ mod tests {
             session.handle(CancellationToken::new()).await.unwrap_err(),
             SessionError::Quit
         ));
+
+        // Make sure the agent gets the correct mail
+        assert_eq!(
+            agent.0.lock().unwrap().clone(),
+            Some(Message {
+                id: Uuid::nil(),
+                ehlo_hostname: fqdn!("foo.bar"),
+                mail_from: EmailAddress::from_str("foo@bar").unwrap(),
+                rcpt_to: vec![
+                    EmailAddress::from_str("dead@beef").unwrap(),
+                    EmailAddress::from_str("dead@dead").unwrap(),
+                    EmailAddress::from_str("bar@bax").unwrap(),
+                ],
+                body: b"foobarmessage".to_vec(),
+            })
+        )
     }
 
     #[tokio::test]
@@ -776,5 +786,60 @@ mod tests {
         tls_stream.write_all(b"QUIT\r\n").await.unwrap();
         let r = tls_stream.read(&mut buf).await.unwrap();
         assert_eq!(&buf[..r], b"221 2.0.0 Bye.\r\n");
+    }
+
+    #[tokio::test]
+    async fn test_with_smtp_client() {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
+
+        let agent = Arc::new(TestDeliveryAgent::default());
+
+        // Listen on the random free port
+        let listener = listen_tcp("127.0.0.1:0".parse().unwrap(), ListenerOpts::default()).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut cfg = SessionConfig::new("test");
+        cfg.delivery_agent = agent.clone();
+        let server = Server::new_with_listener(listener, cfg).unwrap();
+
+        tokio::spawn(async move {
+            server.serve(CancellationToken::new()).await.unwrap();
+        });
+
+        let message = MessageBuilder::new()
+            .from(("John Doe", "john@doe.com"))
+            .to(("Jane Doe", "jane@doe.com"))
+            .subject("Hello")
+            .text_body("Blah");
+
+        SmtpClientBuilder::new("127.0.0.1", port)
+            .unwrap()
+            .helo_host("foo.bar")
+            .connect_plain()
+            .await
+            .unwrap()
+            .send(message)
+            .await
+            .unwrap();
+
+        // Make sure the agent gets the correct mail
+        let msg = agent.0.lock().unwrap().clone().unwrap();
+        assert_eq!(msg.id, Uuid::nil());
+        assert_eq!(msg.ehlo_hostname, "foo.bar");
+        assert_eq!(msg.mail_from, "john@doe.com");
+        assert_eq!(msg.rcpt_to, vec!["jane@doe.com"]);
+
+        let parsed = MessageParser::new().parse(&msg.body).unwrap();
+        assert_eq!(parsed.subject(), Some("Hello"));
+        assert_eq!(
+            *parsed.from().unwrap(),
+            Address::List(vec![Addr::new(Some("John Doe"), "john@doe.com")])
+        );
+        assert_eq!(
+            *parsed.to().unwrap(),
+            Address::List(vec![Addr::new(Some("Jane Doe"), "jane@doe.com")])
+        );
+        assert_eq!(parsed.body_text(0).unwrap(), "Blah");
     }
 }
