@@ -4,11 +4,14 @@
 #![warn(tail_expr_drop_order)]
 #![allow(clippy::cognitive_complexity)]
 #![allow(clippy::field_reassign_with_default)]
+#![allow(clippy::collapsible_if)]
 
 #[cfg(feature = "custom-domains")]
 pub mod custom_domains;
 pub mod http;
+pub mod network;
 pub mod pubsub;
+pub mod smtp;
 pub mod tasks;
 pub mod tests;
 pub mod tls;

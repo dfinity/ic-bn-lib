@@ -8,17 +8,8 @@ pub mod proxy;
 pub mod server;
 pub mod shed;
 
-use std::{
-    io,
-    pin::{Pin, pin},
-    sync::{Arc, atomic::Ordering},
-    task::{Context, Poll},
-};
-
 use axum::response::{IntoResponse, Redirect};
 use http::{HeaderMap, Method, Request, StatusCode, Uri, Version, header::HOST, uri::PathAndQuery};
-use ic_bn_lib_common::types::http::Stats;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 #[cfg(feature = "clients-hyper")]
 pub use client::clients_hyper::{HyperClient, HyperClientLeastLoaded};
@@ -28,11 +19,7 @@ pub use client::clients_reqwest::{
 pub use server::{Server, ServerBuilder};
 use url::Url;
 
-use crate::http::headers::X_FORWARDED_HOST;
-
-/// Blanket async read+write trait for streams Box-ing
-trait AsyncReadWrite: AsyncRead + AsyncWrite + Send + Sync + Unpin {}
-impl<T: AsyncRead + AsyncWrite + Send + Sync + Unpin> AsyncReadWrite for T {}
+use crate::{http::headers::X_FORWARDED_HOST, network::AsyncReadWrite};
 
 /// Calculate very approximate HTTP request/response headers size in bytes.
 /// More or less accurate only for http/1.1 since in h2 headers are in HPACK-compressed.
@@ -99,70 +86,6 @@ pub fn extract_authority<T>(request: &Request<T>) -> Option<&str> {
         .or_else(|| request.headers().get(HOST).and_then(|x| x.to_str().ok()))
         // Extract host w/o port
         .and_then(extract_host)
-}
-
-/// Async read+write wrapper that counts bytes read/written
-struct AsyncCounter<T: AsyncReadWrite> {
-    inner: T,
-    stats: Arc<Stats>,
-}
-
-impl<T: AsyncReadWrite> AsyncCounter<T> {
-    /// Create new `AsyncCounter`
-    pub fn new(inner: T) -> (Self, Arc<Stats>) {
-        let stats = Arc::new(Stats::new());
-
-        (
-            Self {
-                inner,
-                stats: stats.clone(),
-            },
-            stats,
-        )
-    }
-}
-
-impl<T: AsyncReadWrite> AsyncRead for AsyncCounter<T> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        let size_before = buf.filled().len();
-        let poll = pin!(&mut self.inner).poll_read(cx, buf);
-        if matches!(&poll, Poll::Ready(Ok(()))) {
-            let rcvd = buf.filled().len() - size_before;
-            self.stats.rcvd.fetch_add(rcvd as u64, Ordering::SeqCst);
-        }
-
-        poll
-    }
-}
-
-impl<T: AsyncReadWrite> AsyncWrite for AsyncCounter<T> {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        let poll = pin!(&mut self.inner).poll_write(cx, buf);
-        if let Poll::Ready(Ok(v)) = &poll {
-            self.stats.sent.fetch_add(*v as u64, Ordering::SeqCst);
-        }
-
-        poll
-    }
-
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<(), io::Error>> {
-        pin!(&mut self.inner).poll_shutdown(cx)
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        pin!(&mut self.inner).poll_flush(cx)
-    }
 }
 
 /// Error that might happen during Url to Uri conversion
