@@ -27,7 +27,7 @@ pub struct Address {
 #[derive(Clone, Debug, CandidType, Deserialize)]
 pub struct Envelope {
     pub from: Address,
-    pub to: Address,
+    pub to: Vec<Address>,
 }
 
 /// Candid `SmtpRequest`.

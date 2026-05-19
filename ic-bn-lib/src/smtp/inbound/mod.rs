@@ -645,7 +645,7 @@ mod tests {
             .read(b"DATA\r\n")
             .write(b"354 Start mail input; end with <CRLF>.<CRLF>\r\n")
             .read(format!("{}\r\n.\r\n", "1".repeat(513)).as_bytes())
-            .write(b"552 5.3.4 Message too big for, we accept up to 512 bytes.\r\n")
+            .write(b"552 5.3.4 Message too big, we accept up to 512 bytes.\r\n")
             .read(b"QUIT\r\n")
             .write(b"221 2.0.0 Bye.\r\n")
             .build();
@@ -833,13 +833,22 @@ mod tests {
             .install_default()
             .ok();
 
+        let rustls_server_cfg = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(
+                StubResolver::new(TEST_CERT_1.as_bytes(), TEST_KEY_1.as_bytes()).unwrap(),
+            ));
+
         let agent = Arc::new(TestDeliveryAgent::default());
 
         // Listen on the random free port
         let listener = listen_tcp("127.0.0.1:0".parse().unwrap(), ListenerOpts::default()).unwrap();
         let port = listener.local_addr().unwrap().port();
+
         let mut cfg = SessionConfig::new("test", 10 * 1024 * 1024);
         cfg.delivery_agent = agent.clone();
+        cfg.tls_mode = SessionTlsMode::Allowed(Arc::new(rustls_server_cfg));
+
         let server = Server::new_with_listener(listener, cfg).unwrap();
 
         tokio::spawn(async move {
@@ -852,15 +861,32 @@ mod tests {
             .subject("Hello")
             .text_body("Blah");
 
-        SmtpClientBuilder::new("127.0.0.1", port)
+        let mut client = SmtpClientBuilder::new("127.0.0.1", port)
             .unwrap()
+            .implicit_tls(false)
             .helo_host("foo.bar")
-            .connect_plain()
-            .await
-            .unwrap()
-            .send(message)
+            .allow_invalid_certs()
+            .connect()
             .await
             .unwrap();
+
+        // Try some commands
+        client.noop().await.unwrap();
+        client.rset().await.unwrap();
+
+        // Make sure we have the required caps
+        let caps = client.capabilities("foo.bar", false).await.unwrap();
+        assert_eq!(
+            caps.capabilities,
+            EXT_SMTP_UTF8
+                | EXT_8BIT_MIME
+                | EXT_CHUNKING
+                | EXT_ENHANCED_STATUS_CODES
+                | EXT_SIZE
+                | EXT_PIPELINING
+        );
+
+        client.send(message).await.unwrap();
 
         // Make sure the agent gets the correct mail
         let msg = agent.0.lock().unwrap().clone().unwrap();

@@ -63,12 +63,12 @@ impl<S: AsyncReadWrite> Session<S> {
         let mut buf = ArrayString::<MAX_REPLY_LEN>::new();
         write!(
             buf,
-            "Message too big for, we accept up to {} bytes.",
+            "Message too big, we accept up to {} bytes.",
             self.cfg.max_message_size
         )
         .ok();
 
-        return self.reply("552", "5.3.4", buf.as_str()).await;
+        self.reply("552", "5.3.4", buf.as_str()).await
     }
 
     /// Sends greeting message

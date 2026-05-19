@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use candid::{Decode, Encode, Principal};
 use derive_new::new;
 use ic_agent::Agent;
+use mail_parser::MessageParser;
 
 use crate::{
     custom_domains::LooksupCustomDomain,
@@ -20,6 +21,8 @@ use crate::{
 pub enum IcSmtpDeliveryAgentError {
     #[error("IC Agent error: {0}")]
     Agent(#[from] ic_agent::AgentError),
+    #[error("Unable to parse message: {0}")]
+    Parser(String),
     #[error("{0}")]
     Other(#[from] anyhow::Error),
 }
@@ -95,13 +98,13 @@ impl ResolvesRecipient for IcSmtpDeliveryAgent {
     ) -> Result<RecipientPolicy, RecipientResolveError> {
         // Figure out which canister we should talk to
         let canister_id = self
-            .resolve_canister(&rcpt)
+            .resolve_canister(rcpt)
             .ok_or(RecipientResolveError::UnknownDomain)?;
 
         let req = SmtpRequest {
             envelope: Some(Envelope {
                 from: from.into(),
-                to: rcpt.into(),
+                to: vec![rcpt.into()],
             }),
             message: None,
             gateway_flags: None,
