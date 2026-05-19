@@ -5,7 +5,7 @@ pub mod rcpt_to;
 pub mod session;
 
 use std::{
-    fmt::Display,
+    fmt::{self, Display},
     io,
     net::IpAddr,
     sync::Arc,
@@ -18,7 +18,8 @@ use ic_bn_lib_common::types::http::TlsInfo;
 use mail_auth::MessageAuthenticator;
 use rustls::ServerConfig;
 use smtp_proto::{
-    Error as SmtpError,
+    EXT_8BIT_MIME, EXT_CHUNKING, EXT_ENHANCED_STATUS_CODES, EXT_PIPELINING, EXT_SIZE,
+    EXT_SMTP_UTF8, EXT_START_TLS, EhloResponse, Error as SmtpError,
     request::receiver::{
         BdatReceiver, DataReceiver, DummyDataReceiver, DummyLineReceiver, RequestReceiver,
     },
@@ -34,10 +35,14 @@ use crate::{
     },
 };
 
+pub(crate) const MAX_REPLY_LEN: usize = 256;
+
 #[derive(thiserror::Error, Debug)]
 pub enum SessionError {
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
+    #[error("Fmt error: {0}")]
+    Fmt(#[from] fmt::Error),
     #[error("Timed out")]
     Timeout,
     #[error("{0}")]
@@ -90,8 +95,11 @@ impl SessionTlsMode {
 pub struct SessionConfig {
     hostname: String,
     greeting: Bytes,
+    helo: Bytes,
+    ehlo: Bytes,
+    ehlo_tls: Bytes,
 
-    pub max_message_size: usize,
+    max_message_size: usize,
     pub max_recipients: usize,
     pub max_session_duration: Duration,
     pub max_session_data: usize,
@@ -113,30 +121,65 @@ pub struct SessionConfig {
 }
 
 impl SessionConfig {
-    pub fn new(hostname: &str) -> Self {
+    pub fn new(hostname: &str, max_message_size: usize) -> Self {
         let greeting = format!("220 {hostname} ESMTP IC SMTP Gateway\r\n");
+        let (helo, ehlo, ehlo_tls) = Self::generate_ehlo(hostname, max_message_size);
 
         Self {
             hostname: hostname.into(),
             greeting: Bytes::from(greeting),
-            max_message_size: 10 * 1024 * 1024,
+            helo,
+            ehlo,
+            ehlo_tls,
+
+            max_message_size,
             max_recipients: 5,
             max_session_duration: Duration::from_secs(600),
             max_session_data: 50 * 1024 * 1024,
             max_errors: 5,
             max_messages_per_session: 5,
+
             verify_ehlo_hostname: false,
             verify_reverse_ip: false,
             verify_sender_domain: false,
             verify_spf: false,
+
             helo_delay: None,
             timeout: Duration::from_secs(30),
+
             tls_mode: SessionTlsMode::Disabled,
+
             // SAFETY: this never fails
             authenticator: Arc::new(MessageAuthenticator::new_cloudflare().unwrap()),
             recipient_resolver: Arc::new(DummyRecipientResolver),
             delivery_agent: Arc::new(DummyDeliveryAgent),
         }
+    }
+
+    /// Generates all required HELO/EHLO bodies in advance
+    fn generate_ehlo(hostname: &str, max_message_size: usize) -> (Bytes, Bytes, Bytes) {
+        // HELO
+        let helo = format!("250 {hostname} you had me at HELO\r\n");
+
+        let mut response = EhloResponse::new(&hostname);
+        response.capabilities = EXT_ENHANCED_STATUS_CODES
+            | EXT_8BIT_MIME
+            | EXT_SMTP_UTF8
+            | EXT_CHUNKING
+            | EXT_SIZE
+            | EXT_PIPELINING;
+        response.size = max_message_size;
+
+        // EHLO w/o STARTTLS
+        let mut ehlo = Vec::new();
+        response.write(&mut ehlo).ok();
+
+        // EHLO with STARTTLS
+        let mut ehlo_tls = Vec::new();
+        response.capabilities |= EXT_START_TLS;
+        response.write(&mut ehlo_tls).ok();
+
+        (Bytes::from(helo), Bytes::from(ehlo), Bytes::from(ehlo_tls))
     }
 }
 
@@ -284,6 +327,7 @@ mod tests {
     impl ResolvesRecipient for TestRecipientResolver {
         async fn resolve_recipient(
             &self,
+            _from: &EmailAddress,
             rcpt: &EmailAddress,
         ) -> Result<RecipientPolicy, RecipientResolveError> {
             assert_eq!(rcpt, &self.0);
@@ -300,9 +344,8 @@ mod tests {
     }
 
     fn create_session<S: AsyncReadWrite>(stream: S, helo_delay: Option<Duration>) -> Session<S> {
-        let mut cfg = SessionConfig::new("test");
+        let mut cfg = SessionConfig::new("test", 512);
         cfg.max_errors = 5;
-        cfg.max_message_size = 512;
         cfg.helo_delay = helo_delay;
         cfg.max_messages_per_session = 3;
         cfg.max_session_data = 8192;
@@ -383,7 +426,7 @@ mod tests {
             .read(b"MAIL FROM:<a@a>\r\n")
             .write(b"503 5.5.1 Multiple MAIL FROM commands are not allowed.\r\n")
             .read(b"DATA\r\n")
-            .write(b"503 5.5.1 RCPT TO is required first.\r\n")
+            .write(b"554 5.5.1 RCPT TO is required first.\r\n")
             .read(b"RSET\r\n")
             .write(b"250 2.0.0 OK\r\n")
             .read(b"NOOP\r\n")
@@ -452,8 +495,7 @@ mod tests {
             None,
         );
 
-        let mut cfg = SessionConfig::new("test");
-        cfg.max_message_size = 512;
+        let mut cfg = SessionConfig::new("test", 512);
         cfg.delivery_agent = agent.clone();
         cfg.recipient_resolver = Arc::new(resolver);
 
@@ -494,8 +536,7 @@ mod tests {
             None,
         );
 
-        let mut cfg = SessionConfig::new("test");
-        cfg.max_message_size = 512;
+        let mut cfg = SessionConfig::new("test", 512);
         cfg.delivery_agent = agent.clone();
         cfg.recipient_resolver = Arc::new(resolver);
 
@@ -539,8 +580,7 @@ mod tests {
             ]),
         );
 
-        let mut cfg = SessionConfig::new("test");
-        cfg.max_message_size = 512;
+        let mut cfg = SessionConfig::new("test", 512);
         cfg.delivery_agent = agent.clone();
         cfg.recipient_resolver = Arc::new(resolver);
 
@@ -720,9 +760,8 @@ mod tests {
                 StubResolver::new(TEST_CERT_1.as_bytes(), TEST_KEY_1.as_bytes()).unwrap(),
             ));
 
-        let mut cfg = SessionConfig::new("test");
+        let mut cfg = SessionConfig::new("test", 512);
         cfg.tls_mode = SessionTlsMode::Required(Arc::new(rustls_server_cfg));
-        cfg.max_message_size = 512;
 
         tokio::spawn(async move {
             SessionManager::handle_connection(
@@ -799,7 +838,7 @@ mod tests {
         // Listen on the random free port
         let listener = listen_tcp("127.0.0.1:0".parse().unwrap(), ListenerOpts::default()).unwrap();
         let port = listener.local_addr().unwrap().port();
-        let mut cfg = SessionConfig::new("test");
+        let mut cfg = SessionConfig::new("test", 10 * 1024 * 1024);
         cfg.delivery_agent = agent.clone();
         let server = Server::new_with_listener(listener, cfg).unwrap();
 

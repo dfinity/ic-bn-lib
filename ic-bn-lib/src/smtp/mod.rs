@@ -28,7 +28,9 @@ pub enum RecipientResolveError {
     #[error("Unknown domain")]
     UnknownDomain,
     #[error("{0}")]
-    Other(String),
+    Temporary(String),
+    #[error("{0}")]
+    Permanent(String),
 }
 
 /// Delivery error
@@ -41,7 +43,7 @@ pub enum DeliveryError {
 }
 
 /// Low-level E-Mail representation
-#[derive(Debug, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct Message {
     pub id: Uuid,
     pub ehlo_hostname: FQDN,
@@ -71,6 +73,7 @@ impl Display for Message {
 pub trait ResolvesRecipient: Send + Sync + Debug {
     async fn resolve_recipient(
         &self,
+        from: &EmailAddress,
         rcpt: &EmailAddress,
     ) -> Result<RecipientPolicy, RecipientResolveError>;
 }
@@ -88,9 +91,10 @@ pub struct DummyRecipientResolver;
 impl ResolvesRecipient for DummyRecipientResolver {
     async fn resolve_recipient(
         &self,
+        from: &EmailAddress,
         rcpt: &EmailAddress,
     ) -> Result<RecipientPolicy, RecipientResolveError> {
-        warn!("DummyRecipientResolver: {rcpt}");
+        warn!("DummyRecipientResolver: from: {from}, to: {rcpt}");
         Ok(RecipientPolicy::Accept)
     }
 }

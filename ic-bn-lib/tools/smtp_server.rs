@@ -21,12 +21,7 @@ async fn main() {
             StubResolver::new(TEST_CERT_1.as_bytes(), TEST_KEY_2.as_bytes()).unwrap(),
         ));
 
-    let mut cfg = SessionConfig::new("mail.icp.net");
-    cfg.max_message_size = 512;
-    //cfg.helo_delay = Some(Duration::from_secs(1));
-    //params.max_message_size = 16;
-    //params.max_session_duration = Duration::from_secs(30);
-    //params.max_session_data = 16;
+    let mut cfg = SessionConfig::new("mail.icp.net", 512);
     cfg.tls_mode = ic_bn_lib::smtp::inbound::SessionTlsMode::Required(Arc::new(rustls_server_cfg));
 
     let server = Server::new(SocketAddr::from_str("127.0.0.1:1025").unwrap(), cfg).unwrap();

@@ -2,10 +2,6 @@ use std::str::FromStr;
 
 use fqdn::FQDN;
 use mail_auth::hickory_resolver::proto::ProtoErrorKind;
-use smtp_proto::{
-    EXT_8BIT_MIME, EXT_CHUNKING, EXT_ENHANCED_STATUS_CODES, EXT_PIPELINING, EXT_SIZE,
-    EXT_SMTP_UTF8, EXT_START_TLS, EhloResponse,
-};
 
 use crate::{
     network::AsyncReadWrite,
@@ -66,29 +62,14 @@ impl<S: AsyncReadWrite> Session<S> {
     }
 
     async fn send_ehlo(&mut self, extended: bool) -> SessionResult<()> {
-        if !extended {
-            return self
-                .write(format!("250 {} you had me at HELO\r\n", self.cfg.hostname).as_bytes())
-                .await;
-        }
+        let buf = if !extended {
+            &self.cfg.helo
+        } else if self.tls_info.is_none() && self.cfg.tls_mode.enabled() {
+            &self.cfg.ehlo_tls
+        } else {
+            &self.cfg.ehlo
+        };
 
-        let mut response = EhloResponse::new(self.cfg.hostname.as_str());
-        response.capabilities = EXT_ENHANCED_STATUS_CODES
-            | EXT_8BIT_MIME
-            | EXT_SMTP_UTF8
-            | EXT_CHUNKING
-            | EXT_SIZE
-            | EXT_PIPELINING;
-        response.size = self.cfg.max_message_size;
-
-        // Send STARTTLS cap only if we support TLS & we're not already in TLS mode
-        if self.tls_info.is_none() && self.cfg.tls_mode.enabled() {
-            response.capabilities |= EXT_START_TLS;
-        }
-
-        let mut buf = Vec::with_capacity(128);
-        response.write(&mut buf).ok();
-
-        self.write(&buf).await
+        self.write(&buf.clone()).await
     }
 }

@@ -3,6 +3,8 @@ use std::{fmt::Display, str::FromStr};
 use derive_new::new;
 use fqdn::FQDN;
 
+use crate::smtp::ic::candid;
+
 #[derive(thiserror::Error, Clone, Debug, PartialEq, Eq)]
 pub enum EmailAddressError {
     #[error("@ is missing")]
@@ -52,6 +54,21 @@ impl TryFrom<&str> for EmailAddress {
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         Self::from_str(value)
+    }
+}
+
+impl From<&EmailAddress> for candid::Address {
+    fn from(v: &EmailAddress) -> Self {
+        Self {
+            user: v.local.to_string(),
+            domain: v.domain.to_string(),
+        }
+    }
+}
+
+impl PartialEq<&str> for EmailAddress {
+    fn eq(&self, other: &&str) -> bool {
+        &self.to_string() == other
     }
 }
 

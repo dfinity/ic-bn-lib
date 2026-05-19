@@ -62,6 +62,7 @@ impl Server {
 
             Err(e) => {
                 warn!("{self}: Unable to accept connection: {e:#}");
+                // Throttle a bit to avoid busy loop when accept() fails instantly
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }

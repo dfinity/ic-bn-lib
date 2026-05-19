@@ -1,5 +1,6 @@
-use std::{borrow::Cow, str::FromStr};
+use std::{borrow::Cow, fmt::Write, str::FromStr};
 
+use arrayvec::ArrayString;
 use smtp_proto::{
     RCPT_NOTIFY_DELAY, RCPT_NOTIFY_FAILURE, RCPT_NOTIFY_NEVER, RCPT_NOTIFY_SUCCESS, RcptTo,
 };
@@ -9,18 +10,18 @@ use crate::{
     smtp::{
         RecipientPolicy, RecipientResolveError,
         address::EmailAddress,
-        inbound::{Session, SessionResult},
+        inbound::{MAX_REPLY_LEN, Session, SessionResult},
     },
 };
 
 impl<S: AsyncReadWrite> Session<S> {
     /// Handles RCPT TO command
     pub async fn handle_rcpt_to(&mut self, to: RcptTo<Cow<'_, str>>) -> SessionResult<()> {
-        if self.data.mail_from.is_none() {
+        let Some(mail_from) = &self.data.mail_from else {
             return self
                 .reply("503", "5.5.1", "MAIL FROM is required first.")
                 .await;
-        }
+        };
 
         // Check if DSN-related stuff was requested
         if (to.flags
@@ -46,7 +47,7 @@ impl<S: AsyncReadWrite> Session<S> {
         match self
             .cfg
             .recipient_resolver
-            .resolve_recipient(&address)
+            .resolve_recipient(mail_from, &address)
             .await
         {
             Ok(v) => match v {
@@ -62,21 +63,28 @@ impl<S: AsyncReadWrite> Session<S> {
                 }
             },
 
-            Err(e) => match e {
-                RecipientResolveError::UnknownDomain => {
-                    return self
-                        .reply("550", "5.1.2", "Unknown recipient domain.")
-                        .await;
-                }
-                RecipientResolveError::UnknownRecipient => {
-                    return self.reply("550", "5.1.2", "Mailbox does not exist.").await;
-                }
-                RecipientResolveError::Other(_) => {
-                    return self
-                        .reply("451", "4.4.3", "Unable to verify address at this time.")
-                        .await;
-                }
-            },
+            Err(e) => {
+                let mut buf = ArrayString::<MAX_REPLY_LEN>::new();
+
+                let (code, ext, msg) = match e {
+                    RecipientResolveError::UnknownDomain => {
+                        ("550", "5.1.1", "Unknown recipient domain.")
+                    }
+                    RecipientResolveError::UnknownRecipient => {
+                        ("550", "5.1.2", "Mailbox does not exist.")
+                    }
+                    RecipientResolveError::Temporary(v) => ("451", "4.4.3", {
+                        write!(buf, "Temporary error: {v}").ok();
+                        buf.as_str()
+                    }),
+                    RecipientResolveError::Permanent(v) => ("550", "5.1.3", {
+                        write!(buf, "Permanent error: {v}").ok();
+                        buf.as_str()
+                    }),
+                };
+
+                return self.reply(code, ext, msg).await;
+            }
         }
 
         self.reply("250", "2.1.5", "OK").await

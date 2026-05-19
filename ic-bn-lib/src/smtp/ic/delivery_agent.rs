@@ -12,7 +12,7 @@ use crate::{
         DeliversMail, DeliveryError, Message, RecipientPolicy, RecipientResolveError,
         ResolvesRecipient,
         address::EmailAddress,
-        ic::candid::{SmtpRequest, SmtpResponse},
+        ic::candid::{Envelope, SmtpRequest, SmtpResponse},
     },
 };
 
@@ -90,8 +90,41 @@ impl DeliversMail for IcSmtpDeliveryAgent {
 impl ResolvesRecipient for IcSmtpDeliveryAgent {
     async fn resolve_recipient(
         &self,
+        from: &EmailAddress,
         rcpt: &EmailAddress,
     ) -> Result<RecipientPolicy, RecipientResolveError> {
+        // Figure out which canister we should talk to
+        let canister_id = self
+            .resolve_canister(&rcpt)
+            .ok_or(RecipientResolveError::UnknownDomain)?;
+
+        let req = SmtpRequest {
+            envelope: Some(Envelope {
+                from: from.into(),
+                to: rcpt.into(),
+            }),
+            message: None,
+            gateway_flags: None,
+        };
+
+        let resp = self
+            .canister_request(canister_id, req, true)
+            .await
+            .map_err(|e| RecipientResolveError::Temporary(e.to_string()))?;
+
+        if let SmtpResponse::Err(e) = resp {
+            // Code 550 indicates that the recipient is unknown
+            if e.code == 550 {
+                return Err(RecipientResolveError::UnknownRecipient);
+            }
+
+            if e.code >= 500 && e.code < 599 {
+                return Err(RecipientResolveError::Permanent(e.message));
+            }
+
+            return Err(RecipientResolveError::Temporary(e.message));
+        }
+
         Ok(RecipientPolicy::Accept)
     }
 }
