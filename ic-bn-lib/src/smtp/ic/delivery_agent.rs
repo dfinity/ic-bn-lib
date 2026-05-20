@@ -1,6 +1,6 @@
 use std::{fmt::Display, str::FromStr, sync::Arc, time::Duration};
 
-use ahash::{HashMap, RandomState};
+use ahash::{AHashMap, RandomState};
 use async_trait::async_trait;
 use candid::Principal;
 use futures::future::try_join_all;
@@ -206,8 +206,7 @@ impl DeliversMail for IcSmtpDeliveryAgent {
     async fn deliver_mail(&self, message: EmailMessage) -> Result<(), DeliveryError> {
         // A single message can be (potentially) destined for several canisters/domains.
         // So we build a map (canister_id) -> (recipients).
-        let mut mapping: HashMap<Principal, Vec<EmailAddress>> =
-            HashMap::with_hasher(RandomState::default());
+        let mut mapping: AHashMap<Principal, Vec<EmailAddress>> = AHashMap::new();
 
         for rcpt in message.rcpt_to {
             // Figure out which canister we should talk to

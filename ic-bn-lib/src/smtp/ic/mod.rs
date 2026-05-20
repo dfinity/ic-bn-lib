@@ -187,5 +187,23 @@ mod tests {
         "#};
 
         assert_eq!(msg.body, body.as_bytes());
+
+        // Empty
+        assert!(matches!(
+            parse_email(&[]).unwrap_err(),
+            IcSmtpDeliveryAgentError::Parser(_)
+        ));
+
+        // No standard headers
+        let raw = indoc! {r#"
+            X-Header-1: Foo
+            X-Header-2: Bar
+
+            This is a multipart message in MIME format.
+        "#};
+        assert!(matches!(
+            parse_email(raw.as_bytes()).unwrap_err(),
+            IcSmtpDeliveryAgentError::Parser(_)
+        ));
     }
 }
