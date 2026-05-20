@@ -11,6 +11,7 @@ pub mod custom_domains;
 pub mod http;
 pub mod network;
 pub mod pubsub;
+#[cfg(feature = "smtp")]
 pub mod smtp;
 pub mod tasks;
 pub mod tests;
@@ -37,6 +38,12 @@ pub use rustls;
 #[cfg(feature = "acme-alpn")]
 pub use rustls_acme;
 pub use uuid;
+
+/// Converts a string representation to an `EmailAddress`. Panics when an error occurs.
+#[macro_export]
+macro_rules! email {
+    ($email:expr) => {{ $crate::smtp::address::EmailAddress::from_text($email).unwrap() }};
+}
 
 /// Error to be used with `retry_async` macro
 /// which indicates whether it should be retried or not.

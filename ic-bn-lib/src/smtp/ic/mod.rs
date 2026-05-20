@@ -1,18 +1,69 @@
+use std::fmt::Debug;
+
+use ::candid::{Decode, Encode, Principal};
+use anyhow::Context as _;
+use async_trait::async_trait;
+use derive_new::new;
+use ic_agent::Agent;
 use mail_parser::MessageParser;
 
 use crate::smtp::ic::{
-    candid::{Header, Message},
+    candid::{Header, Message, SmtpRequest, SmtpResponse},
     delivery_agent::IcSmtpDeliveryAgentError,
 };
 
 pub mod candid;
 pub mod delivery_agent;
 
-pub(crate) trait RequestsCanister {}
+/// Trait to execute IC SMTP Request
+#[async_trait]
+pub trait ExecutesIcSmtpRequest: Send + Sync + Debug {
+    async fn canister_request(
+        &self,
+        canister_id: Principal,
+        request: SmtpRequest,
+        validate: bool,
+    ) -> Result<SmtpResponse, IcSmtpDeliveryAgentError>;
+}
 
+/// Executes IC SMTP requests through IC Agent
+#[derive(new, Debug)]
+pub struct IcSmtpRequestExecutor(Agent);
+
+#[async_trait]
+impl ExecutesIcSmtpRequest for IcSmtpRequestExecutor {
+    async fn canister_request(
+        &self,
+        canister_id: Principal,
+        request: SmtpRequest,
+        validate: bool,
+    ) -> Result<SmtpResponse, IcSmtpDeliveryAgentError> {
+        let arg = Encode!(&request).context("unable to encode SMTP request")?;
+
+        let resp = if validate {
+            self.0
+                .query(&canister_id, "smtp_request_validate")
+                .with_arg(arg)
+                .call()
+                .await?
+        } else {
+            self.0
+                .update(&canister_id, "smtp_request")
+                .with_arg(arg)
+                .call_and_wait()
+                .await?
+        };
+
+        let resp = Decode!(&resp, SmtpResponse).context("unable to decode SMTP response")?;
+        Ok(resp)
+    }
+}
+
+/// Parses raw MIME email into IC SMTP Message
 pub fn parse_email(raw: &[u8]) -> Result<Message, IcSmtpDeliveryAgentError> {
     let parsed = MessageParser::new()
         .parse(raw)
+        // Make sure there's at least one standard header present
         .filter(|p| p.headers().iter().any(|h| !h.name.is_other()))
         .ok_or(IcSmtpDeliveryAgentError::Parser(
             "No parsable message found".into(),
@@ -46,11 +97,12 @@ mod tests {
     fn test_parser() {
         let raw = indoc! {r#"
             From: Some One <someone@example.com>
+            To: John Doe <john@doe.com>
             MIME-Version: 1.0
             Content-Type: multipart/mixed;
                     boundary="XXXXboundary text"
             DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed;
-                d=newsletter2.louis.de; s=elaine; t=1779173482;
+                d=newsletter2.foo.bar; s=elaine; t=1779173482;
                 bh=P1hWhNvLxYPQvK4IuGO72BKkVgfo5OkCVlIHCyLXvmI=;
                 h=Date:X-CSA-Complaints:To:From:Reply-To:Subject:Feedback-ID:
                  CFBL-Feedback-ID:CFBL-Address:List-Unsubscribe:
@@ -76,25 +128,19 @@ mod tests {
             --XXXXboundary text--        
         "#};
 
-        let dkim_header = [
-            " v=1; a=rsa-sha256; c=relaxed/relaxed;",
-            "    d=newsletter2.louis.de; s=elaine; t=1779173482;",
-            "    bh=P1hWhNvLxYPQvK4IuGO72BKkVgfo5OkCVlIHCyLXvmI=;",
-            "    h=Date:X-CSA-Complaints:To:From:Reply-To:Subject:Feedback-ID:",
-            "     CFBL-Feedback-ID:CFBL-Address:List-Unsubscribe:",
-            "     List-Unsubscribe-Post;",
-            "    b=Eh4/u+8dKXri3jwPO1s6Zk6PwV2h5H6y0PGPn/FLVo/LhwlJbfGStSFLBja4nll8f",
-            "     J5xqDmnlbijjqjXMODiIXPTmqYrfGbbcS5WSCmOyFKhdwGqlAkOOlAXTRkju7QkbtO",
-            "     E5MpnYd4kPHnRC0MuyetIMr6CuQxrR2BGKq4LWB0=\n",
-        ]
-        .join("\n");
-
         let msg = parse_email(raw.as_bytes()).unwrap();
 
+        // Make sure all headers are in place
         assert!(
             msg.headers
                 .iter()
                 .any(|x| x.name == "From" && x.value == " Some One <someone@example.com>\n")
+        );
+        // Make sure all headers are in place
+        assert!(
+            msg.headers
+                .iter()
+                .any(|x| x.name == "To" && x.value == " John Doe <john@doe.com>\n")
         );
         assert!(
             msg.headers
@@ -104,6 +150,18 @@ mod tests {
         assert!(msg.headers.iter().any(|x| x.name == "Content-Type"
             && x.value == " multipart/mixed;\n        boundary=\"XXXXboundary text\"\n"));
 
+        let dkim_header = [
+            " v=1; a=rsa-sha256; c=relaxed/relaxed;",
+            "    d=newsletter2.foo.bar; s=elaine; t=1779173482;",
+            "    bh=P1hWhNvLxYPQvK4IuGO72BKkVgfo5OkCVlIHCyLXvmI=;",
+            "    h=Date:X-CSA-Complaints:To:From:Reply-To:Subject:Feedback-ID:",
+            "     CFBL-Feedback-ID:CFBL-Address:List-Unsubscribe:",
+            "     List-Unsubscribe-Post;",
+            "    b=Eh4/u+8dKXri3jwPO1s6Zk6PwV2h5H6y0PGPn/FLVo/LhwlJbfGStSFLBja4nll8f",
+            "     J5xqDmnlbijjqjXMODiIXPTmqYrfGbbcS5WSCmOyFKhdwGqlAkOOlAXTRkju7QkbtO",
+            "     E5MpnYd4kPHnRC0MuyetIMr6CuQxrR2BGKq4LWB0=\n",
+        ]
+        .join("\n");
         assert!(
             msg.headers
                 .iter()

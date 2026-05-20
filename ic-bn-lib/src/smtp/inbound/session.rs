@@ -20,7 +20,7 @@ use uuid::Uuid;
 use crate::{
     network::AsyncReadWrite,
     smtp::{
-        DeliveryError, Message,
+        DeliveryError, EmailMessage,
         inbound::{
             MAX_REPLY_LEN, Session, SessionError, SessionResult, SessionState, SessionUpgrade,
         },
@@ -383,7 +383,7 @@ impl<S: AsyncReadWrite> Session<S> {
 
         // SAFETY: Code makes sure these are all Some().
         // It's better to panic in tests if they are not.
-        let message = Message {
+        let message = EmailMessage {
             id,
             ehlo_hostname: self.data.ehlo_hostname.clone().unwrap(),
             mail_from: self.data.mail_from.take().unwrap(),

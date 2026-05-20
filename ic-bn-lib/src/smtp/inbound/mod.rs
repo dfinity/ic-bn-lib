@@ -290,9 +290,10 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use crate::{
+        email,
         network::listener::listen_tcp,
         smtp::{
-            DeliveryError, Message, RecipientPolicy, RecipientResolveError,
+            DeliveryError, EmailMessage, RecipientPolicy, RecipientResolveError,
             inbound::manager::SessionManager, server::Server,
         },
         tests::{TEST_CERT_1, TEST_KEY_1},
@@ -302,11 +303,11 @@ mod tests {
     use super::*;
 
     #[derive(Debug, Default)]
-    pub struct TestDeliveryAgent(Mutex<Option<Message>>, Option<DeliveryError>);
+    pub struct TestDeliveryAgent(Mutex<Option<EmailMessage>>, Option<DeliveryError>);
 
     #[async_trait]
     impl DeliversMail for TestDeliveryAgent {
-        async fn deliver_mail(&self, message: Message) -> Result<(), DeliveryError> {
+        async fn deliver_mail(&self, message: EmailMessage) -> Result<(), DeliveryError> {
             if let Some(e) = &self.1 {
                 return Err(e.clone());
             }
@@ -509,7 +510,7 @@ mod tests {
         // Make sure the agent gets the correct mail
         assert_eq!(
             agent.0.lock().unwrap().clone(),
-            Some(Message {
+            Some(EmailMessage {
                 id: Uuid::nil(),
                 ehlo_hostname: fqdn!("foo.bar"),
                 mail_from: "foo@bar".try_into().unwrap(),
@@ -550,11 +551,11 @@ mod tests {
         // Make sure the agent gets the correct mail
         assert_eq!(
             agent.0.lock().unwrap().clone(),
-            Some(Message {
+            Some(EmailMessage {
                 id: Uuid::nil(),
                 ehlo_hostname: fqdn!("foo.bar"),
-                mail_from: EmailAddress::from_str("foo@bar").unwrap(),
-                rcpt_to: vec![EmailAddress::from_str("bar@baz").unwrap()],
+                mail_from: email!("foo@bar"),
+                rcpt_to: vec![email!("bar@baz")],
                 body: b"foobarmessage".to_vec(),
             })
         )
@@ -594,15 +595,11 @@ mod tests {
         // Make sure the agent gets the correct mail
         assert_eq!(
             agent.0.lock().unwrap().clone(),
-            Some(Message {
+            Some(EmailMessage {
                 id: Uuid::nil(),
                 ehlo_hostname: fqdn!("foo.bar"),
-                mail_from: EmailAddress::from_str("foo@bar").unwrap(),
-                rcpt_to: vec![
-                    EmailAddress::from_str("dead@beef").unwrap(),
-                    EmailAddress::from_str("dead@dead").unwrap(),
-                    EmailAddress::from_str("bar@bax").unwrap(),
-                ],
+                mail_from: email!("foo@bar"),
+                rcpt_to: vec![email!("dead@beef"), email!("dead@dead"), email!("bar@bax"),],
                 body: b"foobarmessage".to_vec(),
             })
         )

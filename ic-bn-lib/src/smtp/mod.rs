@@ -14,6 +14,7 @@ pub mod inbound;
 pub mod server;
 
 /// Recipient resolution policy
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum RecipientPolicy {
     Accept,
     Rewrite(EmailAddress),
@@ -44,7 +45,7 @@ pub enum DeliveryError {
 
 /// Low-level E-Mail representation
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
-pub struct Message {
+pub struct EmailMessage {
     pub id: Uuid,
     pub ehlo_hostname: FQDN,
     pub mail_from: EmailAddress,
@@ -52,7 +53,7 @@ pub struct Message {
     pub body: Vec<u8>,
 }
 
-impl Display for Message {
+impl Display for EmailMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -81,7 +82,7 @@ pub trait ResolvesRecipient: Send + Sync + Debug {
 /// Delivers the E-Mail message
 #[async_trait]
 pub trait DeliversMail: Send + Sync + Debug {
-    async fn deliver_mail(&self, message: Message) -> Result<(), DeliveryError>;
+    async fn deliver_mail(&self, message: EmailMessage) -> Result<(), DeliveryError>;
 }
 
 #[derive(Debug)]
@@ -104,7 +105,7 @@ pub struct DummyDeliveryAgent;
 
 #[async_trait]
 impl DeliversMail for DummyDeliveryAgent {
-    async fn deliver_mail(&self, message: Message) -> Result<(), DeliveryError> {
+    async fn deliver_mail(&self, message: EmailMessage) -> Result<(), DeliveryError> {
         warn!("DummyDeliveryAgent: {message}");
         Ok(())
     }

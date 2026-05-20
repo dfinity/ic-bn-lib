@@ -29,7 +29,7 @@ use tracing::{info, warn};
 use crate::http::client::basic_auth;
 
 /// Looks up a custom domain by a hostname
-pub trait LooksupCustomDomain: Sync + Send + std::fmt::Debug {
+pub trait LooksUpCustomDomain: Sync + Send + std::fmt::Debug {
     fn lookup_custom_domain(&self, hostname: &Fqdn) -> Option<CustomDomain>;
 }
 
