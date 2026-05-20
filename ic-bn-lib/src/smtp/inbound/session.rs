@@ -429,7 +429,7 @@ impl<S: AsyncReadWrite> Session<S> {
             .await?;
             return Err(SessionError::TooManyMessagesPerSession);
         } else if self.data.rcpt_to.is_empty() {
-            self.reply("554", "5.5.1", "RCPT TO is required first.")
+            self.reply("503", "5.5.1", "RCPT TO is required first.")
                 .await?;
             self.counters.errors += 1;
             return Ok(false);

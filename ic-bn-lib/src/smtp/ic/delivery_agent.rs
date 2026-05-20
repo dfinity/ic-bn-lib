@@ -147,7 +147,7 @@ impl IcSmtpDeliveryAgent {
             return Some(v);
         }
 
-        // Otherwise do a request with a fall back to casnister_id
+        // Otherwise do a request with a fall back to canister_id
         let mx_canister_id = self
             .lookup_mx_canister(canister_id)
             .await
@@ -190,7 +190,7 @@ impl IcSmtpDeliveryAgent {
             .map_err(|e| DeliveryError::Temporary(e.to_string()))?;
 
         if let SmtpResponse::Err(e) = resp {
-            if e.code >= 500 && e.code < 599 {
+            if e.code >= 500 && e.code < 600 {
                 return Err(DeliveryError::Permanent(e.message));
             }
 
@@ -279,7 +279,7 @@ impl ResolvesRecipient for IcSmtpDeliveryAgent {
                 return Err(RecipientResolveError::UnknownRecipient);
             }
 
-            if e.code >= 500 && e.code < 599 {
+            if e.code >= 500 && e.code < 600 {
                 return Err(RecipientResolveError::Permanent(e.message));
             }
 
@@ -616,22 +616,18 @@ mod tests {
 
         let msgs = executor.0.lock().unwrap().clone();
 
-        // Make sure that each canister gets the same SmtpRequest
-        assert_eq!(
-            msgs,
-            vec![
-                (
-                    principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
-                    create_request(vec![
-                        email!("jane.doe@foo.bar"),
-                        email!("someone.else@foo.bar"),
-                    ])
-                ),
-                (
-                    principal!("aaaaa-aa"),
-                    create_request(vec![email!("foo@dead.beef"),])
-                )
-            ]
-        )
+        // Make sure that each canister gets the correct SmtpRequest
+        assert_eq!(msgs.len(), 2);
+        assert!(msgs.contains(&(
+            principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
+            create_request(vec![
+                email!("jane.doe@foo.bar"),
+                email!("someone.else@foo.bar"),
+            ])
+        )));
+        assert!(msgs.contains(&(
+            principal!("aaaaa-aa"),
+            create_request(vec![email!("foo@dead.beef"),])
+        )));
     }
 }

@@ -80,6 +80,13 @@ pub fn parse_email(raw: &[u8]) -> Result<Message, IcSmtpDeliveryAgentError> {
     // Get the offset to the beginning of the body
     let body_offset = parsed.root_part().offset_body as usize;
 
+    // Should never happen, just a precaution
+    if body_offset >= raw.len() {
+        return Err(IcSmtpDeliveryAgentError::Parser(
+            "Incorrect body offset".into(),
+        ));
+    }
+
     let msg = Message {
         headers,
         body: raw[body_offset..].into(),

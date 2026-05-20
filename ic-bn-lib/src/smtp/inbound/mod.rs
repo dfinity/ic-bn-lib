@@ -427,7 +427,7 @@ mod tests {
             .read(b"MAIL FROM:<a@a>\r\n")
             .write(b"503 5.5.1 Multiple MAIL FROM commands are not allowed.\r\n")
             .read(b"DATA\r\n")
-            .write(b"554 5.5.1 RCPT TO is required first.\r\n")
+            .write(b"503 5.5.1 RCPT TO is required first.\r\n")
             .read(b"RSET\r\n")
             .write(b"250 2.0.0 OK\r\n")
             .read(b"NOOP\r\n")
@@ -775,7 +775,7 @@ mod tests {
         let r = stream2.read(&mut buf).await.unwrap();
         assert_eq!(&buf[..r], b"220 test ESMTP IC SMTP Gateway\r\n");
 
-        // Make sure there are 250-STARTTLS and 250-REQUIRETLS in EHLO
+        // Make sure EHLO advertises 250-STARTTLS
         stream2.write_all(b"EHLO foo.bar\r\n").await.unwrap();
         let r = stream2.read(&mut buf).await.unwrap();
         assert_eq!(&buf[..r], b"250-test you had me at EHLO\r\n250-STARTTLS\r\n250-SMTPUTF8\r\n250-SIZE 512\r\n250-PIPELINING\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250 8BITMIME\r\n");
