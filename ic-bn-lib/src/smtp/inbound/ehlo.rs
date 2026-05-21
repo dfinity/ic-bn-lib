@@ -1,7 +1,6 @@
 use std::str::FromStr;
 
 use fqdn::FQDN;
-use mail_auth::hickory_resolver::proto::ProtoErrorKind;
 
 use crate::{
     network::AsyncReadWrite,
@@ -42,7 +41,7 @@ impl<S: AsyncReadWrite> Session<S> {
                 }
 
                 Err(e) => {
-                    if matches!(e.kind(), ProtoErrorKind::NoRecordsFound(_)) {
+                    if e.is_no_records_found() {
                         return self
                             .reply("550", "5.5.0", "EHLO hostname not found in DNS.")
                             .await;
