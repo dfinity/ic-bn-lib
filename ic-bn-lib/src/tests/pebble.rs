@@ -10,10 +10,7 @@ use std::{
 
 use anyhow::{Context, Error, anyhow};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use ic_bn_lib_common::{
-    traits::dns::Resolves,
-    types::dns::{Options, Protocol},
-};
+use ic_bn_lib_common::{traits::dns::Resolves, types::dns::Options};
 use nix::{
     sys::signal::{Signal, kill},
     unistd::Pid,
@@ -381,11 +378,8 @@ impl Env {
 
     /// Returns a ready-to-use DNS resolver targeting pebble-challtestsrv
     pub fn resolver(&self) -> Arc<dyn Resolves> {
-        let mut opts = Options::default();
-        opts.protocol = Protocol::Clear(self.port_dns_cleartext());
-        opts.servers = vec![self.ip_dns_cleartext()];
-
-        Arc::new(Resolver::new(opts))
+        let opts = Options::simple(&[self.ip_dns_cleartext()], self.port_dns_cleartext());
+        Arc::new(Resolver::new(opts).unwrap())
     }
 
     /// Stops the environment
@@ -532,7 +526,7 @@ pub mod dns {
                 .await
                 .unwrap();
             assert_eq!(r[0].record_type(), RecordType::TXT);
-            assert_eq!(r[0].data().to_string(), "bar");
+            assert_eq!(r[0].data.to_string(), "bar");
 
             tm.unset("foo").await.unwrap();
             let r = resolver
@@ -550,7 +544,7 @@ pub mod dns {
                     .await
                     .unwrap();
                 assert_eq!(r[0].record_type(), RecordType::TXT);
-                assert_eq!(r[0].data().to_string(), "deadbeef");
+                assert_eq!(r[0].data.to_string(), "deadbeef");
 
                 tm.unset("baz").await.unwrap();
                 let r = resolver
