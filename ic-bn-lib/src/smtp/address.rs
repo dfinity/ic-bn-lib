@@ -3,6 +3,8 @@ use std::{fmt::Display, str::FromStr};
 use derive_new::new;
 use fqdn::FQDN;
 
+use crate::smtp::ic::candid;
+
 #[derive(thiserror::Error, Clone, Debug, PartialEq, Eq)]
 pub enum EmailAddressError {
     #[error("@ is missing")]
@@ -22,16 +24,8 @@ pub struct EmailAddress {
     pub domain: FQDN,
 }
 
-impl Display for EmailAddress {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}@{}", self.local, self.domain)
-    }
-}
-
-impl FromStr for EmailAddress {
-    type Err = EmailAddressError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+impl EmailAddress {
+    pub fn from_text(s: &str) -> Result<Self, EmailAddressError> {
         let (local, domain) = s.rsplit_once('@').ok_or(EmailAddressError::AtMissing)?;
         if domain.is_empty() {
             return Err(EmailAddressError::DomainIncorrect("Empty domain".into()));
@@ -47,11 +41,46 @@ impl FromStr for EmailAddress {
     }
 }
 
+impl Display for EmailAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}@{}", self.local, self.domain)
+    }
+}
+
+impl FromStr for EmailAddress {
+    type Err = EmailAddressError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_text(s)
+    }
+}
+
 impl TryFrom<&str> for EmailAddress {
     type Error = EmailAddressError;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         Self::from_str(value)
+    }
+}
+
+impl From<&EmailAddress> for candid::Address {
+    fn from(v: &EmailAddress) -> Self {
+        v.clone().into()
+    }
+}
+
+impl From<EmailAddress> for candid::Address {
+    fn from(v: EmailAddress) -> Self {
+        Self {
+            user: v.local,
+            domain: v.domain.to_string(),
+        }
+    }
+}
+
+impl PartialEq<&str> for EmailAddress {
+    fn eq(&self, other: &&str) -> bool {
+        &self.to_string() == other
     }
 }
 

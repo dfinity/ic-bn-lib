@@ -1,10 +1,11 @@
 use std::{
     borrow::Cow,
-    io::Write,
+    fmt::Write,
     time::{Duration, Instant},
 };
 
 use anyhow::Context;
+use arrayvec::ArrayString;
 use smtp_proto::{
     Error as SmtpError, Request,
     request::receiver::{BdatReceiver, DataReceiver, DummyDataReceiver, DummyLineReceiver},
@@ -14,24 +15,22 @@ use tokio::{
     select,
 };
 use tokio_util::{sync::CancellationToken, time::FutureExt};
-use tracing::debug;
 use uuid::Uuid;
 
 use crate::{
     network::AsyncReadWrite,
     smtp::{
-        DeliveryError, Message,
-        inbound::{Session, SessionError, SessionResult, SessionState, SessionUpgrade},
+        DeliveryError, EmailMessage,
+        inbound::{
+            MAX_REPLY_LEN, Session, SessionError, SessionResult, SessionState, SessionUpgrade,
+        },
     },
 };
-
-const MAX_REPLY_LEN: usize = 256;
 
 #[allow(clippy::too_many_arguments)]
 impl<S: AsyncReadWrite> Session<S> {
     /// Writes given bytes to the session & flushes the buffer
     pub async fn write(&mut self, bytes: &[u8]) -> SessionResult<()> {
-        debug!("{self}: Writing: {}", String::from_utf8_lossy(bytes));
         self.stream.write_all(bytes).await?;
         self.stream.flush().await?;
         Ok(())
@@ -49,26 +48,27 @@ impl<S: AsyncReadWrite> Session<S> {
             "Reply longer than supported - increase MAX_REPLY_LEN"
         );
 
-        let mut buf = [0; MAX_REPLY_LEN];
-        write!(&mut buf[..], "{code} {ext} {msg}\r\n")?;
-        self.write(&buf[..len]).await
+        let mut buf = ArrayString::<MAX_REPLY_LEN>::new();
+        write!(buf, "{code} {ext} {msg}\r\n").ok();
+        self.write(buf.as_bytes()).await
     }
 
     pub(crate) async fn ext_unsupported(&mut self, ext: &str) -> SessionResult<()> {
-        self.reply(
-            "501",
-            "5.5.4",
-            &format!("{ext} extension is not supported."),
-        )
-        .await
+        let mut buf = ArrayString::<MAX_REPLY_LEN>::new();
+        write!(buf, "{ext} extension is not supported.").ok();
+        self.reply("501", "5.5.4", buf.as_str()).await
     }
 
     pub(crate) async fn message_too_big(&mut self) -> SessionResult<()> {
-        let msg = format!(
-            "Message too big for, we accept up to {} bytes.",
+        let mut buf = ArrayString::<MAX_REPLY_LEN>::new();
+        write!(
+            buf,
+            "Message too big, we accept up to {} bytes.",
             self.cfg.max_message_size
-        );
-        return self.reply("552", "5.3.4", &msg).await;
+        )
+        .ok();
+
+        self.reply("552", "5.3.4", buf.as_str()).await
     }
 
     /// Sends greeting message
@@ -100,33 +100,34 @@ impl<S: AsyncReadWrite> Session<S> {
     }
 
     async fn handle_error(&mut self, error: SmtpError) -> SessionResult<()> {
+        let mut buf = ArrayString::<MAX_REPLY_LEN>::new();
+
         let (code, ext, msg) = match error {
             SmtpError::UnknownCommand | SmtpError::InvalidResponse { .. } => {
-                ("500", "5.5.1", "Invalid command.".to_string())
+                ("500", "5.5.1", "Invalid command.")
             }
-            SmtpError::InvalidSenderAddress => {
-                ("501", "5.1.8", "Bad sender's system address.".to_string())
+            SmtpError::InvalidSenderAddress => ("501", "5.1.8", "Bad sender's system address."),
+            SmtpError::InvalidRecipientAddress => {
+                ("501", "5.1.3", "Bad destination mailbox address syntax.")
             }
-            SmtpError::InvalidRecipientAddress => (
-                "501",
-                "5.1.3",
-                "Bad destination mailbox address syntax.".to_string(),
-            ),
-            SmtpError::SyntaxError { syntax } => {
-                ("501", "5.5.2", format!("Syntax error, expected: {syntax}"))
-            }
-            SmtpError::InvalidParameter { param } => {
-                ("501", "5.5.4", format!("Invalid parameter {param:?}."))
-            }
-            SmtpError::UnsupportedParameter { param } => {
-                ("504", "5.5.4", format!("Unsupported parameter {param:?}."))
-            }
+            SmtpError::SyntaxError { syntax } => ("501", "5.5.2", {
+                write!(buf, "Syntax error, expected: {syntax}").ok();
+                buf.as_str()
+            }),
+            SmtpError::InvalidParameter { param } => ("501", "5.5.4", {
+                write!(buf, "Invalid parameter {param:?}.").ok();
+                buf.as_str()
+            }),
+            SmtpError::UnsupportedParameter { param } => ("504", "5.5.4", {
+                write!(buf, "Unsupported parameter {param:?}.").ok();
+                buf.as_str()
+            }),
             // These are handled one level above
             SmtpError::ResponseTooLong | SmtpError::NeedsMoreData { .. } => unreachable!(),
         };
 
         self.counters.errors += 1;
-        self.reply(code, ext, &msg).await
+        self.reply(code, ext, msg).await
     }
 
     async fn handle_request(&mut self, req: Request<Cow<'_, str>>) -> SessionResult<()> {
@@ -166,8 +167,6 @@ impl<S: AsyncReadWrite> Session<S> {
 
     /// Main SMTP state machine
     async fn ingest(&mut self, bytes: &[u8]) -> SessionResult<SessionUpgrade> {
-        debug!("{self}: Read: {}", String::from_utf8_lossy(bytes));
-
         // Check if we are over session transfer quota
         if self.counters.bytes_ingested + bytes.len() > self.cfg.max_session_data {
             self.reply("452", "4.7.28", "Session transfer quota exceeded.")
@@ -273,7 +272,7 @@ impl<S: AsyncReadWrite> Session<S> {
                 }
                 SessionState::Data(rx) => {
                     // Check if the message already exceeds allowed size
-                    if self.data.message.len() + bytes.len() > self.cfg.max_message_size {
+                    if self.data.message.len() + iter.len() > self.cfg.max_message_size {
                         state = SessionState::DataTooLarge(DummyDataReceiver::new_data(rx));
                         continue;
                     } else if rx.ingest(&mut iter, &mut self.data.message) {
@@ -384,7 +383,7 @@ impl<S: AsyncReadWrite> Session<S> {
 
         // SAFETY: Code makes sure these are all Some().
         // It's better to panic in tests if they are not.
-        let message = Message {
+        let message = EmailMessage {
             id,
             ehlo_hostname: self.data.ehlo_hostname.clone().unwrap(),
             mail_from: self.data.mail_from.take().unwrap(),
@@ -393,26 +392,27 @@ impl<S: AsyncReadWrite> Session<S> {
         };
 
         if let Err(e) = self.cfg.delivery_agent.deliver_mail(message).await {
-            let (code, ext, msg) = match e {
+            let mut buf = ArrayString::<MAX_REPLY_LEN>::new();
+
+            let (code, ext) = match e {
                 DeliveryError::Permanent(v) => {
-                    ("550", "5.5.0", format!("Permanent delivery error: {v}"))
+                    write!(buf, "Permanent delivery error: {v}").ok();
+                    ("550", "5.5.0")
                 }
                 DeliveryError::Temporary(v) => {
-                    ("450", "4.5.0", format!("Temporary delivery error: {v}"))
+                    write!(buf, "Temporary delivery error: {v}").ok();
+                    ("450", "4.5.0")
                 }
             };
 
-            self.reply(code, ext, &msg).await?;
+            self.reply(code, ext, &buf).await?;
             self.reset_message();
             return Ok(());
         }
 
-        self.reply(
-            "250",
-            "2.0.0",
-            &format!("Message ({message_size} bytes) queued with id {id}"),
-        )
-        .await?;
+        let mut buf = ArrayString::<MAX_REPLY_LEN>::new();
+        write!(buf, "Message ({message_size} bytes) queued with id {id}").ok();
+        self.reply("250", "2.0.0", &buf).await?;
 
         self.counters.messages_queued += 1;
         self.reset_message();

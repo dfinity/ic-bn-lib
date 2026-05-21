@@ -11,7 +11,7 @@ use tracing::{info, warn};
 
 use crate::{
     network::listener::listen_tcp,
-    smtp::inbound::{SessionConfig, SessionError, SessionResult, manager::SessionManager},
+    smtp::inbound::{SessionConfig, manager::SessionManager},
 };
 
 /// Listens for new SMTP connections and creates sessions
@@ -62,6 +62,7 @@ impl Server {
 
             Err(e) => {
                 warn!("{self}: Unable to accept connection: {e:#}");
+                // Throttle a bit to avoid busy loop when accept() fails instantly
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }
