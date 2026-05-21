@@ -70,7 +70,7 @@ hyper-rustls = { version = "0.27.5", optional = true, default-features = false, 
 ] }
 hyper-util = { workspace = true }
 ic-agent = { workspace = true }
-ic-bn-lib-common = "0.1"
+ic-bn-lib-common = { path = "../ic-bn-lib-common" }
 indoc = "2.0.6"
 instant-acme = { workspace = true, optional = true }
 itertools = "0.14.0"
