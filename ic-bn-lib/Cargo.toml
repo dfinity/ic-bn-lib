@@ -94,7 +94,7 @@ rustls = { version = "0.23.18", default-features = false, features = [
 rustls-acme = { version = "0.15.1", default-features = false, features = [
     "webpki-roots",
     "tls12",
-    "ring",
+    "aws-lc-rs",
 ], optional = true }
 rustls-pemfile = "2.2.0"
 rustls-platform-verifier = "0.7.0"
