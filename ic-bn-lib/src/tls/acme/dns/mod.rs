@@ -96,7 +96,7 @@ impl TokenManager for TokenManagerDns {
             // See if any of them matches given token
             records
                 .iter()
-                .find(|&x| x.record_type() == RecordType::TXT && x.data().to_string() == token)
+                .find(|&x| x.record_type() == RecordType::TXT && x.data.to_string() == token)
                 .ok_or_else(|| RetryError::Transient(anyhow!("requested record not found")))?;
 
             Ok(())

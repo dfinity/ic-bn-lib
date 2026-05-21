@@ -1,12 +1,16 @@
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     str::FromStr,
+    sync::Arc,
     time::Duration,
 };
 
 use anyhow::{Context, anyhow};
 use clap::Args;
-use hickory_resolver::config::{CLOUDFLARE_IPS, LookupIpStrategy};
+use hickory_resolver::config::{
+    ConnectionConfig, LookupIpStrategy, NameServerConfig, ResolveHosts, ResolverConfig,
+    ResolverOpts,
+};
 use humantime::parse_duration;
 use strum::EnumString;
 
@@ -82,26 +86,53 @@ impl FromStr for Protocol {
 /// DNS resolver options
 #[derive(Debug, Clone)]
 pub struct Options {
-    pub protocol: Protocol,
-    pub servers: Vec<IpAddr>,
-    pub lookup_ip_strategy: LookupIpStrategy,
-    pub cache_size: usize,
-    pub timeout: Duration,
-    pub tls_name: String,
-    pub dnssec_disabled: bool,
+    pub opts: ResolverOpts,
+    pub cfg: ResolverConfig,
+}
+
+impl Options {
+    /// Creates simple options with cleartext resolving using the given IPs and port
+    pub fn simple(addrs: &[IpAddr], port: u16) -> Options {
+        let mut opts = ResolverOpts::default();
+        opts.use_hosts_file = ResolveHosts::Never;
+        opts.preserve_intermediates = false;
+        opts.try_tcp_on_error = true;
+
+        let connections = vec![
+            {
+                let mut cfg = ConnectionConfig::udp();
+                cfg.port = port;
+                cfg
+            },
+            {
+                let mut cfg = ConnectionConfig::tcp();
+                cfg.port = port;
+                cfg
+            },
+        ];
+
+        let name_servers = addrs
+            .iter()
+            .map(|x| NameServerConfig::new(*x, true, connections.clone()))
+            .collect();
+        let cfg = ResolverConfig::from_parts(None, vec![], name_servers);
+
+        Self { opts, cfg }
+    }
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self {
-            protocol: Protocol::Clear(53),
-            servers: CLOUDFLARE_IPS.into(),
-            lookup_ip_strategy: LookupIpStrategy::Ipv4AndIpv6,
-            cache_size: 1024,
-            timeout: Duration::from_secs(3),
-            tls_name: "cloudflare-dns.com".into(),
-            dnssec_disabled: false,
+        // A bit hacky way of using Clap CLI defaults as defaults here
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            dns: DnsCli,
         }
+        let cli = Cli::parse_from([""]);
+
+        Self::from(&cli.dns)
     }
 }
 
@@ -127,12 +158,12 @@ pub struct DnsCli {
 
     /// DNS protocol to use (clear/tls/https) with an optional port separated by a colon.
     /// E.g. "clear:8053". If the port is omitted then the default is used.
-    #[clap(env, long, default_value = "tls")]
+    #[clap(env, long, default_value = "clear")]
     pub dns_protocol: Protocol,
 
     /// Cache size for the resolver (in number of DNS records)
     #[clap(env, long, default_value = "2048")]
-    pub dns_cache_size: usize,
+    pub dns_cache_size: u64,
 
     /// Timeout for resolving
     #[clap(env, long, default_value = "5s", value_parser = parse_duration)]
@@ -155,13 +186,60 @@ pub struct DnsCli {
 impl From<&DnsCli> for Options {
     fn from(c: &DnsCli) -> Self {
         Self {
-            protocol: c.dns_protocol,
-            servers: c.dns_servers.clone(),
-            lookup_ip_strategy: c.dns_lookup_strategy.into(),
-            cache_size: c.dns_cache_size,
-            timeout: c.dns_timeout,
-            tls_name: c.dns_tls_name.clone(),
-            dnssec_disabled: c.dns_dnssec_disabled,
+            opts: ResolverOpts::from(c),
+            cfg: ResolverConfig::from(c),
         }
+    }
+}
+
+impl From<&DnsCli> for ResolverOpts {
+    fn from(c: &DnsCli) -> Self {
+        let mut opts = ResolverOpts::default();
+        opts.cache_size = c.dns_cache_size;
+        opts.timeout = c.dns_timeout;
+        opts.ip_strategy = c.dns_lookup_strategy.into();
+        opts.use_hosts_file = ResolveHosts::Never;
+        opts.preserve_intermediates = false;
+        opts.validate = !c.dns_dnssec_disabled;
+        opts.try_tcp_on_error = true;
+
+        opts
+    }
+}
+
+impl From<&DnsCli> for ResolverConfig {
+    fn from(c: &DnsCli) -> Self {
+        let mut cfg = ResolverConfig::default();
+        for srv in &c.dns_servers {
+            let connections = match c.dns_protocol {
+                Protocol::Clear(port) => vec![
+                    {
+                        let mut cfg = ConnectionConfig::udp();
+                        cfg.port = port;
+                        cfg
+                    },
+                    {
+                        let mut cfg = ConnectionConfig::tcp();
+                        cfg.port = port;
+                        cfg
+                    },
+                ],
+                Protocol::Tls(port) => vec![{
+                    let mut cfg = ConnectionConfig::tls(Arc::from(c.dns_tls_name.as_str()));
+                    cfg.port = port;
+                    cfg
+                }],
+                Protocol::Https(port) => vec![{
+                    let mut cfg = ConnectionConfig::https(Arc::from(c.dns_tls_name.as_str()), None);
+                    cfg.port = port;
+                    cfg
+                }],
+            };
+
+            let name_server = NameServerConfig::new(*srv, true, connections);
+            cfg.add_name_server(name_server);
+        }
+
+        cfg
     }
 }

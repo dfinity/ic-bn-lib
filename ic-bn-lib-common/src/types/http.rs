@@ -755,21 +755,19 @@ impl<R: CustomBypassReason> CacheBypassReason<R> {
 
 #[cfg(test)]
 mod test {
-    use clap::Parser;
-
     use super::*;
-
-    #[derive(clap::Parser)]
-    struct Cli {
-        #[command(flatten)]
-        server: HttpServerCli,
-        #[command(flatten)]
-        client: HttpClientCli,
-    }
 
     #[test]
     fn test_cli() {
-        let args: Vec<&str> = vec![];
-        Cli::parse_from(args);
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            server: HttpServerCli,
+            #[command(flatten)]
+            client: HttpClientCli,
+        }
+
+        Cli::parse_from([""]);
     }
 }
