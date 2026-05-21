@@ -43,6 +43,7 @@ ic-agent = { version = "0.47", features = [
     "ring",
     "_internal_dynamic-routing",
 ] }
+ic-bn-lib-common = { version = "0.2", path = "./ic-bn-lib-common" }
 instant-acme = { version = "0.8.2", default-features = false, features = [
     "ring",
     "hyper-rustls",
