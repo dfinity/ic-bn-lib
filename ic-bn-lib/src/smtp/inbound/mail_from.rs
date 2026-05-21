@@ -1,6 +1,5 @@
 use std::{borrow::Cow, fmt::Write, str::FromStr};
 
-use arrayvec::ArrayString;
 use mail_auth::{IprevResult, Parameters, SpfResult, spf::verify::SpfParameters};
 use smtp_proto::{MAIL_BY_NOTIFY, MAIL_BY_RETURN, MailFrom};
 
@@ -8,7 +7,7 @@ use crate::{
     network::AsyncReadWrite,
     smtp::{
         address::EmailAddress,
-        inbound::{MAX_REPLY_LEN, Session, SessionResult},
+        inbound::{Session, SessionResult},
     },
 };
 
@@ -114,14 +113,15 @@ impl<S: AsyncReadWrite> Session<S> {
                         .await;
                 }
                 SpfResult::Fail | SpfResult::PermError | SpfResult::SoftFail => {
-                    let mut buf = ArrayString::<MAX_REPLY_LEN>::new();
-
-                    write!(buf, "SPF validation failed").ok();
-                    if let Some(v) = output.explanation() {
-                        write!(buf, ": {v}.").ok();
-                    }
-
-                    return self.reply("550", "5.7.23", &buf).await;
+                    return self
+                        .reply_with("550", "5.7.23", |buf| {
+                            write!(buf, "SPF validation failed")?;
+                            if let Some(v) = output.explanation() {
+                                write!(buf, ": {v}")?;
+                            }
+                            Ok(())
+                        })
+                        .await;
                 }
             }
         }

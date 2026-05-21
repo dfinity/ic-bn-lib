@@ -1,6 +1,5 @@
 use std::{borrow::Cow, fmt::Write, str::FromStr};
 
-use arrayvec::ArrayString;
 use smtp_proto::{
     RCPT_NOTIFY_DELAY, RCPT_NOTIFY_FAILURE, RCPT_NOTIFY_NEVER, RCPT_NOTIFY_SUCCESS, RcptTo,
 };
@@ -10,7 +9,7 @@ use crate::{
     smtp::{
         RecipientPolicy, RecipientResolveError,
         address::EmailAddress,
-        inbound::{MAX_REPLY_LEN, Session, SessionResult},
+        inbound::{Session, SessionResult},
     },
 };
 
@@ -64,8 +63,6 @@ impl<S: AsyncReadWrite> Session<S> {
             },
 
             Err(e) => {
-                let mut buf = ArrayString::<MAX_REPLY_LEN>::new();
-
                 let (code, ext, msg) = match e {
                     RecipientResolveError::UnknownDomain => {
                         ("550", "5.1.1", "Unknown recipient domain.")
@@ -73,14 +70,16 @@ impl<S: AsyncReadWrite> Session<S> {
                     RecipientResolveError::UnknownRecipient => {
                         ("550", "5.1.2", "Mailbox does not exist.")
                     }
-                    RecipientResolveError::Temporary(v) => ("451", "4.4.3", {
-                        write!(buf, "Temporary error: {v}").ok();
-                        buf.as_str()
-                    }),
-                    RecipientResolveError::Permanent(v) => ("550", "5.1.3", {
-                        write!(buf, "Permanent error: {v}").ok();
-                        buf.as_str()
-                    }),
+                    RecipientResolveError::Temporary(v) => {
+                        return self
+                            .reply_with("451", "4.4.3", |buf| write!(buf, "Temporary error: {v}"))
+                            .await;
+                    }
+                    RecipientResolveError::Permanent(v) => {
+                        return self
+                            .reply_with("550", "5.1.3", |buf| write!(buf, "Permanent error: {v}"))
+                            .await;
+                    }
                 };
 
                 return self.reply(code, ext, msg).await;

@@ -78,9 +78,11 @@ impl From<EmailAddress> for candid::Address {
     }
 }
 
+#[cfg(test)]
 impl PartialEq<&str> for EmailAddress {
+    #[allow(clippy::cmp_owned)]
     fn eq(&self, other: &&str) -> bool {
-        &self.to_string() == other
+        self.to_string() == *other
     }
 }
 

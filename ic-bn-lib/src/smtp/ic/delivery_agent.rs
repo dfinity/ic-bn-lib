@@ -141,10 +141,10 @@ impl IcSmtpDeliveryAgent {
     }
 
     /// Resolves SMTP canister id for the given canister_id
-    async fn resolve_smtp_canister_id(&self, canister_id: Principal) -> Option<Principal> {
+    async fn resolve_smtp_canister_id(&self, canister_id: Principal) -> Principal {
         // Try to find MX canister, check the cache first
         if let Some(v) = self.mx_cache.get(&canister_id) {
-            return Some(v);
+            return v;
         }
 
         // Otherwise do a request with a fall back to canister_id
@@ -155,10 +155,10 @@ impl IcSmtpDeliveryAgent {
 
         // Store the MX canister ID in the cache.
         // We do it even if it's the same as base canister_id
-        // to avoid repeated HTTP calls even in the case when there's no MX canister.
+        // to avoid repeated HTTP calls in the case when there's no MX canister.
         self.mx_cache.insert(canister_id, mx_canister_id);
 
-        Some(mx_canister_id)
+        mx_canister_id
     }
 
     /// Resolves destination SMTP canister id for the given address
@@ -174,7 +174,7 @@ impl IcSmtpDeliveryAgent {
         })?;
 
         // Finally check if there's an MX canister defined
-        self.resolve_smtp_canister_id(canister_id).await
+        Some(self.resolve_smtp_canister_id(canister_id).await)
     }
 
     /// Delivers given SMTP request to the canister
@@ -206,8 +206,12 @@ impl DeliversMail for IcSmtpDeliveryAgent {
     async fn deliver_mail(&self, message: EmailMessage) -> Result<(), DeliveryError> {
         // A single message can be (potentially) destined for several canisters/domains.
         // So we build a map (canister_id) -> (recipients).
-        let mut mapping: AHashMap<Principal, Vec<EmailAddress>> = AHashMap::new();
+        let mut mapping: AHashMap<Principal, Vec<EmailAddress>> =
+            AHashMap::with_capacity(message.rcpt_to.len());
 
+        // The future in this loop usually resolves instantly due to the nature of the SMTP protocol.
+        // Before the mail is delivered it goes through an RCPT TO sequence which populates the cache.
+        // So making it concurrent doesn't worth it probably currently.
         for rcpt in message.rcpt_to {
             // Figure out which canister we should talk to
             let canister_id = self
@@ -227,7 +231,7 @@ impl DeliversMail for IcSmtpDeliveryAgent {
 
         // Deliver the message to all relevant canisters in parallel
         let mut futs = Vec::with_capacity(mapping.len());
-        for (canister_id, rcpts) in mapping.drain() {
+        for (canister_id, rcpts) in mapping {
             let smtp_request = SmtpRequest {
                 envelope: Some(Envelope {
                     from: message.mail_from.clone().into(),
@@ -237,7 +241,7 @@ impl DeliversMail for IcSmtpDeliveryAgent {
                 gateway_flags: None,
             };
 
-            futs.push(self.smtp_request_deliver(canister_id, smtp_request.clone()));
+            futs.push(self.smtp_request_deliver(canister_id, smtp_request));
         }
 
         try_join_all(futs).await?;

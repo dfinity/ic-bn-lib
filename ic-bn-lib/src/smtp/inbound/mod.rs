@@ -110,7 +110,7 @@ pub struct SessionConfig {
     pub verify_sender_domain: bool,
     pub verify_reverse_ip: bool,
     pub verify_spf: bool,
-    pub helo_delay: Option<Duration>,
+    pub greeting_delay: Option<Duration>,
 
     pub timeout: Duration,
     pub tls_mode: SessionTlsMode,
@@ -122,12 +122,13 @@ pub struct SessionConfig {
 
 impl SessionConfig {
     pub fn new(hostname: &str, max_message_size: usize) -> Self {
-        let greeting = format!("220 {hostname} ESMTP IC SMTP Gateway\r\n");
-        let (helo, ehlo, ehlo_tls) = Self::generate_ehlo(hostname, max_message_size);
+        let greeting = Bytes::from(format!("220 {hostname} ESMTP IC SMTP Gateway\r\n"));
+        let helo = Bytes::from(format!("250 {hostname} you had me at HELO\r\n"));
+        let (ehlo, ehlo_tls) = Self::generate_ehlo(hostname, max_message_size);
 
         Self {
             hostname: hostname.into(),
-            greeting: Bytes::from(greeting),
+            greeting,
             helo,
             ehlo,
             ehlo_tls,
@@ -144,7 +145,7 @@ impl SessionConfig {
             verify_sender_domain: false,
             verify_spf: false,
 
-            helo_delay: None,
+            greeting_delay: None,
             timeout: Duration::from_secs(30),
 
             tls_mode: SessionTlsMode::Disabled,
@@ -157,11 +158,8 @@ impl SessionConfig {
     }
 
     /// Generates all required HELO/EHLO bodies in advance
-    fn generate_ehlo(hostname: &str, max_message_size: usize) -> (Bytes, Bytes, Bytes) {
-        // HELO
-        let helo = format!("250 {hostname} you had me at HELO\r\n");
-
-        let mut response = EhloResponse::new(&hostname);
+    fn generate_ehlo(hostname: &str, max_message_size: usize) -> (Bytes, Bytes) {
+        let mut response = EhloResponse::new(hostname);
         response.capabilities = EXT_ENHANCED_STATUS_CODES
             | EXT_8BIT_MIME
             | EXT_SMTP_UTF8
@@ -179,7 +177,7 @@ impl SessionConfig {
         response.capabilities |= EXT_START_TLS;
         response.write(&mut ehlo_tls).ok();
 
-        (Bytes::from(helo), Bytes::from(ehlo), Bytes::from(ehlo_tls))
+        (Bytes::from(ehlo), Bytes::from(ehlo_tls))
     }
 }
 
@@ -344,10 +342,13 @@ mod tests {
         }
     }
 
-    fn create_session<S: AsyncReadWrite>(stream: S, helo_delay: Option<Duration>) -> Session<S> {
+    fn create_session<S: AsyncReadWrite>(
+        stream: S,
+        greeting_delay: Option<Duration>,
+    ) -> Session<S> {
         let mut cfg = SessionConfig::new("test", 512);
         cfg.max_errors = 5;
-        cfg.helo_delay = helo_delay;
+        cfg.greeting_delay = greeting_delay;
         cfg.max_messages_per_session = 3;
         cfg.max_session_data = 8192;
         cfg.max_recipients = 3;

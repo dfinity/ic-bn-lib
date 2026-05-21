@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::smtp::address::EmailAddress;
 
 pub mod address;
+pub mod cli;
 pub mod ic;
 pub mod inbound;
 pub mod server;
