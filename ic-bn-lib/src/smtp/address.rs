@@ -1,7 +1,10 @@
-use std::{fmt::Display, str::FromStr};
+use std::{
+    fmt::{Debug, Display},
+    str::FromStr,
+};
 
 use derive_new::new;
-use fqdn::FQDN;
+use fqdn::{FQDN, Fqdn};
 
 use crate::smtp::ic::candid;
 
@@ -18,10 +21,11 @@ pub enum EmailAddressError {
 /// Currently we don't validate the local part at all
 /// and just consider everything to the right from the
 /// rightmost @ as a domain part.
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, new)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, new)]
 pub struct EmailAddress {
-    pub local: String,
-    pub domain: FQDN,
+    local: String,
+    domain: FQDN,
+    domain_str: String,
 }
 
 impl EmailAddress {
@@ -36,14 +40,33 @@ impl EmailAddress {
 
         Ok(Self {
             local: local.into(),
+            domain_str: domain.to_string(),
             domain,
         })
+    }
+
+    pub fn local(&self) -> &str {
+        &self.local
+    }
+
+    pub fn domain(&self) -> &Fqdn {
+        &self.domain
+    }
+
+    pub fn domain_str(&self) -> &str {
+        &self.domain_str
     }
 }
 
 impl Display for EmailAddress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}@{}", self.local, self.domain)
+        write!(f, "{}@{}", self.local, self.domain_str)
+    }
+}
+
+impl Debug for EmailAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}@{}", self.local, self.domain_str)
     }
 }
 
@@ -78,16 +101,18 @@ impl From<EmailAddress> for candid::Address {
     }
 }
 
-#[cfg(test)]
 impl PartialEq<&str> for EmailAddress {
-    #[allow(clippy::cmp_owned)]
     fn eq(&self, other: &&str) -> bool {
-        self.to_string() == *other
+        other
+            .rsplit_once('@')
+            .is_some_and(|(local, domain)| local == self.local && domain == self.domain_str)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::email;
+
     use super::*;
 
     #[test]
@@ -96,6 +121,7 @@ mod tests {
         for v in ["foo@bar", "john.doe@jane.doe", "\"foo+bar@baz\"@dead.beef"] {
             assert_eq!(EmailAddress::from_str(v).unwrap().to_string(), v);
         }
+        assert_eq!(email!("foo@bar"), "foo@bar");
 
         // no @
         assert_eq!(

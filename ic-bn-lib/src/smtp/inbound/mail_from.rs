@@ -88,7 +88,7 @@ impl<S: AsyncReadWrite> Session<S> {
         }
 
         if self.cfg.verify_sender_domain {
-            if address.domain.depth() < 2 {
+            if address.domain().depth() < 2 {
                 return self.reply("550", "5.7.2", "Sender must be an FQDN.").await;
             };
         }

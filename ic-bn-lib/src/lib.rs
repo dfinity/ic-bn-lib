@@ -28,6 +28,8 @@ use futures::StreamExt;
 use ic_bn_lib_common::Error;
 use tokio::io::AsyncWriteExt;
 
+pub use hickory_proto;
+pub use hickory_resolver;
 pub use hyper;
 pub use hyper_util;
 pub use ic_agent;

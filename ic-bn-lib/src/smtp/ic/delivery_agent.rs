@@ -8,7 +8,7 @@ use http::Method;
 use ic_agent::Agent;
 use ic_bn_lib_common::traits::http::Client;
 use moka::sync::Cache;
-use tracing::info;
+use tracing::{debug, info};
 use url::Url;
 
 use crate::{
@@ -165,12 +165,10 @@ impl IcSmtpDeliveryAgent {
     async fn resolve_canister_id(&self, address: &EmailAddress) -> Option<Principal> {
         // First check if the target domain has a canister as 1st label.
         // This covers addresses like "foo@qoctq-giaaa-aaaaa-aaaea-cai.icp0.io"
-        let lbl = address.domain.labels().next()?;
+        let lbl = address.domain().labels().next()?;
         let canister_id = Principal::from_str(lbl).ok().or_else(|| {
             // Then check custom domains
-            self.custom_domains
-                .lookup_custom_domain(&address.domain)
-                .map(|x| x.canister_id)
+            self.custom_domains.lookup_custom_domain(address.domain())
         })?;
 
         // Finally check if there's an MX canister defined
@@ -204,6 +202,11 @@ impl IcSmtpDeliveryAgent {
 #[async_trait]
 impl DeliversMail for IcSmtpDeliveryAgent {
     async fn deliver_mail(&self, message: EmailMessage) -> Result<(), DeliveryError> {
+        info!(
+            "{self}: delivering mail, ehlo: '{}', from: '{}', to: '{:?}', id '{}'",
+            message.ehlo_hostname, message.mail_from, message.rcpt_to, message.id
+        );
+
         // A single message can be (potentially) destined for several canisters/domains.
         // So we build a map (canister_id) -> (recipients).
         let mut mapping: AHashMap<Principal, Vec<EmailAddress>> =
@@ -256,6 +259,8 @@ impl ResolvesRecipient for IcSmtpDeliveryAgent {
         from: &EmailAddress,
         rcpt: &EmailAddress,
     ) -> Result<RecipientPolicy, RecipientResolveError> {
+        debug!("{self}: looking up recipient, from: '{from}', to: '{rcpt}'");
+
         // Figure out which canister we should talk to
         let canister_id = self
             .resolve_canister_id(rcpt)
@@ -309,7 +314,7 @@ mod tests {
     use super::*;
     use ahash::HashMap;
     use fqdn::{FQDN, fqdn};
-    use ic_bn_lib_common::{principal, types::CustomDomain};
+    use ic_bn_lib_common::principal;
     use indoc::indoc;
     use uuid::Uuid;
 
@@ -381,10 +386,10 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct TestDomainResolver(HashMap<FQDN, CustomDomain>);
+    struct TestDomainResolver(HashMap<FQDN, Principal>);
 
     impl LooksUpCustomDomain for TestDomainResolver {
-        fn lookup_custom_domain(&self, hostname: &fqdn::Fqdn) -> Option<CustomDomain> {
+        fn lookup_custom_domain(&self, hostname: &fqdn::Fqdn) -> Option<Principal> {
             self.0.get(hostname).cloned()
         }
     }
@@ -395,21 +400,10 @@ mod tests {
         Arc<TestIcSmtpRequestExecutor>,
     ) {
         let resolver = TestDomainResolver(HashMap::from_iter([
-            (
-                fqdn!("foo.bar"),
-                CustomDomain {
-                    name: fqdn!("foo.bar"),
-                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
-                    timestamp: 0,
-                },
-            ),
+            (fqdn!("foo.bar"), principal!("qoctq-giaaa-aaaaa-aaaea-cai")),
             (
                 fqdn!("dead.beef"),
-                CustomDomain {
-                    name: fqdn!("dead.beef"),
-                    canister_id: principal!("uqzsh-gqaaa-aaaaq-qaada-cai"),
-                    timestamp: 0,
-                },
+                principal!("uqzsh-gqaaa-aaaaq-qaada-cai"),
             ),
         ]));
 

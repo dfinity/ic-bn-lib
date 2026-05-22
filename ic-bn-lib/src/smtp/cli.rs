@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{net::SocketAddr, time::Duration};
 
 use anyhow::anyhow;
 use clap::Args;
@@ -7,42 +7,23 @@ use ic_bn_lib_common::parse_size;
 
 use crate::smtp::inbound::SessionConfig;
 
-// #[derive(Clone)]
-// pub struct SessionConfig {
-//     hostname: String,
-//     greeting: Bytes,
-//     helo: Bytes,
-//     ehlo: Bytes,
-//     ehlo_tls: Bytes,
-
-//     max_message_size: usize,
-//     pub max_recipients: usize,
-//     pub max_session_duration: Duration,
-//     pub max_session_data: usize,
-//     pub max_errors: usize,
-//     pub max_messages_per_session: usize,
-
-//     pub verify_ehlo_hostname: bool,
-//     pub verify_sender_domain: bool,
-//     pub verify_reverse_ip: bool,
-//     pub verify_spf: bool,
-//     pub helo_delay: Option<Duration>,
-
-//     pub timeout: Duration,
-//     pub tls_mode: SessionTlsMode,
-
-//     pub authenticator: Arc<MessageAuthenticator>,
-//     pub recipient_resolver: Arc<dyn ResolvesRecipient>,
-//     pub delivery_agent: Arc<dyn DeliversMail>,
-// }
-
 /// SMTP Server CLI
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
 pub struct SmtpServerCli {
-    /// SMTP server hostname to use.
+    /// Where to listen for SMTP connections.
     /// If specified - the SMTP feature is enabled.
+    #[clap(env, long, requires = "smtp_server_hostname")]
+    pub smtp_server_listen: Option<SocketAddr>,
+
+    /// SMTP server hostname to use.
+    /// Required.
     #[clap(env, long)]
     pub smtp_server_hostname: Option<String>,
+
+    /// Base domain to execute IC HTTP queries.
+    /// Used when resolving SMTP canisters mapping.
+    #[clap(env, long, default_value = "icp0.io")]
+    pub smtp_server_ic_base_domain: String,
 
     /// How long to wait before sending
     #[clap(env, long, default_value = "3s", value_parser = parse_duration)]
@@ -62,11 +43,11 @@ pub struct SmtpServerCli {
 
     /// Maximum message body size
     #[clap(env, long, default_value = "2MB", value_parser = parse_size)]
-    pub smtp_server_max_message_size: usize,
+    pub smtp_server_max_message_size: u64,
 
     /// How much data can be ingested during a single SMTP session
     #[clap(env, long, default_value = "50MB", value_parser = parse_size)]
-    pub smtp_server_max_session_data: usize,
+    pub smtp_server_max_session_data: u64,
 
     /// Maximum time that the session is allowed to be open
     #[clap(env, long, default_value = "2m", value_parser = parse_duration)]
@@ -75,6 +56,14 @@ pub struct SmtpServerCli {
     /// Timeout for SMTP read calls (how long to keep idle session open)
     #[clap(env, long, default_value = "30s", value_parser = parse_duration)]
     pub smtp_server_timeout: Duration,
+
+    /// For how long to cache Canister SMTP mappings
+    #[clap(env, long, default_value = "10m", value_parser = parse_duration)]
+    pub smtp_server_mx_canister_cache_ttl: Duration,
+
+    /// Maximum number of Canister SMTP mappings to keep in cache
+    #[clap(env, long, default_value = "100k", value_parser = parse_size)]
+    pub smtp_server_mx_canister_cache_capacity: u64,
 
     /// Whether to verify client's EHLO hostname (A record)
     #[clap(env, long)]
@@ -103,13 +92,13 @@ impl TryFrom<&SmtpServerCli> for SessionConfig {
             return Err(anyhow!("`smtp_server_hostname` is required"));
         };
 
-        let mut cfg = Self::new(hostname, v.smtp_server_max_message_size);
+        let mut cfg = Self::new(hostname, v.smtp_server_max_message_size as usize);
         cfg.greeting_delay = Some(v.smtp_server_greeting_delay);
 
         cfg.max_errors = v.smtp_server_max_errors_per_session;
         cfg.max_messages_per_session = v.smtp_server_max_messages_per_session;
         cfg.max_recipients = v.smtp_server_max_recipients;
-        cfg.max_session_data = v.smtp_server_max_session_data;
+        cfg.max_session_data = v.smtp_server_max_session_data as usize;
         cfg.max_session_duration = v.smtp_server_max_session_duration;
 
         cfg.timeout = v.smtp_server_timeout;
