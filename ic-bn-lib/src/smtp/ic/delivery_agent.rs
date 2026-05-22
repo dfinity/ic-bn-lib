@@ -255,7 +255,7 @@ impl DeliversMail for IcSmtpDeliveryAgent {
 
         // The future in this loop usually resolves instantly due to the nature of the SMTP protocol.
         // Before the mail is delivered it goes through an RCPT TO sequence which populates the cache.
-        // So making it concurrent doesn't worth it probably currently.
+        // So making it concurrent isn't worth it probably currently.
         for rcpt in message.rcpt_to {
             // Figure out which canister we should talk to
             let canister_id = self

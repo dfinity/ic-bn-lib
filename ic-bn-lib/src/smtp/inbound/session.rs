@@ -1,12 +1,10 @@
-use core::fmt;
 use std::{
     borrow::Cow,
-    fmt::Write,
+    io::{self, Write as _},
     time::{Duration, Instant},
 };
 
 use anyhow::Context;
-use arrayvec::ArrayString;
 use smtp_proto::{
     Error as SmtpError, Request,
     request::receiver::{BdatReceiver, DataReceiver, DummyDataReceiver, DummyLineReceiver},
@@ -49,9 +47,9 @@ impl<S: AsyncReadWrite> Session<S> {
             "Reply longer than supported - increase MAX_REPLY_LEN"
         );
 
-        let mut buf = ArrayString::<MAX_REPLY_LEN>::new();
-        write!(buf, "{code} {ext} {msg}\r\n").ok();
-        self.write(buf.as_bytes()).await
+        let mut buf = [0; MAX_REPLY_LEN];
+        write!(&mut buf[..], "{code} {ext} {msg}\r\n").ok();
+        self.write(&buf).await
     }
 
     /// Replies with given codes & message.
@@ -61,18 +59,19 @@ impl<S: AsyncReadWrite> Session<S> {
         &mut self,
         code: &str,
         ext: &str,
-        msg_fn: impl FnOnce(&mut ArrayString<MAX_REPLY_LEN>) -> fmt::Result,
+        msg_fn: impl FnOnce(&mut [u8]) -> io::Result<()>,
     ) -> SessionResult<()> {
-        let mut buf = ArrayString::<MAX_REPLY_LEN>::new();
-        write!(buf, "{code} {ext} ")?;
-        msg_fn(&mut buf)?;
-        write!(buf, "\r\n")?;
+        let mut buf = [0; MAX_REPLY_LEN];
 
-        self.write(buf.as_bytes()).await
+        write!(&mut buf[..], "{code} {ext} ")?;
+        msg_fn(&mut buf[..])?;
+        write!(&mut buf[..], "\r\n")?;
+
+        self.write(&buf).await
     }
 
     pub(crate) async fn ext_unsupported(&mut self, ext: &str) -> SessionResult<()> {
-        self.reply_with("501", "5.5.4", |buf| {
+        self.reply_with("501", "5.5.4", |mut buf| {
             write!(buf, "{ext} extension is not supported.")
         })
         .await
@@ -80,7 +79,7 @@ impl<S: AsyncReadWrite> Session<S> {
 
     pub(crate) async fn message_too_big(&mut self) -> SessionResult<()> {
         let max_size = self.cfg.max_message_size;
-        self.reply_with("552", "5.3.4", |buf| {
+        self.reply_with("552", "5.3.4", |mut buf| {
             write!(buf, "Message too big, we accept up to {max_size} bytes.",)
         })
         .await
@@ -127,21 +126,21 @@ impl<S: AsyncReadWrite> Session<S> {
             }
             SmtpError::SyntaxError { syntax } => {
                 return self
-                    .reply_with("501", "5.5.2", |buf| {
+                    .reply_with("501", "5.5.2", |mut buf| {
                         write!(buf, "Syntax error, expected: {syntax}")
                     })
                     .await;
             }
             SmtpError::InvalidParameter { param } => {
                 return self
-                    .reply_with("501", "5.5.4", |buf| {
+                    .reply_with("501", "5.5.4", |mut buf| {
                         write!(buf, "Invalid parameter {param:?}.")
                     })
                     .await;
             }
             SmtpError::UnsupportedParameter { param } => {
                 return self
-                    .reply_with("504", "5.5.4", |buf| {
+                    .reply_with("504", "5.5.4", |mut buf| {
                         write!(buf, "Unsupported parameter {param:?}.")
                     })
                     .await;
@@ -419,13 +418,13 @@ impl<S: AsyncReadWrite> Session<S> {
 
             return match e {
                 DeliveryError::Permanent(v) => {
-                    self.reply_with("550", "5.5.0", |buf| {
+                    self.reply_with("550", "5.5.0", |mut buf| {
                         write!(buf, "Permanent delivery error: {v}")
                     })
                     .await
                 }
                 DeliveryError::Temporary(v) => {
-                    self.reply_with("450", "4.5.0", |buf| {
+                    self.reply_with("450", "4.5.0", |mut buf| {
                         write!(buf, "Temporary delivery error: {v}")
                     })
                     .await
@@ -433,7 +432,7 @@ impl<S: AsyncReadWrite> Session<S> {
             };
         }
 
-        self.reply_with("250", "2.0.0", |buf| {
+        self.reply_with("250", "2.0.0", |mut buf| {
             write!(buf, "Message ({message_size} bytes) queued with id {id}")
         })
         .await?;

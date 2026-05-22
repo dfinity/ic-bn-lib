@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fmt::Write, str::FromStr};
+use std::{borrow::Cow, io::Write as _, str::FromStr};
 
 use mail_auth::{IprevResult, Parameters, SpfResult, spf::verify::SpfParameters};
 use smtp_proto::{MAIL_BY_NOTIFY, MAIL_BY_RETURN, MailFrom};
@@ -114,7 +114,7 @@ impl<S: AsyncReadWrite> Session<S> {
                 }
                 SpfResult::Fail | SpfResult::PermError | SpfResult::SoftFail => {
                     return self
-                        .reply_with("550", "5.7.23", |buf| {
+                        .reply_with("550", "5.7.23", |mut buf| {
                             write!(buf, "SPF validation failed")?;
                             if let Some(v) = output.explanation() {
                                 write!(buf, ": {v}")?;

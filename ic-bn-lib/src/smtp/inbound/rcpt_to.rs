@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fmt::Write, str::FromStr};
+use std::{borrow::Cow, io::Write as _, str::FromStr};
 
 use smtp_proto::{
     RCPT_NOTIFY_DELAY, RCPT_NOTIFY_FAILURE, RCPT_NOTIFY_NEVER, RCPT_NOTIFY_SUCCESS, RcptTo,
@@ -63,26 +63,27 @@ impl<S: AsyncReadWrite> Session<S> {
             },
 
             Err(e) => {
-                let (code, ext, msg) = match e {
+                return match e {
                     RecipientResolveError::UnknownDomain => {
-                        ("550", "5.1.1", "Unknown recipient domain.")
+                        self.reply("550", "5.1.1", "Unknown recipient domain.")
+                            .await
                     }
                     RecipientResolveError::UnknownRecipient => {
-                        ("550", "5.1.2", "Mailbox does not exist.")
+                        self.reply("550", "5.1.2", "Mailbox does not exist.").await
                     }
                     RecipientResolveError::Temporary(v) => {
-                        return self
-                            .reply_with("451", "4.4.3", |buf| write!(buf, "Temporary error: {v}"))
-                            .await;
+                        self.reply_with("451", "4.4.3", |mut buf| {
+                            write!(buf, "Temporary error: {v}")
+                        })
+                        .await
                     }
                     RecipientResolveError::Permanent(v) => {
-                        return self
-                            .reply_with("550", "5.1.3", |buf| write!(buf, "Permanent error: {v}"))
-                            .await;
+                        self.reply_with("550", "5.1.3", |mut buf| {
+                            write!(buf, "Permanent error: {v}")
+                        })
+                        .await
                     }
                 };
-
-                return self.reply(code, ext, msg).await;
             }
         }
 
