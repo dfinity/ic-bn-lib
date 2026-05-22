@@ -182,7 +182,7 @@ impl IcSmtpDeliveryAgent {
         // First check if the target domain has a canister as 1st label.
         // This covers addresses like "foo@qoctq-giaaa-aaaaa-aaaea-cai.icp0.io"
         let lbl = address.domain().labels().next()?;
-        let canister_id = Principal::from_str(lbl)
+        let Some(canister_id) = Principal::from_str(lbl)
             .ok()
             .inspect(|x| {
                 debug!("{self}: {address}: found canister ID in domain: {x}");
@@ -194,7 +194,11 @@ impl IcSmtpDeliveryAgent {
                     .inspect(|x| {
                         debug!("{self}: {address}: found custom domain canister ID: {x}");
                     })
-            })?;
+            })
+        else {
+            debug!("{self}: {address}: unable to resolve canister ID");
+            return None;
+        };
 
         // Finally check if there's an SMTP canister ID defined
         Some(self.resolve_smtp_canister_id(canister_id).await)
