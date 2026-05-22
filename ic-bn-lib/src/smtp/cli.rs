@@ -59,11 +59,11 @@ pub struct SmtpServerCli {
 
     /// For how long to cache Canister SMTP mappings
     #[clap(env, long, default_value = "10m", value_parser = parse_duration)]
-    pub smtp_server_mx_canister_cache_ttl: Duration,
+    pub smtp_server_canister_cache_ttl: Duration,
 
     /// Maximum number of Canister SMTP mappings to keep in cache
     #[clap(env, long, default_value = "100k", value_parser = parse_size)]
-    pub smtp_server_mx_canister_cache_capacity: u64,
+    pub smtp_server_canister_cache_capacity: u64,
 
     /// Whether to verify client's EHLO hostname (A record)
     #[clap(env, long)]

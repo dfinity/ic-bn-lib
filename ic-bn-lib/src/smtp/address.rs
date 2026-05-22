@@ -3,7 +3,6 @@ use std::{
     str::FromStr,
 };
 
-use derive_new::new;
 use fqdn::{FQDN, Fqdn};
 
 use crate::smtp::ic::candid;
@@ -21,7 +20,7 @@ pub enum EmailAddressError {
 /// Currently we don't validate the local part at all
 /// and just consider everything to the right from the
 /// rightmost @ as a domain part.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, new)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct EmailAddress {
     local: String,
     domain: FQDN,
@@ -29,6 +28,14 @@ pub struct EmailAddress {
 }
 
 impl EmailAddress {
+    pub fn new(local: String, domain: FQDN) -> Self {
+        Self {
+            local,
+            domain_str: domain.to_string(),
+            domain,
+        }
+    }
+
     pub fn from_text(s: &str) -> Result<Self, EmailAddressError> {
         let (local, domain) = s.rsplit_once('@').ok_or(EmailAddressError::AtMissing)?;
         if domain.is_empty() {
