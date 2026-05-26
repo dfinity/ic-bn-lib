@@ -396,6 +396,56 @@ impl<S: AsyncReadWrite> Session<S> {
         Ok(SessionUpgrade::No)
     }
 
+    #[cfg(test)]
+    async fn verify_message(&self, _body: &[u8]) -> SessionResult<bool> {
+        Ok(true)
+    }
+
+    /// Verifies the message body using various algorithms.
+    /// TODO: Make it more testable.
+    #[cfg(not(test))]
+    async fn verify_message(&mut self, body: &[u8]) -> SessionResult<bool> {
+        use mail_auth::{AuthenticatedMessage, DkimResult};
+
+        let Some(auth_message) = AuthenticatedMessage::parse(body) else {
+            self.reply("550", "5.7.7", "Failed to parse the message")
+                .await?;
+            return Ok(false);
+        };
+
+        if auth_message.received_headers_count() > self.cfg.max_received_headers {
+            self.reply(
+                "450",
+                "4.4.6",
+                "Too many 'Received' headers. Possible loop detected.",
+            )
+            .await?;
+            return Ok(false);
+        }
+
+        if self.cfg.verify_dkim {
+            for out in self.cfg.authenticator.verify_dkim(&auth_message).await {
+                match out.result() {
+                    DkimResult::TempError(_) => {
+                        self.reply("451", "4.7.20", "DKIM validation temporary failure.")
+                            .await?;
+                        return Ok(false);
+                    }
+
+                    DkimResult::Pass | DkimResult::None => {
+                        self.reply("550", "5.7.20", "DKIM validation failed.")
+                            .await?;
+                        return Ok(false);
+                    }
+
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(true)
+    }
+
     async fn queue_message(&mut self) -> SessionResult<()> {
         #[cfg(not(test))]
         let id = Uuid::now_v7();
@@ -413,6 +463,12 @@ impl<S: AsyncReadWrite> Session<S> {
             rcpt_to: std::mem::take(&mut self.data.rcpt_to),
             body: std::mem::take(&mut self.data.message),
         };
+
+        // Run configured verification steps on the message body
+        if !self.verify_message(&message.body).await? {
+            self.reset_message();
+            return Ok(());
+        }
 
         if let Err(e) = self.cfg.delivery_agent.deliver_mail(message).await {
             self.reset_message();

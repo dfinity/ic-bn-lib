@@ -15,9 +15,9 @@ pub struct SmtpServerCli {
     #[clap(env, long, requires = "smtp_server_hostname")]
     pub smtp_server_listen: Option<SocketAddr>,
 
-    /// SMTP server hostname to use.
-    /// Required.
-    #[clap(env, long)]
+    /// SMTP server hostname to use in greeting messages etc.
+    /// Required if `smtp_server_listen` is specified.
+    #[clap(env, long, requires = "smtp_server_listen")]
     pub smtp_server_hostname: Option<String>,
 
     /// Base domain to execute IC HTTP queries.
@@ -65,6 +65,11 @@ pub struct SmtpServerCli {
     #[clap(env, long, default_value = "100k", value_parser = parse_size)]
     pub smtp_server_canister_cache_capacity: u64,
 
+    /// Whether to enforce usage of STARTTLS.
+    /// Be advised that it's effectively against standards/RFCs to do that.
+    #[clap(env, long)]
+    pub smtp_server_tls_required: bool,
+
     /// Whether to verify client's EHLO hostname (A record)
     #[clap(env, long)]
     pub smtp_server_verify_ehlo_hostname: bool,
@@ -75,13 +80,17 @@ pub struct SmtpServerCli {
     #[clap(env, long)]
     pub smtp_server_verify_reverse_ip: bool,
 
-    /// Whether to verify the sender's domain (A and MX records)
+    /// Whether to verify the sender's domain (check FQDN and lookup MX records)
     #[clap(env, long)]
     pub smtp_server_verify_sender_domain: bool,
 
     /// Whether to verify the SPF records
     #[clap(env, long)]
     pub smtp_server_verify_spf: bool,
+
+    /// Whether to verify the DKIM signatures
+    #[clap(env, long)]
+    pub smtp_server_verify_dkim: bool,
 }
 
 impl TryFrom<&SmtpServerCli> for SessionConfig {
@@ -107,6 +116,7 @@ impl TryFrom<&SmtpServerCli> for SessionConfig {
         cfg.verify_reverse_ip = v.smtp_server_verify_reverse_ip;
         cfg.verify_sender_domain = v.smtp_server_verify_sender_domain;
         cfg.verify_spf = v.smtp_server_verify_spf;
+        cfg.verify_dkim = v.smtp_server_verify_dkim;
 
         Ok(cfg)
     }

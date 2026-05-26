@@ -4,6 +4,7 @@ use mail_auth::{IprevResult, Parameters, SpfResult, spf::verify::SpfParameters};
 use smtp_proto::{MAIL_BY_NOTIFY, MAIL_BY_RETURN, MailFrom};
 
 use crate::{
+    http::dns::is_error_negative_lookup,
     network::AsyncReadWrite,
     smtp::{
         address::EmailAddress,
@@ -91,6 +92,41 @@ impl<S: AsyncReadWrite> Session<S> {
             if address.domain().depth() < 2 {
                 return self.reply("550", "5.7.2", "Sender must be an FQDN.").await;
             };
+
+            match self
+                .cfg
+                .authenticator
+                .resolver()
+                .mx_lookup(&address.domain().to_string())
+                .await
+            {
+                Ok(v) => {
+                    if v.answers().is_empty() {
+                        return self
+                            .reply(
+                                "550",
+                                "5.7.25",
+                                "No MX record matching your sender domain found.",
+                            )
+                            .await;
+                    }
+                }
+                Err(e) => {
+                    if is_error_negative_lookup(&e) {
+                        return self
+                            .reply(
+                                "550",
+                                "5.7.25",
+                                "No MX record matching your sender domain found.",
+                            )
+                            .await;
+                    } else {
+                        return self
+                            .reply("451", "4.7.25", "Temporary error validating sender domain.")
+                            .await;
+                    }
+                }
+            }
         }
 
         if self.cfg.verify_spf {

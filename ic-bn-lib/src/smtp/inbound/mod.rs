@@ -105,11 +105,13 @@ pub struct SessionConfig {
     pub max_session_data: usize,
     pub max_errors: usize,
     pub max_messages_per_session: usize,
+    pub max_received_headers: usize,
 
     pub verify_ehlo_hostname: bool,
     pub verify_sender_domain: bool,
     pub verify_reverse_ip: bool,
     pub verify_spf: bool,
+    pub verify_dkim: bool,
     pub greeting_delay: Option<Duration>,
 
     pub timeout: Duration,
@@ -139,11 +141,13 @@ impl SessionConfig {
             max_session_data: 50 * 1024 * 1024,
             max_errors: 5,
             max_messages_per_session: 5,
+            max_received_headers: 50,
 
             verify_ehlo_hostname: false,
             verify_reverse_ip: false,
             verify_sender_domain: false,
             verify_spf: false,
+            verify_dkim: false,
 
             greeting_delay: None,
             timeout: Duration::from_secs(30),
