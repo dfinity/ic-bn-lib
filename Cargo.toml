@@ -64,6 +64,11 @@ rustls = { version = "0.23.18", default-features = false, features = [
     "std",
     "brotli",
 ] }
+rustls-acme = { version = "0.15.1", default-features = false, features = [
+    "webpki-roots",
+    "tls12",
+    "aws-lc-rs",
+] }
 serde = { version = "1.0.214", features = ["derive"] }
 smtp-proto = "0.2.1"
 socket2 = "0.6.0"
