@@ -15,6 +15,7 @@ categories = []
 
 [workspace.dependencies]
 anyhow = "1.0.93"
+arrayvec = "0.7"
 async-trait = "0.1.83"
 axum = "0.8.1"
 candid = "0.10.10"

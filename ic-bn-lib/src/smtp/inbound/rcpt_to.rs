@@ -1,4 +1,4 @@
-use std::{borrow::Cow, io::Write as _, str::FromStr};
+use std::{borrow::Cow, fmt::Write as _, str::FromStr};
 
 use smtp_proto::{
     RCPT_NOTIFY_DELAY, RCPT_NOTIFY_FAILURE, RCPT_NOTIFY_NEVER, RCPT_NOTIFY_SUCCESS, RcptTo,
@@ -72,16 +72,12 @@ impl<S: AsyncReadWrite> Session<S> {
                         self.reply("550", "5.1.2", "Mailbox does not exist.").await
                     }
                     RecipientResolveError::Temporary(v) => {
-                        self.reply_with("451", "4.4.3", |mut buf| {
-                            write!(buf, "Temporary error: {v}")
-                        })
-                        .await
+                        self.reply_with("451", "4.4.3", |buf| write!(buf, "Temporary error: {v}"))
+                            .await
                     }
                     RecipientResolveError::Permanent(v) => {
-                        self.reply_with("550", "5.1.3", |mut buf| {
-                            write!(buf, "Permanent error: {v}")
-                        })
-                        .await
+                        self.reply_with("550", "5.1.3", |buf| write!(buf, "Permanent error: {v}"))
+                            .await
                     }
                 };
             }
