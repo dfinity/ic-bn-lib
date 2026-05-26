@@ -25,8 +25,10 @@ pub struct SmtpServerCli {
     #[clap(env, long, default_value = "icp0.io")]
     pub smtp_server_ic_base_domain: String,
 
-    /// How long to wait before sending
-    #[clap(env, long, default_value = "3s", value_parser = parse_duration)]
+    /// How long to wait before sending greeting banner.
+    /// This helps identify spammy clients that don't follow the protocol -
+    /// if they send us anything before the banner - they get disconnected.
+    #[clap(env, long, default_value = "2s", value_parser = parse_duration)]
     pub smtp_server_greeting_delay: Duration,
 
     /// Maximum number of recipient per message
@@ -91,6 +93,12 @@ pub struct SmtpServerCli {
     /// Whether to verify the DKIM signatures
     #[clap(env, long)]
     pub smtp_server_verify_dkim: bool,
+
+    /// Whether to require all DKIM signatures in the message to be valid.
+    /// If disabled - at least one valid signature is enough to pass the DKIM
+    /// validation.
+    #[clap(env, long)]
+    pub smtp_server_verify_dkim_strict: bool,
 }
 
 impl TryFrom<&SmtpServerCli> for SessionConfig {
@@ -117,6 +125,7 @@ impl TryFrom<&SmtpServerCli> for SessionConfig {
         cfg.verify_sender_domain = v.smtp_server_verify_sender_domain;
         cfg.verify_spf = v.smtp_server_verify_spf;
         cfg.verify_dkim = v.smtp_server_verify_dkim;
+        cfg.verify_dkim_strict = v.smtp_server_verify_dkim_strict;
 
         Ok(cfg)
     }

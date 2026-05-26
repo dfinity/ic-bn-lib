@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::Context;
 use arrayvec::ArrayString;
+use mail_auth::{AuthenticatedMessage, DkimResult};
 use smtp_proto::{
     Error as SmtpError, Request,
     request::receiver::{BdatReceiver, DataReceiver, DummyDataReceiver, DummyLineReceiver},
@@ -396,16 +397,17 @@ impl<S: AsyncReadWrite> Session<S> {
         Ok(SessionUpgrade::No)
     }
 
-    #[cfg(test)]
-    async fn verify_message(&self, _body: &[u8]) -> SessionResult<bool> {
-        Ok(true)
-    }
-
     /// Verifies the message body using various algorithms.
     /// TODO: Make it more testable.
-    #[cfg(not(test))]
-    async fn verify_message(&mut self, body: &[u8]) -> SessionResult<bool> {
-        use mail_auth::{AuthenticatedMessage, DkimResult};
+    #[allow(unreachable_code)]
+    async fn verify_message(
+        &mut self,
+        #[allow(unused_variables)] body: &[u8],
+    ) -> SessionResult<bool> {
+        #[cfg(test)]
+        {
+            return Ok(true);
+        }
 
         let Some(auth_message) = AuthenticatedMessage::parse(body) else {
             self.reply("550", "5.7.7", "Failed to parse the message")
@@ -424,21 +426,43 @@ impl<S: AsyncReadWrite> Session<S> {
         }
 
         if self.cfg.verify_dkim {
-            for out in self.cfg.authenticator.verify_dkim(&auth_message).await {
-                match out.result() {
-                    DkimResult::TempError(_) => {
-                        self.reply("451", "4.7.20", "DKIM validation temporary failure.")
-                            .await?;
-                        return Ok(false);
-                    }
+            let outputs = self.cfg.authenticator.verify_dkim(&auth_message).await;
+            // Make borrow checker happy
+            let strict = self.cfg.verify_dkim_strict;
 
-                    DkimResult::Pass | DkimResult::None => {
-                        self.reply("550", "5.7.20", "DKIM validation failed.")
-                            .await?;
-                        return Ok(false);
-                    }
+            // Replies with either a temporary or a permanent error code
+            let mut reply = async || -> SessionResult<()> {
+                if outputs
+                    .iter()
+                    .any(|x| matches!(x.result(), DkimResult::TempError(_)))
+                {
+                    // If any of the signatures that failed with a temporary error - return temporary SMTP error code
+                    self.reply("451", "4.7.20", "DKIM validation temporary failure.")
+                        .await
+                } else {
+                    // Otherwise permanent
+                    self.reply("550", "5.7.20", "DKIM validation failed.").await
+                }
+            };
 
-                    _ => {}
+            if strict {
+                // Check that *all* signatures have passed validation (or there are none)
+                if !outputs
+                    .iter()
+                    .all(|x| matches!(x.result(), DkimResult::Pass | DkimResult::None))
+                {
+                    reply().await?;
+                    return Ok(false);
+                }
+            } else {
+                // Check if *any* of the signatures have passed validation (or there are none)
+                if !outputs.is_empty()
+                    && !outputs
+                        .iter()
+                        .any(|x| matches!(x.result(), DkimResult::Pass | DkimResult::None))
+                {
+                    reply().await?;
+                    return Ok(false);
                 }
             }
         }

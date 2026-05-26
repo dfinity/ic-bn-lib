@@ -112,6 +112,7 @@ pub struct SessionConfig {
     pub verify_reverse_ip: bool,
     pub verify_spf: bool,
     pub verify_dkim: bool,
+    pub verify_dkim_strict: bool,
     pub greeting_delay: Option<Duration>,
 
     pub timeout: Duration,
@@ -148,6 +149,7 @@ impl SessionConfig {
             verify_sender_domain: false,
             verify_spf: false,
             verify_dkim: false,
+            verify_dkim_strict: false,
 
             greeting_delay: None,
             timeout: Duration::from_secs(30),
