@@ -10,7 +10,7 @@ use candid::Principal;
 use hickory_proto::rr::{Record, RecordType};
 use hickory_resolver::{
     TokioResolver,
-    net::{NetError, runtime::TokioRuntimeProvider},
+    net::{DnsError as HickoryDnsError, NetError, runtime::TokioRuntimeProvider},
 };
 use hyper_util::client::legacy::connect::dns::Name as HyperName;
 use ic_agent::Agent;
@@ -35,6 +35,13 @@ pub enum DnsError {
     Resolver(#[from] NetError),
     #[error("{0}")]
     Other(#[from] anyhow::Error),
+}
+
+/// Checks if given Hickory error means there was a negative lookup
+pub fn is_error_negative_lookup(e: &NetError) -> bool {
+    e.is_no_records_found()
+        || e.is_nx_domain()
+        || matches!(e, NetError::Dns(HickoryDnsError::Nsec { .. }))
 }
 
 /// DNS-resolver based on Hickory

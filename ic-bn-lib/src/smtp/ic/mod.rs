@@ -1,4 +1,4 @@
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 
 use ::candid::{Decode, Encode, Principal};
 use anyhow::Context as _;
@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use derive_new::new;
 use ic_agent::Agent;
 use mail_parser::MessageParser;
+use tracing::debug;
 
 use crate::smtp::ic::{
     candid::{Header, Message, SmtpRequest, SmtpResponse},
@@ -35,10 +36,12 @@ impl ExecutesIcSmtpRequest for IcSmtpRequestExecutor {
     async fn canister_request(
         &self,
         canister_id: Principal,
-        request: SmtpRequest,
+        ic_smtp_request: SmtpRequest,
         validate: bool,
     ) -> Result<SmtpResponse, IcSmtpDeliveryAgentError> {
-        let arg = Encode!(&request).context("unable to encode SMTP request")?;
+        debug!("{self}: {canister_id}: sending IC SMTP request: '{ic_smtp_request:?}'");
+
+        let arg = Encode!(&ic_smtp_request).context("unable to encode SMTP request")?;
 
         let resp = if validate {
             self.0
@@ -54,8 +57,17 @@ impl ExecutesIcSmtpRequest for IcSmtpRequestExecutor {
                 .await?
         };
 
-        let resp = Decode!(&resp, SmtpResponse).context("unable to decode SMTP response")?;
-        Ok(resp)
+        let ic_smtp_response =
+            Decode!(&resp, SmtpResponse).context("unable to decode SMTP response")?;
+        debug!("{self}: {canister_id}: got IC SMTP response: '{ic_smtp_response:?}'");
+
+        Ok(ic_smtp_response)
+    }
+}
+
+impl Display for IcSmtpRequestExecutor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "IcSmtpRequestExecutor")
     }
 }
 

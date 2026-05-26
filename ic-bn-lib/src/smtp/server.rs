@@ -70,6 +70,8 @@ impl Server {
 
     /// Main connection handling loop
     pub async fn serve(&self, token: CancellationToken) -> io::Result<()> {
+        warn!("{self}: Accepting connections");
+
         loop {
             select! {
                 res = self.listener.accept() => {
@@ -77,7 +79,7 @@ impl Server {
                 }
 
                 () = token.cancelled() => {
-                    warn!("{self}: Server shutting down, closing connections");
+                    warn!("{self}: Shutting down, closing connections");
 
                     self.tracker.close();
                     if self.tracker.wait().timeout(Duration::from_secs(30)).await.is_err() {

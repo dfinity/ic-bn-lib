@@ -1,11 +1,13 @@
 use std::{
     borrow::Cow,
-    fmt::Write,
+    fmt::{self, Write as _},
+    io::Write as _,
     time::{Duration, Instant},
 };
 
 use anyhow::Context;
 use arrayvec::ArrayString;
+use mail_auth::{AuthenticatedMessage, DkimResult};
 use smtp_proto::{
     Error as SmtpError, Request,
     request::receiver::{BdatReceiver, DataReceiver, DummyDataReceiver, DummyLineReceiver},
@@ -27,7 +29,6 @@ use crate::{
     },
 };
 
-#[allow(clippy::too_many_arguments)]
 impl<S: AsyncReadWrite> Session<S> {
     /// Writes given bytes to the session & flushes the buffer
     pub async fn write(&mut self, bytes: &[u8]) -> SessionResult<()> {
@@ -48,36 +49,57 @@ impl<S: AsyncReadWrite> Session<S> {
             "Reply longer than supported - increase MAX_REPLY_LEN"
         );
 
+        let mut buf = [0; MAX_REPLY_LEN];
+        write!(&mut buf[..], "{code} {ext} {msg}\r\n").ok();
+        self.write(&buf[..len]).await
+    }
+
+    /// Replies with given codes & message.
+    /// It takes a closure that should write a message to a buffer.
+    /// Like reply() it accepts replies up to `MAX_REPLY_LEN`.
+    pub(crate) async fn reply_with(
+        &mut self,
+        code: &str,
+        ext: &str,
+        msg_fn: impl FnOnce(&mut ArrayString<MAX_REPLY_LEN>) -> fmt::Result,
+    ) -> SessionResult<()> {
         let mut buf = ArrayString::<MAX_REPLY_LEN>::new();
-        write!(buf, "{code} {ext} {msg}\r\n").ok();
+
+        write!(&mut buf, "{code} {ext} ")?;
+        // Handle the fmt::Error or if the closure overflowed the buffer.
+        // We need to send the SMTP reply anyway (even trucated) with correct CRLF termination.
+        // This shouldn't happen (all our replies are smaller), but just in case.
+        if msg_fn(&mut buf).is_err() || buf.len() > MAX_REPLY_LEN - 2 {
+            self.write(buf.as_bytes()).await?;
+            return self.write(b"\r\n").await;
+        }
+
+        write!(&mut buf, "\r\n")?;
         self.write(buf.as_bytes()).await
     }
 
     pub(crate) async fn ext_unsupported(&mut self, ext: &str) -> SessionResult<()> {
-        let mut buf = ArrayString::<MAX_REPLY_LEN>::new();
-        write!(buf, "{ext} extension is not supported.").ok();
-        self.reply("501", "5.5.4", buf.as_str()).await
+        self.reply_with("501", "5.5.4", |buf| {
+            write!(buf, "{ext} extension is not supported.")
+        })
+        .await
     }
 
     pub(crate) async fn message_too_big(&mut self) -> SessionResult<()> {
-        let mut buf = ArrayString::<MAX_REPLY_LEN>::new();
-        write!(
-            buf,
-            "Message too big, we accept up to {} bytes.",
-            self.cfg.max_message_size
-        )
-        .ok();
-
-        self.reply("552", "5.3.4", buf.as_str()).await
+        let max_size = self.cfg.max_message_size;
+        self.reply_with("552", "5.3.4", |buf| {
+            write!(buf, "Message too big, we accept up to {max_size} bytes.",)
+        })
+        .await
     }
 
     /// Sends greeting message
     async fn greeting(&mut self) -> SessionResult<()> {
-        // If we have HELO delay configured - try to read from the stream for up to this duration.
+        // If we have greeting delay configured - try to read from the stream for up to this duration.
         // The client needs to wait silently until we send our greeting.
         // If something comes in - then the client isn't respecting the protocol,
         // we consider him malicious and drop the connection.
-        if let Some(v) = self.cfg.helo_delay {
+        if let Some(v) = self.cfg.greeting_delay {
             let mut buf = [0; 256];
             match self.stream.read(&mut buf).timeout(v).await {
                 Ok(Ok(bytes_read)) => {
@@ -100,7 +122,7 @@ impl<S: AsyncReadWrite> Session<S> {
     }
 
     async fn handle_error(&mut self, error: SmtpError) -> SessionResult<()> {
-        let mut buf = ArrayString::<MAX_REPLY_LEN>::new();
+        self.counters.errors += 1;
 
         let (code, ext, msg) = match error {
             SmtpError::UnknownCommand | SmtpError::InvalidResponse { .. } => {
@@ -110,23 +132,31 @@ impl<S: AsyncReadWrite> Session<S> {
             SmtpError::InvalidRecipientAddress => {
                 ("501", "5.1.3", "Bad destination mailbox address syntax.")
             }
-            SmtpError::SyntaxError { syntax } => ("501", "5.5.2", {
-                write!(buf, "Syntax error, expected: {syntax}").ok();
-                buf.as_str()
-            }),
-            SmtpError::InvalidParameter { param } => ("501", "5.5.4", {
-                write!(buf, "Invalid parameter {param:?}.").ok();
-                buf.as_str()
-            }),
-            SmtpError::UnsupportedParameter { param } => ("504", "5.5.4", {
-                write!(buf, "Unsupported parameter {param:?}.").ok();
-                buf.as_str()
-            }),
+            SmtpError::SyntaxError { syntax } => {
+                return self
+                    .reply_with("501", "5.5.2", |buf| {
+                        write!(buf, "Syntax error, expected: {syntax}")
+                    })
+                    .await;
+            }
+            SmtpError::InvalidParameter { param } => {
+                return self
+                    .reply_with("501", "5.5.4", |buf| {
+                        write!(buf, "Invalid parameter {param:?}.")
+                    })
+                    .await;
+            }
+            SmtpError::UnsupportedParameter { param } => {
+                return self
+                    .reply_with("504", "5.5.4", |buf| {
+                        write!(buf, "Unsupported parameter {param:?}.")
+                    })
+                    .await;
+            }
             // These are handled one level above
             SmtpError::ResponseTooLong | SmtpError::NeedsMoreData { .. } => unreachable!(),
         };
 
-        self.counters.errors += 1;
         self.reply(code, ext, msg).await
     }
 
@@ -373,6 +403,79 @@ impl<S: AsyncReadWrite> Session<S> {
         Ok(SessionUpgrade::No)
     }
 
+    /// Verifies the message body using various algorithms.
+    /// TODO: Make it more testable.
+    #[allow(unreachable_code)]
+    async fn verify_message(
+        &mut self,
+        #[allow(unused_variables)] body: &[u8],
+    ) -> SessionResult<bool> {
+        #[cfg(test)]
+        {
+            return Ok(true);
+        }
+
+        let Some(auth_message) = AuthenticatedMessage::parse(body) else {
+            self.reply("550", "5.7.7", "Failed to parse the message")
+                .await?;
+            return Ok(false);
+        };
+
+        if auth_message.received_headers_count() > self.cfg.max_received_headers {
+            self.reply(
+                "450",
+                "4.4.6",
+                "Too many 'Received' headers. Possible loop detected.",
+            )
+            .await?;
+            return Ok(false);
+        }
+
+        if self.cfg.verify_dkim {
+            let outputs = self.cfg.authenticator.verify_dkim(&auth_message).await;
+            // Make borrow checker happy
+            let strict = self.cfg.verify_dkim_strict;
+
+            // Replies with either a temporary or a permanent error code
+            let mut reply = async || -> SessionResult<()> {
+                if outputs
+                    .iter()
+                    .any(|x| matches!(x.result(), DkimResult::TempError(_)))
+                {
+                    // If any of the signatures that failed with a temporary error - return temporary SMTP error code
+                    self.reply("451", "4.7.20", "DKIM validation temporary failure.")
+                        .await
+                } else {
+                    // Otherwise permanent
+                    self.reply("550", "5.7.20", "DKIM validation failed.").await
+                }
+            };
+
+            if strict {
+                // Check that *all* signatures have passed validation (or there are none)
+                if !outputs
+                    .iter()
+                    .all(|x| matches!(x.result(), DkimResult::Pass | DkimResult::None))
+                {
+                    reply().await?;
+                    return Ok(false);
+                }
+            } else {
+                // Check if *any* of the signatures have passed validation (or there are none)
+                if !outputs.is_empty()
+                    && !outputs
+                        .iter()
+                        .any(|x| matches!(x.result(), DkimResult::Pass | DkimResult::None))
+                {
+                    reply().await?;
+                    return Ok(false);
+                }
+            }
+        }
+
+        Ok(true)
+    }
+
     async fn queue_message(&mut self) -> SessionResult<()> {
         #[cfg(not(test))]
         let id = Uuid::now_v7();
@@ -391,28 +494,35 @@ impl<S: AsyncReadWrite> Session<S> {
             body: std::mem::take(&mut self.data.message),
         };
 
-        if let Err(e) = self.cfg.delivery_agent.deliver_mail(message).await {
-            let mut buf = ArrayString::<MAX_REPLY_LEN>::new();
-
-            let (code, ext) = match e {
-                DeliveryError::Permanent(v) => {
-                    write!(buf, "Permanent delivery error: {v}").ok();
-                    ("550", "5.5.0")
-                }
-                DeliveryError::Temporary(v) => {
-                    write!(buf, "Temporary delivery error: {v}").ok();
-                    ("450", "4.5.0")
-                }
-            };
-
-            self.reply(code, ext, &buf).await?;
+        // Run configured verification steps on the message body
+        if !self.verify_message(&message.body).await? {
             self.reset_message();
             return Ok(());
         }
 
-        let mut buf = ArrayString::<MAX_REPLY_LEN>::new();
-        write!(buf, "Message ({message_size} bytes) queued with id {id}").ok();
-        self.reply("250", "2.0.0", &buf).await?;
+        if let Err(e) = self.cfg.delivery_agent.deliver_mail(message).await {
+            self.reset_message();
+
+            return match e {
+                DeliveryError::Permanent(v) => {
+                    self.reply_with("550", "5.5.0", |buf| {
+                        write!(buf, "Permanent delivery error: {v}")
+                    })
+                    .await
+                }
+                DeliveryError::Temporary(v) => {
+                    self.reply_with("450", "4.5.0", |buf| {
+                        write!(buf, "Temporary delivery error: {v}")
+                    })
+                    .await
+                }
+            };
+        }
+
+        self.reply_with("250", "2.0.0", |buf| {
+            write!(buf, "Message ({message_size} bytes) queued with id {id}")
+        })
+        .await?;
 
         self.counters.messages_queued += 1;
         self.reset_message();

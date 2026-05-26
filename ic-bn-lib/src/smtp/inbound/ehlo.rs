@@ -3,6 +3,7 @@ use std::str::FromStr;
 use fqdn::FQDN;
 
 use crate::{
+    http::dns::is_error_negative_lookup,
     network::AsyncReadWrite,
     smtp::inbound::{Session, SessionResult},
 };
@@ -41,7 +42,7 @@ impl<S: AsyncReadWrite> Session<S> {
                 }
 
                 Err(e) => {
-                    if e.is_no_records_found() {
+                    if is_error_negative_lookup(&e) {
                         return self
                             .reply("550", "5.5.0", "EHLO hostname not found in DNS.")
                             .await;

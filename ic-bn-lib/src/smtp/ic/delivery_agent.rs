@@ -5,10 +5,10 @@ use async_trait::async_trait;
 use candid::Principal;
 use futures::future::try_join_all;
 use http::Method;
-use ic_agent::Agent;
+use ic_agent::{Agent, AgentError};
 use ic_bn_lib_common::traits::http::Client;
 use moka::sync::Cache;
-use tracing::info;
+use tracing::{debug, info};
 use url::Url;
 
 use crate::{
@@ -41,7 +41,7 @@ pub struct IcSmtpDeliveryAgent {
     custom_domains: Arc<dyn LooksUpCustomDomain>,
     http_client: Arc<dyn Client>,
     ic_base_domain: String,
-    mx_cache: Cache<Principal, Principal, RandomState>,
+    smtp_canister_id_cache: Cache<Principal, Principal, RandomState>,
 }
 
 impl Display for IcSmtpDeliveryAgent {
@@ -60,7 +60,7 @@ impl IcSmtpDeliveryAgent {
         cache_ttl: Duration,
         cache_capacity: u64,
     ) -> Self {
-        let mx_cache = Cache::builder()
+        let smtp_canister_id_cache = Cache::builder()
             .time_to_live(cache_ttl)
             .max_capacity(cache_capacity)
             .build_with_hasher(RandomState::default());
@@ -70,7 +70,7 @@ impl IcSmtpDeliveryAgent {
             custom_domains,
             http_client,
             ic_base_domain: ic_base_domain.into(),
-            mx_cache,
+            smtp_canister_id_cache,
         }
     }
 
@@ -96,25 +96,26 @@ impl IcSmtpDeliveryAgent {
     }
 
     /// Executes an HTTP request to the canister to get the SMTP canister id
-    async fn lookup_mx_canister(&self, canister_id: Principal) -> Option<Principal> {
+    async fn lookup_smtp_canister_id(&self, canister_id: Principal) -> Option<Principal> {
         let url = Url::parse(&format!(
             "https://{canister_id}.{}/.well-known/ic-smtp-canister-id",
             self.ic_base_domain
         ))
         .ok()?;
-        let req = reqwest::Request::new(Method::GET, url);
+        debug!("{self}: {canister_id}: Requesting SMTP canister ID using URL: {url}");
 
+        let req = reqwest::Request::new(Method::GET, url);
         let resp = match self.http_client.execute(req).await {
             Ok(v) => v,
             Err(e) => {
-                info!("{self}: {canister_id}: MX HTTP request failed: {e:#}");
+                info!("{self}: {canister_id}: SMTP canister ID request failed: {e:#}");
                 return None;
             }
         };
 
         if !resp.status().is_success() {
             info!(
-                "{self}: {canister_id}: MX HTTP request bad status code: {}",
+                "{self}: {canister_id}: SMTP canister ID request bad status code: {}",
                 resp.status()
             );
             return None;
@@ -123,73 +124,111 @@ impl IcSmtpDeliveryAgent {
         let body = match resp.bytes().await {
             Ok(v) => v,
             Err(e) => {
-                info!("{self}: {canister_id}: MX HTTP body streaming failed: {e:#}");
+                info!("{self}: {canister_id}: SMTP canister ID HTTP body streaming failed: {e:#}");
                 return None;
             }
         };
 
         // Perform optimistic UTF-8 conversion
-        let body_str = &String::from_utf8_lossy(&body);
+        let body_str = String::from_utf8_lossy(&body);
+        let body_str = body_str.trim();
 
-        match Principal::from_text(body_str.trim()) {
-            Ok(v) => Some(v),
+        match Principal::from_text(body_str) {
+            Ok(v) => {
+                debug!("{self}: {canister_id}: Got correct SMTP canister ID: {v}");
+                Some(v)
+            }
             Err(e) => {
-                info!("{self}: {canister_id}: MX HTTP: incorrect principal: ({body_str}) {e:#}");
+                // Sanitize a bit
+                let mut body_str = body_str.replace("\r", " ").replace("\n", " ");
+                body_str.truncate(128);
+                info!("{self}: {canister_id}: Incorrect SMTP canister ID: '{body_str}': {e:#}");
                 None
             }
         }
     }
 
-    /// Resolves SMTP canister id for the given canister_id
-    async fn resolve_smtp_canister_id(&self, canister_id: Principal) -> Option<Principal> {
-        // Try to find MX canister, check the cache first
-        if let Some(v) = self.mx_cache.get(&canister_id) {
-            return Some(v);
+    /// Resolves SMTP canister ID for the given canister_id
+    async fn resolve_smtp_canister_id(&self, canister_id: Principal) -> Principal {
+        debug!("{self}: {canister_id}: Looking up SMTP canister ID");
+
+        // Try to find SMTP canister ID, check the cache first
+        if let Some(v) = self.smtp_canister_id_cache.get(&canister_id) {
+            debug!("{self}: {canister_id}: SMTP canister ID found in cache: {v}");
+            return v;
         }
 
-        // Otherwise do a request with a fall back to canister_id
-        let mx_canister_id = self
-            .lookup_mx_canister(canister_id)
+        // Otherwise do a lookup with a fallback to canister_id
+        let smtp_canister_id = self
+            .lookup_smtp_canister_id(canister_id)
             .await
             .unwrap_or(canister_id);
 
-        // Store the MX canister ID in the cache.
+        // Store the SMTP canister ID in the cache.
         // We do it even if it's the same as base canister_id
-        // to avoid repeated HTTP calls even in the case when there's no MX canister.
-        self.mx_cache.insert(canister_id, mx_canister_id);
+        // to avoid repeated HTTP calls in the case when there's
+        // no dedicated SMTP canister.
+        self.smtp_canister_id_cache
+            .insert(canister_id, smtp_canister_id);
 
-        Some(mx_canister_id)
+        debug!("{self}: {canister_id}: SMTP canister ID obtained: {smtp_canister_id}");
+        smtp_canister_id
     }
 
     /// Resolves destination SMTP canister id for the given address
     async fn resolve_canister_id(&self, address: &EmailAddress) -> Option<Principal> {
+        debug!("{self}: {address}: resolving SMTP canister ID");
+
         // First check if the target domain has a canister as 1st label.
         // This covers addresses like "foo@qoctq-giaaa-aaaaa-aaaea-cai.icp0.io"
-        let lbl = address.domain.labels().next()?;
-        let canister_id = Principal::from_str(lbl).ok().or_else(|| {
-            // Then check custom domains
-            self.custom_domains
-                .lookup_custom_domain(&address.domain)
-                .map(|x| x.canister_id)
-        })?;
+        let lbl = address.domain().labels().next()?;
+        let Some(canister_id) = Principal::from_str(lbl)
+            .ok()
+            .inspect(|x| {
+                debug!("{self}: {address}: found canister ID in domain: {x}");
+            })
+            .or_else(|| {
+                // Then check custom domains
+                self.custom_domains
+                    .lookup_custom_domain(address.domain())
+                    .inspect(|x| {
+                        debug!("{self}: {address}: found custom domain canister ID: {x}");
+                    })
+            })
+        else {
+            debug!("{self}: {address}: unable to resolve canister ID");
+            return None;
+        };
 
-        // Finally check if there's an MX canister defined
-        self.resolve_smtp_canister_id(canister_id).await
+        // Finally check if there's an SMTP canister ID defined
+        Some(self.resolve_smtp_canister_id(canister_id).await)
     }
 
     /// Delivers given SMTP request to the canister
     async fn smtp_request_deliver(
         &self,
         canister_id: Principal,
-        smtp_request: SmtpRequest,
+        ic_smtp_request: SmtpRequest,
     ) -> Result<(), DeliveryError> {
-        let resp = self
+        let ic_smtp_response = self
             .request_executor
-            .canister_request(canister_id, smtp_request, false)
+            .canister_request(canister_id, ic_smtp_request, false)
             .await
-            .map_err(|e| DeliveryError::Temporary(e.to_string()))?;
+            .map_err(|e| match e {
+                IcSmtpDeliveryAgentError::Agent(AgentError::InvalidMethodError(_)) => {
+                    DeliveryError::Permanent(format!(
+                        "Canister {canister_id} does not support SMTP protocol"
+                    ))
+                }
+                _ => DeliveryError::Temporary(e.to_string()),
+            })?;
 
-        if let SmtpResponse::Err(e) = resp {
+        if let SmtpResponse::Err(e) = ic_smtp_response {
+            info!(
+                "{self}: {canister_id}: mail delivery failed: {} {}",
+                e.code, e.message
+            );
+
             if e.code >= 500 && e.code < 600 {
                 return Err(DeliveryError::Permanent(e.message));
             }
@@ -204,10 +243,19 @@ impl IcSmtpDeliveryAgent {
 #[async_trait]
 impl DeliversMail for IcSmtpDeliveryAgent {
     async fn deliver_mail(&self, message: EmailMessage) -> Result<(), DeliveryError> {
+        info!(
+            "{self}: delivering mail, ehlo: '{}', from: '{}', to: '{:?}', id '{}'",
+            message.ehlo_hostname, message.mail_from, message.rcpt_to, message.id
+        );
+
         // A single message can be (potentially) destined for several canisters/domains.
         // So we build a map (canister_id) -> (recipients).
-        let mut mapping: AHashMap<Principal, Vec<EmailAddress>> = AHashMap::new();
+        let mut mapping: AHashMap<Principal, Vec<EmailAddress>> =
+            AHashMap::with_capacity(message.rcpt_to.len());
 
+        // The future in this loop usually resolves instantly due to the nature of the SMTP protocol.
+        // Before the mail is delivered it goes through an RCPT TO sequence which populates the cache.
+        // So making it concurrent isn't worth it probably currently.
         for rcpt in message.rcpt_to {
             // Figure out which canister we should talk to
             let canister_id = self
@@ -227,8 +275,8 @@ impl DeliversMail for IcSmtpDeliveryAgent {
 
         // Deliver the message to all relevant canisters in parallel
         let mut futs = Vec::with_capacity(mapping.len());
-        for (canister_id, rcpts) in mapping.drain() {
-            let smtp_request = SmtpRequest {
+        for (canister_id, rcpts) in mapping {
+            let ic_smtp_request = SmtpRequest {
                 envelope: Some(Envelope {
                     from: message.mail_from.clone().into(),
                     to: rcpts.into_iter().map(|x| x.into()).collect(),
@@ -237,7 +285,7 @@ impl DeliversMail for IcSmtpDeliveryAgent {
                 gateway_flags: None,
             };
 
-            futs.push(self.smtp_request_deliver(canister_id, smtp_request.clone()));
+            futs.push(self.smtp_request_deliver(canister_id, ic_smtp_request));
         }
 
         try_join_all(futs).await?;
@@ -252,13 +300,15 @@ impl ResolvesRecipient for IcSmtpDeliveryAgent {
         from: &EmailAddress,
         rcpt: &EmailAddress,
     ) -> Result<RecipientPolicy, RecipientResolveError> {
+        debug!("{self}: looking up recipient, from: '{from}', to: '{rcpt}'");
+
         // Figure out which canister we should talk to
         let canister_id = self
             .resolve_canister_id(rcpt)
             .await
             .ok_or(RecipientResolveError::UnknownDomain)?;
 
-        let req = SmtpRequest {
+        let ic_smtp_request = SmtpRequest {
             envelope: Some(Envelope {
                 from: from.into(),
                 to: vec![rcpt.into()],
@@ -267,13 +317,25 @@ impl ResolvesRecipient for IcSmtpDeliveryAgent {
             gateway_flags: None,
         };
 
-        let resp = self
+        let ic_smtp_response = self
             .request_executor
-            .canister_request(canister_id, req, true)
+            .canister_request(canister_id, ic_smtp_request, true)
             .await
-            .map_err(|e| RecipientResolveError::Temporary(e.to_string()))?;
+            .map_err(|e| match e {
+                IcSmtpDeliveryAgentError::Agent(AgentError::InvalidMethodError(_)) => {
+                    RecipientResolveError::Permanent(format!(
+                        "Canister {canister_id} does not support SMTP protocol"
+                    ))
+                }
+                _ => RecipientResolveError::Temporary(e.to_string()),
+            })?;
 
-        if let SmtpResponse::Err(e) = resp {
+        if let SmtpResponse::Err(e) = ic_smtp_response {
+            info!(
+                "{self}: {canister_id}: failed to resolve recipient: {} {}",
+                e.code, e.message
+            );
+
             // Code 550 indicates that the recipient is unknown
             if e.code == 550 {
                 return Err(RecipientResolveError::UnknownRecipient);
@@ -305,7 +367,7 @@ mod tests {
     use super::*;
     use ahash::HashMap;
     use fqdn::{FQDN, fqdn};
-    use ic_bn_lib_common::{principal, types::CustomDomain};
+    use ic_bn_lib_common::principal;
     use indoc::indoc;
     use uuid::Uuid;
 
@@ -321,7 +383,7 @@ mod tests {
             assert_eq!(req.url().path(), "/.well-known/ic-smtp-canister-id");
             let canister_id = principal!(fqdn!(req.url().authority()).labels().next().unwrap());
 
-            // Respond with an MX canister id for configured canisters
+            // Respond with an SMTP canister ID for configured canisters
             if let Some(v) = self.0.get(&canister_id) {
                 self.1.fetch_add(1, Ordering::SeqCst);
 
@@ -377,10 +439,10 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct TestDomainResolver(HashMap<FQDN, CustomDomain>);
+    struct TestDomainResolver(HashMap<FQDN, Principal>);
 
     impl LooksUpCustomDomain for TestDomainResolver {
-        fn lookup_custom_domain(&self, hostname: &fqdn::Fqdn) -> Option<CustomDomain> {
+        fn lookup_custom_domain(&self, hostname: &fqdn::Fqdn) -> Option<Principal> {
             self.0.get(hostname).cloned()
         }
     }
@@ -391,21 +453,10 @@ mod tests {
         Arc<TestIcSmtpRequestExecutor>,
     ) {
         let resolver = TestDomainResolver(HashMap::from_iter([
-            (
-                fqdn!("foo.bar"),
-                CustomDomain {
-                    name: fqdn!("foo.bar"),
-                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
-                    timestamp: 0,
-                },
-            ),
+            (fqdn!("foo.bar"), principal!("qoctq-giaaa-aaaaa-aaaea-cai")),
             (
                 fqdn!("dead.beef"),
-                CustomDomain {
-                    name: fqdn!("dead.beef"),
-                    canister_id: principal!("uqzsh-gqaaa-aaaaq-qaada-cai"),
-                    timestamp: 0,
-                },
+                principal!("uqzsh-gqaaa-aaaaq-qaada-cai"),
             ),
         ]));
 
@@ -455,12 +506,12 @@ mod tests {
                 "foo@foo.bar",
                 Some(principal!("qoctq-giaaa-aaaaa-aaaea-cai")),
             ),
-            // Normal canister with MX canister set up
+            // Normal canister with SMTP canister ID set up
             (
                 "foo@gjxif-ryaaa-aaaad-ae4ka-cai.icp0.io",
                 Some(principal!("6hsbt-vqaaa-aaaaf-aaafq-cai")),
             ),
-            // Custom domain with MX canister set up
+            // Custom domain with SMTP canister ID set up
             ("foo@dead.beef", Some(principal!("aaaaa-aa"))),
             // Unknown custom domain
             ("foo@some-random-domain.org", None),
@@ -474,12 +525,12 @@ mod tests {
             }
         }
 
-        // Make sure we got right number of HTTP requests: 2 for existing MXs and 2 for missing.
+        // Make sure we got right number of HTTP requests: 2 for existing SMTP canister IDs and 2 for missing.
         assert_eq!(http_client.1.load(Ordering::SeqCst), 2);
         assert_eq!(http_client.2.load(Ordering::SeqCst), 2);
         // The rest should be served from the cache
-        delivery_agent.mx_cache.run_pending_tasks();
-        assert_eq!(delivery_agent.mx_cache.entry_count(), 4);
+        delivery_agent.smtp_canister_id_cache.run_pending_tasks();
+        assert_eq!(delivery_agent.smtp_canister_id_cache.entry_count(), 4);
     }
 
     #[tokio::test]
@@ -514,7 +565,7 @@ mod tests {
             delivery_agent
                 .resolve_recipient(
                     &email!("jane@doe.com"),
-                    // maps mx to 6hsbt-vqaaa-aaaaf-aaafq-cai
+                    // maps to 6hsbt-vqaaa-aaaaf-aaafq-cai
                     &email!("foo@gjxif-ryaaa-aaaad-ae4ka-cai.icp0.io")
                 )
                 .await

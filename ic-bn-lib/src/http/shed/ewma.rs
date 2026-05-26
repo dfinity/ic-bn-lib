@@ -92,7 +92,7 @@ impl DEWMA {
     }
 
     /// Get the average
-    pub fn get(&self, m: f64) -> Option<f64> {
+    pub const fn get(&self, m: f64) -> Option<f64> {
         // The function is undefined for the 1st measurement
         if self.iter < 2 {
             return None;
