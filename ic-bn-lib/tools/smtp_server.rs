@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt().init();
-    rustls::crypto::ring::default_provider()
+    rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .unwrap();
 

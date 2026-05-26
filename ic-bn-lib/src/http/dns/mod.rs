@@ -9,9 +9,9 @@ use async_trait::async_trait;
 use candid::Principal;
 use hickory_proto::rr::{Record, RecordType};
 use hickory_resolver::{
-    ResolveError, TokioResolver,
-    config::{NameServerConfigGroup, ResolveHosts, ResolverConfig, ResolverOpts},
-    name_server::TokioConnectionProvider,
+    TokioResolver,
+    config::{ConnectionConfig, NameServerConfig, ResolveHosts, ResolverConfig, ResolverOpts},
+    net::{NetError, runtime::TokioRuntimeProvider},
 };
 use hyper_util::client::legacy::connect::dns::Name as HyperName;
 use ic_agent::Agent;
@@ -41,20 +41,49 @@ impl Resolver {
     /// Creates a new resolver with given options.
     /// It must be called in Tokio context.
     pub fn new(o: Options) -> Self {
-        let name_servers = match o.protocol {
-            Protocol::Clear(p) => NameServerConfigGroup::from_ips_clear(&o.servers, p, true),
+        let name_servers: Vec<NameServerConfig> = match &o.protocol {
+            Protocol::Clear(p) => {
+                let port = *p;
+                o.servers
+                    .iter()
+                    .map(|&ip| {
+                        let mut udp = ConnectionConfig::udp();
+                        udp.port = port;
+                        let mut tcp = ConnectionConfig::tcp();
+                        tcp.port = port;
+                        NameServerConfig::new(ip, true, vec![udp, tcp])
+                    })
+                    .collect()
+            }
             Protocol::Tls(p) => {
-                NameServerConfigGroup::from_ips_tls(&o.servers, p, o.tls_name, true)
+                let port = *p;
+                o.servers
+                    .iter()
+                    .map(|&ip| {
+                        let mut conn = ConnectionConfig::tls(Arc::from(o.tls_name.as_str()));
+                        conn.port = port;
+                        NameServerConfig::new(ip, true, vec![conn])
+                    })
+                    .collect()
             }
             Protocol::Https(p) => {
-                NameServerConfigGroup::from_ips_https(&o.servers, p, o.tls_name, true)
+                let port = *p;
+                o.servers
+                    .iter()
+                    .map(|&ip| {
+                        let mut conn =
+                            ConnectionConfig::https(Arc::from(o.tls_name.as_str()), None);
+                        conn.port = port;
+                        NameServerConfig::new(ip, true, vec![conn])
+                    })
+                    .collect()
             }
         };
 
         let cfg = ResolverConfig::from_parts(None, vec![], name_servers);
 
         let mut opts = ResolverOpts::default();
-        opts.cache_size = o.cache_size;
+        opts.cache_size = o.cache_size as u64;
         opts.timeout = o.timeout;
         opts.ip_strategy = o.lookup_ip_strategy;
         opts.use_hosts_file = ResolveHosts::Never;
@@ -62,10 +91,11 @@ impl Resolver {
         opts.validate = !o.dnssec_disabled;
         opts.try_tcp_on_error = true;
 
-        let builder = TokioResolver::builder_with_config(cfg, TokioConnectionProvider::default())
-            .with_options(opts);
+        let builder =
+            TokioResolver::builder_with_config(cfg, TokioRuntimeProvider::default())
+                .with_options(opts);
 
-        Self(Arc::new(builder.build()))
+        Self(Arc::new(builder.build().expect("failed to build DNS resolver")))
     }
 }
 
@@ -82,8 +112,9 @@ impl Resolve for Resolver {
 
         Box::pin(async move {
             let lookup = resolver.0.lookup_ip(name.as_str()).await?;
+            let ips: Vec<IpAddr> = lookup.iter().collect();
             let addrs: Addrs = Box::new(SocketAddrs {
-                iter: Box::new(lookup.into_iter()),
+                iter: Box::new(ips.into_iter()),
             });
 
             Ok(addrs)
@@ -97,9 +128,9 @@ impl Resolves for Resolver {
         &self,
         record_type: RecordType,
         name: &str,
-    ) -> Result<Vec<Record>, ResolveError> {
+    ) -> Result<Vec<Record>, NetError> {
         let lookup = self.0.lookup(name, record_type).await?;
-        Ok(lookup.records().to_vec())
+        Ok(lookup.answers().to_vec())
     }
 
     fn flush_cache(&self) {
@@ -126,10 +157,10 @@ impl Service<HyperName> for Resolver {
                 .lookup_ip(name.as_str())
                 .await
                 .map_err(|e| Error::DnsError(e.to_string()))?;
-            let addresses = response.into_iter();
+            let addresses: Vec<IpAddr> = response.iter().collect();
 
             Ok(SocketAddrs {
-                iter: Box::new(addresses),
+                iter: Box::new(addresses.into_iter()),
             })
         })
     }
@@ -301,7 +332,7 @@ impl Resolve for ApiBnResolver {
                         .lookup_ip(name.as_str())
                         .await
                         .map_err(|e| Error::DnsError(e.to_string()))?
-                        .into_iter()
+                        .iter()
                         .collect()
                 }
             };
@@ -338,7 +369,7 @@ impl Service<HyperName> for ApiBnResolver {
                         .lookup_ip(name.as_str())
                         .await
                         .map_err(|e| Error::DnsError(e.to_string()))?
-                        .into_iter()
+                        .iter()
                         .collect()
                 }
             };

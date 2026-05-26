@@ -64,7 +64,7 @@ hyper-rustls = { version = "0.27.5", optional = true, default-features = false, 
     "http2",
     "tls12",
     "native-tokio",
-    "ring",
+    "aws-lc-rs",
     "logging",
     "webpki-roots",
 ] }
@@ -87,7 +87,7 @@ rcgen = { workspace = true, optional = true }
 regex = "1.11.2"
 reqwest = { workspace = true }
 rustls = { version = "0.23.18", default-features = false, features = [
-    "ring",
+    "aws_lc_rs",
     "std",
     "brotli",
 ] }
@@ -123,7 +123,7 @@ tokio-util = { workspace = true }
 tokio-rustls = { version = "0.26.0", default-features = false, features = [
     "tls12",
     "logging",
-    "ring",
+    "aws-lc-rs",
 ] }
 tokio-io-timeout = "1.2.0"
 tower = { version = "0.5.1", features = ["util"] }

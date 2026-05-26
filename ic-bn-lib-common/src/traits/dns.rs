@@ -2,7 +2,7 @@ use std::{fmt::Debug, pin::Pin};
 
 use async_trait::async_trait;
 use hickory_proto::rr::{Record, RecordType};
-use hickory_resolver::ResolveError;
+use hickory_resolver::net::NetError;
 use hyper_util::client::legacy::connect::dns::Name;
 use reqwest::dns::Resolve;
 use tower_service::Service;
@@ -16,7 +16,7 @@ pub trait Resolves: Send + Sync {
         &self,
         record_type: RecordType,
         name: &str,
-    ) -> Result<Vec<Record>, ResolveError>;
+    ) -> Result<Vec<Record>, NetError>;
 
     fn flush_cache(&self);
 }

@@ -1,7 +1,6 @@
 use std::str::FromStr;
 
 use fqdn::FQDN;
-use mail_auth::hickory_resolver::proto::ProtoErrorKind;
 use smtp_proto::{
     EXT_8BIT_MIME, EXT_CHUNKING, EXT_ENHANCED_STATUS_CODES, EXT_SMTP_UTF8, EXT_START_TLS,
     EhloResponse,
@@ -46,7 +45,7 @@ impl<S: AsyncReadWrite> Session<S> {
                 }
 
                 Err(e) => {
-                    if matches!(e.kind(), ProtoErrorKind::NoRecordsFound(_)) {
+                    if e.is_no_records_found() {
                         return self
                             .reply("550", "5.5.0", "EHLO hostname not found in DNS.")
                             .await;

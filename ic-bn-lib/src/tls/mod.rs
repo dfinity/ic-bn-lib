@@ -20,7 +20,7 @@ use rustls::{
     ClientConfig, ServerConfig, SupportedProtocolVersion, TicketRotator,
     client::{ClientSessionMemoryCache, Resumption},
     compress::CompressionCache,
-    crypto::ring,
+    crypto::aws_lc_rs,
     server::ResolvesServerCert,
     sign::CertifiedKey,
 };
@@ -156,7 +156,7 @@ pub fn pem_convert_to_rustls_single(pem: &[u8]) -> Result<CertifiedKey, Error> {
     }
 
     // Parse private key
-    let key = ring::sign::any_supported_type(&key).context("unable to parse private key")?;
+    let key = aws_lc_rs::sign::any_supported_type(&key).context("unable to parse private key")?;
 
     Ok(CertifiedKey::new(certs, key))
 }
@@ -294,7 +294,7 @@ mod test {
     #[test]
     fn test_prepare_client_config() {
         // rustls 0.23+ requires a process-level CryptoProvider to be installed
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         prepare_client_config(&[&rustls::version::TLS13, &rustls::version::TLS12]);
     }
 

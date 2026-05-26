@@ -1,7 +1,7 @@
 use rustls::{
     DigitallySignedStruct,
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-    crypto::{WebPkiSupportedAlgorithms, ring, verify_tls12_signature, verify_tls13_signature},
+    crypto::{WebPkiSupportedAlgorithms, aws_lc_rs, verify_tls12_signature, verify_tls13_signature},
     pki_types::{CertificateDer, ServerName, UnixTime},
 };
 
@@ -12,7 +12,7 @@ pub struct NoopServerCertVerifier(WebPkiSupportedAlgorithms);
 
 impl Default for NoopServerCertVerifier {
     fn default() -> Self {
-        Self(ring::default_provider().signature_verification_algorithms)
+        Self(aws_lc_rs::default_provider().signature_verification_algorithms)
     }
 }
 

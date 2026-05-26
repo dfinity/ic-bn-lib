@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{Context, anyhow};
 use clap::Args;
-use hickory_resolver::config::{CLOUDFLARE_IPS, LookupIpStrategy};
+use hickory_resolver::config::{CLOUDFLARE, LookupIpStrategy};
 use humantime::parse_duration;
 use strum::EnumString;
 
@@ -95,7 +95,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             protocol: Protocol::Clear(53),
-            servers: CLOUDFLARE_IPS.into(),
+            servers: CLOUDFLARE.ips.to_vec(),
             lookup_ip_strategy: LookupIpStrategy::Ipv4AndIpv6,
             cache_size: 1024,
             timeout: Duration::from_secs(3),
