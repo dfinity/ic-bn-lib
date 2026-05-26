@@ -66,9 +66,15 @@ impl<S: AsyncReadWrite> Session<S> {
         let mut buf = ArrayString::<MAX_REPLY_LEN>::new();
 
         write!(&mut buf, "{code} {ext} ")?;
-        msg_fn(&mut buf)?;
-        write!(&mut buf, "\r\n")?;
+        // Handle the fmt::Error or if the closure overflowed the buffer.
+        // We need to send the SMTP reply anyway (even trucated) with correct CRLF termination.
+        // This shouldn't happen (all our replies are smaller), but just in case.
+        if msg_fn(&mut buf).is_err() || buf.len() > MAX_REPLY_LEN - 2 {
+            self.write(buf.as_bytes()).await?;
+            return self.write(b"\r\n").await;
+        }
 
+        write!(&mut buf, "\r\n")?;
         self.write(buf.as_bytes()).await
     }
 
