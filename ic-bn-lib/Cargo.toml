@@ -4,7 +4,7 @@ name = "ic-bn-lib"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-readme.workspace = true
+#readme.workspace = true
 
 description = "Internet Computer Boundary Nodes shared modules"
 # Version is set by a Github workflow from the git tag
