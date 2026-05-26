@@ -2,7 +2,7 @@
 name = "ic-bn-lib-common"
 edition.workspace = true
 license.workspace = true
-readme.workspace = true
+#readme.workspace = true
 keywords.workspace = true
 description = "A collection of traits & types commonly used by ic-bn-lib and others"
 version = "0.1.8"
