@@ -1,7 +1,9 @@
-use std::{borrow::Cow, fmt::Write as _, str::FromStr};
+use std::{borrow::Cow, fmt::Write as _, net::IpAddr, str::FromStr};
 
-use mail_auth::{IprevResult, Parameters, SpfResult, spf::verify::SpfParameters};
+use hickory_proto::rr::RData;
+use mail_auth::{SpfResult, spf::verify::SpfParameters};
 use smtp_proto::{MAIL_BY_NOTIFY, MAIL_BY_RETURN, MailFrom};
+use tracing::{debug, info};
 
 use crate::{
     http::dns::is_error_negative_lookup,
@@ -15,7 +17,7 @@ use crate::{
 impl<S: AsyncReadWrite> Session<S> {
     /// Handles MAIL FROM command
     pub async fn handle_mail_from(&mut self, from: MailFrom<Cow<'_, str>>) -> SessionResult<()> {
-        let Some(helo_hostname) = &self.data.ehlo_hostname else {
+        let Some(helo_hostname) = self.data.ehlo_hostname.as_ref().map(|x| x.to_string()) else {
             return self
                 .reply("503", "5.5.1", "Polite people say EHLO first.")
                 .await;
@@ -63,33 +65,25 @@ impl<S: AsyncReadWrite> Session<S> {
 
         // Validate address
         let Ok(address) = EmailAddress::from_str(&from.address) else {
+            info!("{self}: {}: incorrect sender address", from.address);
             return self
                 .reply("550", "5.7.1", "Sender address is incorrect.")
                 .await;
         };
 
-        // Validate reverse IP if configured
-        if self.cfg.verify_reverse_ip {
-            let result = self
-                .cfg
-                .authenticator
-                .verify_iprev(Parameters::from(self.remote_ip))
-                .await
-                .result;
-
-            if !matches!(result, IprevResult::Pass) {
-                let (code, ext, msg) = if matches!(result, IprevResult::TempError(_)) {
-                    ("451", "4.7.25", "Temporary error validating reverse DNS.")
-                } else {
-                    ("550", "5.7.25", "Reverse DNS validation failed.")
-                };
-
-                return self.reply(code, ext, msg).await;
+        // Validate reverse IP if configured & not yet verified
+        if self.cfg.verify_reverse_ip && !self.data.reverse_ip_verified {
+            if !self.verify_reverse_ip().await? {
+                return Ok(());
             }
+
+            self.data.reverse_ip_verified = true;
+            debug!("{self}: reverse IP verification succeeded");
         }
 
         if self.cfg.verify_sender_domain {
             if address.domain().depth() < 2 {
+                info!("{self}: {address}: sender domain verification failed: not FQDN");
                 return self.reply("550", "5.7.2", "Sender must be an FQDN.").await;
             };
 
@@ -102,6 +96,9 @@ impl<S: AsyncReadWrite> Session<S> {
             {
                 Ok(v) => {
                     if v.answers().is_empty() {
+                        info!(
+                            "{self}: {address}: sender domain verification failed: no MX records found"
+                        );
                         return self
                             .reply(
                                 "550",
@@ -113,6 +110,9 @@ impl<S: AsyncReadWrite> Session<S> {
                 }
                 Err(e) => {
                     if is_error_negative_lookup(&e) {
+                        info!(
+                            "{self}: {address}: sender domain verification failed: no MX records found"
+                        );
                         return self
                             .reply(
                                 "550",
@@ -121,12 +121,17 @@ impl<S: AsyncReadWrite> Session<S> {
                             )
                             .await;
                     } else {
+                        info!(
+                            "{self}: {address}: sender domain verification failed: temporary error: {e:#}"
+                        );
                         return self
                             .reply("451", "4.7.25", "Temporary error validating sender domain.")
                             .await;
                     }
                 }
             }
+
+            debug!("{self}: sender domain verification succeeded");
         }
 
         if self.cfg.verify_spf {
@@ -135,7 +140,7 @@ impl<S: AsyncReadWrite> Session<S> {
                 .authenticator
                 .verify_spf(SpfParameters::verify_mail_from(
                     self.remote_ip,
-                    &helo_hostname.to_string(),
+                    &helo_hostname,
                     &self.cfg.hostname,
                     &from.address,
                 ))
@@ -144,11 +149,21 @@ impl<S: AsyncReadWrite> Session<S> {
             match output.result() {
                 SpfResult::Pass | SpfResult::Neutral | SpfResult::None => {}
                 SpfResult::TempError => {
+                    info!(
+                        "{self}: {address}: SPF verification failed: temporary error: {:?}",
+                        output.explanation()
+                    );
+
                     return self
                         .reply("451", "4.7.24", "Temporary SPF validation error.")
                         .await;
                 }
                 SpfResult::Fail | SpfResult::PermError | SpfResult::SoftFail => {
+                    info!(
+                        "{self}: {address}: SPF verification failed: permanent error: {:?}",
+                        output.explanation()
+                    );
+
                     return self
                         .reply_with("550", "5.7.23", |buf| {
                             write!(buf, "SPF validation failed")?;
@@ -160,11 +175,144 @@ impl<S: AsyncReadWrite> Session<S> {
                         .await;
                 }
             }
+
+            debug!("{self}: {address}: SPF verification succeeded");
         }
 
         self.reply("250", "2.1.0", "OK").await?;
         self.data.mail_from = Some(address);
 
         Ok(())
+    }
+
+    async fn verify_reverse_ip_reply(&mut self, permanent: bool, msg: &str) -> SessionResult<bool> {
+        // Emit permanent errors only if in strict mode
+        if permanent && self.cfg.verify_reverse_ip_strict {
+            self.reply_with("550", "5.7.25", |buf| {
+                write!(buf, "Reverse DNS validation failed: {msg}")
+            })
+            .await?;
+        } else {
+            self.reply_with("451", "4.7.25", |buf| {
+                write!(buf, "Temporary error validating reverse DNS: {msg}")
+            })
+            .await?;
+        }
+
+        Ok(false)
+    }
+
+    async fn verify_reverse_ip(&mut self) -> SessionResult<bool> {
+        let remote_ip = self.remote_ip;
+
+        // Get PTR records
+        let lookup = match self
+            .cfg
+            .authenticator
+            .resolver()
+            .reverse_lookup(remote_ip)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                info!("{self}: reverse IP verification failed: PTR lookup failed: {e:#}");
+                return self
+                    .verify_reverse_ip_reply(
+                        is_error_negative_lookup(&e),
+                        "unable to look up PTR record",
+                    )
+                    .await;
+            }
+        };
+
+        if lookup.answers().is_empty() {
+            info!("{self}: reverse IP verification failed: no PTR records");
+            return self
+                .verify_reverse_ip_reply(true, "no PTR records found")
+                .await;
+        }
+
+        // In non-strict mode we're already happy
+        if !self.cfg.verify_reverse_ip_strict {
+            return Ok(true);
+        }
+
+        // Take max 3 PTRs from the response to avoid DoS.
+        // Usually there should be only one anyway.
+        for ptr in lookup.answers().iter().take(3).filter_map(|r| {
+            let RData::PTR(ptr) = &r.data else {
+                return None;
+            };
+
+            Some(ptr.to_lowercase())
+        }) {
+            match remote_ip {
+                IpAddr::V4(remote_ip_v4) => {
+                    let lookup = match self.cfg.authenticator.resolver().ipv4_lookup(ptr).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            info!("{self}: reverse IP verification: PTR->IP lookup failed: {e:#}");
+                            return self
+                                .verify_reverse_ip_reply(
+                                    is_error_negative_lookup(&e),
+                                    "unable to look up IP for the PTR record",
+                                )
+                                .await;
+                        }
+                    };
+
+                    // Check if any of the addresses match the client's
+                    for v in lookup.answers().iter().filter_map(|r| {
+                        if let RData::A(a) = &r.data {
+                            Some(a.0)
+                        } else {
+                            None
+                        }
+                    }) {
+                        if v == remote_ip_v4 {
+                            return Ok(true);
+                        }
+                    }
+                }
+
+                IpAddr::V6(remote_ip_v6) => {
+                    let lookup = match self.cfg.authenticator.resolver().ipv6_lookup(ptr).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            info!("{self}: reverse IP verification: PTR->IP lookup failed: {e:#}");
+                            return self
+                                .verify_reverse_ip_reply(
+                                    is_error_negative_lookup(&e),
+                                    "unable to look up IP for the PTR record",
+                                )
+                                .await;
+                        }
+                    };
+
+                    // Check if any of the addresses match the client's
+                    for v in lookup.answers().iter().filter_map(|r| {
+                        if let RData::AAAA(a) = &r.data {
+                            Some(a.0)
+                        } else {
+                            None
+                        }
+                    }) {
+                        if v == remote_ip_v6 {
+                            return Ok(true);
+                        }
+                    }
+                }
+            };
+        }
+
+        info!(
+            "{self}: reverse IP verification failed: no addresses matching client's IP found after resolving PTR"
+        );
+        return self
+            .verify_reverse_ip_reply(
+                true,
+                "no addresses matching client's IP found after resolving PTR",
+            )
+            .await;
     }
 }

@@ -17,6 +17,7 @@ use tokio::{
     select,
 };
 use tokio_util::{sync::CancellationToken, time::FutureExt};
+use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::{
@@ -51,6 +52,7 @@ impl<S: AsyncReadWrite> Session<S> {
 
         let mut buf = [0; MAX_REPLY_LEN];
         write!(&mut buf[..], "{code} {ext} {msg}\r\n").ok();
+        debug!("-> {code} {ext} {msg}");
         self.write(&buf[..len]).await
     }
 
@@ -74,6 +76,7 @@ impl<S: AsyncReadWrite> Session<S> {
             return self.write(b"\r\n").await;
         }
 
+        debug!("-> {buf}");
         write!(&mut buf, "\r\n")?;
         self.write(buf.as_bytes()).await
     }
@@ -163,26 +166,33 @@ impl<S: AsyncReadWrite> Session<S> {
     async fn handle_request(&mut self, req: Request<Cow<'_, str>>) -> SessionResult<()> {
         match req {
             Request::Ehlo { host } => {
+                debug!("{self}: <- EHLO {host}");
                 self.handle_ehlo(&host, true).await?;
             }
             Request::Helo { host } => {
+                debug!("{self}: <- HELO {host}");
                 self.handle_ehlo(&host, false).await?;
             }
             Request::Mail { from } => {
+                debug!("{self}: <- MAIL FROM: {}", from.address);
                 self.handle_mail_from(from).await?;
             }
             Request::Rcpt { to } => {
+                debug!("{self}: <- RCPT TO: {}", to.address);
                 self.handle_rcpt_to(to).await?;
             }
             Request::Rset => {
+                debug!("{self}: <- RSET");
                 self.reset_message();
                 self.reply("250", "2.0.0", "OK").await?;
             }
             Request::Quit => {
+                debug!("{self}: <- QUIT");
                 self.reply("221", "2.0.0", "Bye.").await?;
                 return Err(SessionError::Quit);
             }
             Request::Noop { .. } => {
+                debug!("{self}: <- NOOP");
                 self.reply("250", "2.0.0", "OK").await?;
             }
             _ => {
@@ -238,6 +248,7 @@ impl<S: AsyncReadWrite> Session<S> {
                         Ok(request) => match request {
                             // ASCII data
                             Request::Data => {
+                                debug!("{self}: <- DATA");
                                 if self.can_accept_message().await? {
                                     self.write(b"354 Start mail input; end with <CRLF>.<CRLF>\r\n")
                                         .await?;
@@ -251,6 +262,7 @@ impl<S: AsyncReadWrite> Session<S> {
                                 chunk_size,
                                 is_last,
                             } => {
+                                debug!("{self}: <- BDAT");
                                 // Check if we will be past max message limit with this chunk
                                 state = if self.data.message.len() + chunk_size
                                     > self.cfg.max_message_size
@@ -270,6 +282,7 @@ impl<S: AsyncReadWrite> Session<S> {
                                 }
                             }
                             Request::StartTls => {
+                                debug!("{self}: <- STARTTLS");
                                 if self.tls_info.is_some() {
                                     self.reply("504", "5.7.4", "Already in TLS mode.").await?;
                                     self.counters.errors += 1;
@@ -416,12 +429,14 @@ impl<S: AsyncReadWrite> Session<S> {
         }
 
         let Some(auth_message) = AuthenticatedMessage::parse(body) else {
+            info!("{self}: message parsing failed");
             self.reply("550", "5.7.7", "Failed to parse the message")
                 .await?;
             return Ok(false);
         };
 
         if auth_message.received_headers_count() > self.cfg.max_received_headers {
+            info!("{self}: message verification failed: too many 'Received' headers");
             self.reply(
                 "450",
                 "4.4.6",
@@ -435,6 +450,7 @@ impl<S: AsyncReadWrite> Session<S> {
             let outputs = self.cfg.authenticator.verify_dkim(&auth_message).await;
             // Make borrow checker happy
             let strict = self.cfg.verify_dkim_strict;
+            let log_name = self.to_string();
 
             // Replies with either a temporary or a permanent error code
             let mut reply = async || -> SessionResult<()> {
@@ -443,33 +459,40 @@ impl<S: AsyncReadWrite> Session<S> {
                     .any(|x| matches!(x.result(), DkimResult::TempError(_)))
                 {
                     // If any of the signatures that failed with a temporary error - return temporary SMTP error code
+                    info!("{log_name}: DKIM verification temporary failure");
                     self.reply("451", "4.7.20", "DKIM validation temporary failure.")
                         .await
                 } else {
                     // Otherwise permanent
+                    info!("{log_name}: DKIM verification failure");
                     self.reply("550", "5.7.20", "DKIM validation failed.").await
                 }
             };
 
+            let signatures_passed = outputs
+                .iter()
+                .filter(|x| matches!(x.result(), DkimResult::Pass))
+                .count();
+
             if strict {
                 // Check that *all* signatures have passed validation (or there are none)
-                if !outputs
-                    .iter()
-                    .all(|x| matches!(x.result(), DkimResult::Pass | DkimResult::None))
-                {
+                if outputs.len() != signatures_passed {
                     reply().await?;
                     return Ok(false);
                 }
             } else {
                 // Check if *any* of the signatures have passed validation (or there are none)
-                if !outputs.is_empty()
-                    && !outputs
-                        .iter()
-                        .any(|x| matches!(x.result(), DkimResult::Pass | DkimResult::None))
-                {
+                if !outputs.is_empty() && signatures_passed == 0 {
                     reply().await?;
                     return Ok(false);
                 }
+            }
+
+            if signatures_passed > 0 {
+                debug!(
+                    "{log_name}: DKIM validation succeeded ({signatures_passed}/{} signatures passed)",
+                    outputs.len()
+                );
             }
         }
 
@@ -501,6 +524,7 @@ impl<S: AsyncReadWrite> Session<S> {
         }
 
         if let Err(e) = self.cfg.delivery_agent.deliver_mail(message).await {
+            info!("{self}: message delivery failed: {e:#}");
             self.reset_message();
 
             return match e {
@@ -519,6 +543,7 @@ impl<S: AsyncReadWrite> Session<S> {
             };
         }
 
+        info!("{self}: message ({message_size} bytes) queued with id {id}");
         self.reply_with("250", "2.0.0", |buf| {
             write!(buf, "Message ({message_size} bytes) queued with id {id}")
         })

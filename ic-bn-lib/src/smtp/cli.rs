@@ -72,17 +72,23 @@ pub struct SmtpServerCli {
     #[clap(env, long)]
     pub smtp_server_tls_required: bool,
 
-    /// Whether to verify client's EHLO hostname (A record)
+    /// Whether to verify client's EHLO hostname.
+    /// Checks that it's an FQDN & that an A/AAAA record exists.
     #[clap(env, long)]
     pub smtp_server_verify_ehlo_hostname: bool,
 
-    /// Whether to verify reverse IP of the SMTP clients.
-    /// It should resolve to a hostname and that hostname should resolve back to the same IP.
-    /// Also an IP should match the client's IP.
+    /// Whether to verify reverse IP of SMTP clients.
+    /// The IP needs to have a PTR record present.
     #[clap(env, long)]
     pub smtp_server_verify_reverse_ip: bool,
 
-    /// Whether to verify the sender's domain (check FQDN and lookup MX records)
+    /// Whether to apply stricter rules to the reverse IP of SMTP clients.
+    /// The PTR record should resolve back to the client's IP.
+    /// This also maps permanent validation errors to the permanent SMTP failures (5xx).
+    #[clap(env, long)]
+    pub smtp_server_verify_reverse_ip_strict: bool,
+
+    /// Whether to verify the sender's domain (check it's an FQDN and look up MX records)
     #[clap(env, long)]
     pub smtp_server_verify_sender_domain: bool,
 
@@ -122,6 +128,7 @@ impl TryFrom<&SmtpServerCli> for SessionConfig {
 
         cfg.verify_ehlo_hostname = v.smtp_server_verify_ehlo_hostname;
         cfg.verify_reverse_ip = v.smtp_server_verify_reverse_ip;
+        cfg.verify_reverse_ip_strict = v.smtp_server_verify_reverse_ip_strict;
         cfg.verify_sender_domain = v.smtp_server_verify_sender_domain;
         cfg.verify_spf = v.smtp_server_verify_spf;
         cfg.verify_dkim = v.smtp_server_verify_dkim;

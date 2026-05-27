@@ -27,7 +27,7 @@ pub const DEFAULT_RESOLVERS: &[IpAddr] = &[
 ];
 
 /// Copycat of `hickory_resolver::config::LookupIpStrategy` but with `FromStr` derived for CLI
-#[derive(Clone, Copy, Debug, PartialEq, Eq, EnumString)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, EnumString)]
 #[strum(serialize_all = "snake_case")]
 pub enum LookupStrategy {
     /// Only query for A (Ipv4) records
@@ -35,10 +35,11 @@ pub enum LookupStrategy {
     /// Only query for AAAA (Ipv6) records
     Ipv6Only,
     /// Query for A and AAAA in parallel
+    #[default]
     Ipv4AndIpv6,
     /// Query for Ipv6 if that fails, query for Ipv4
     Ipv6ThenIpv4,
-    /// Query for Ipv4 if that fails, query for Ipv6 (default)
+    /// Query for Ipv4 if that fails, query for Ipv6
     Ipv4ThenIpv6,
 }
 
@@ -169,6 +170,10 @@ pub struct DnsCli {
     #[clap(env, long, default_value = "5s", value_parser = parse_duration)]
     pub dns_timeout: Duration,
 
+    /// Number of resolving attempts to do
+    #[clap(env, long, default_value = "3")]
+    pub dns_attempts: usize,
+
     /// TLS name to expect for TLS and HTTPS protocols (e.g. "dns.google" or "cloudflare-dns.com")
     #[clap(env, long, default_value = "cloudflare-dns.com")]
     pub dns_tls_name: String,
@@ -197,6 +202,7 @@ impl From<&DnsCli> for ResolverOpts {
         let mut opts = ResolverOpts::default();
         opts.cache_size = c.dns_cache_size;
         opts.timeout = c.dns_timeout;
+        opts.attempts = c.dns_attempts;
         opts.ip_strategy = c.dns_lookup_strategy.into();
         opts.use_hosts_file = ResolveHosts::Never;
         opts.preserve_intermediates = false;

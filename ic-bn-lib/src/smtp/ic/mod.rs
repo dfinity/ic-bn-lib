@@ -92,19 +92,14 @@ pub fn parse_email(raw: &[u8]) -> Result<Message, IcSmtpDeliveryAgentError> {
     // Get the offset to the beginning of the body
     let body_offset = parsed.root_part().offset_body as usize;
 
-    // Should never happen, just a precaution
-    if body_offset >= raw.len() {
-        return Err(IcSmtpDeliveryAgentError::Parser(
-            "Incorrect body offset".into(),
-        ));
-    }
-
-    let msg = Message {
-        headers,
-        body: raw[body_offset..].into(),
+    // In case of an empty body the offeset would be == len
+    let body = if body_offset >= raw.len() {
+        vec![]
+    } else {
+        raw[body_offset..].into()
     };
 
-    Ok(msg)
+    Ok(Message { headers, body })
 }
 
 #[cfg(test)]
@@ -224,5 +219,23 @@ mod tests {
             parse_email(raw.as_bytes()).unwrap_err(),
             IcSmtpDeliveryAgentError::Parser(_)
         ));
+    }
+
+    #[test]
+    fn test_empty_body() {
+        let raw = indoc! {r#"
+            From: Igor Novgorodov <igor@novg.net>
+            Content-Type: text/plain
+            Content-Transfer-Encoding: 7bit
+            Mime-Version: 1.0 (Mac OS X Mail 16.0 \(3864.600.51.1.1\))
+            Subject: II-Recovery-ae3eb3c2fff5b256
+            X-Universally-Unique-Identifier: 1096E119-BB3F-4C1C-B43F-CE5FD830D693
+            Message-Id: <A05648D4-1996-4B72-8D18-FC5122445F27@novg.net>
+            Date: Wed, 27 May 2026 12:10:22 +0200
+            To: register@beta.id.ai
+
+        "#};
+
+        parse_email(raw.as_bytes()).unwrap();
     }
 }

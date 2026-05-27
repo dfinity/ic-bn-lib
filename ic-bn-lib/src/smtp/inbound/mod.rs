@@ -110,6 +110,7 @@ pub struct SessionConfig {
     pub verify_ehlo_hostname: bool,
     pub verify_sender_domain: bool,
     pub verify_reverse_ip: bool,
+    pub verify_reverse_ip_strict: bool,
     pub verify_spf: bool,
     pub verify_dkim: bool,
     pub verify_dkim_strict: bool,
@@ -146,6 +147,7 @@ impl SessionConfig {
 
             verify_ehlo_hostname: false,
             verify_reverse_ip: false,
+            verify_reverse_ip_strict: false,
             verify_sender_domain: false,
             verify_spf: false,
             verify_dkim: false,
@@ -215,10 +217,11 @@ impl Default for SessionState {
 /// SMTP dynamic session data
 #[derive(Debug, Default)]
 pub struct SessionData {
-    pub ehlo_hostname: Option<FQDN>,
-    pub mail_from: Option<EmailAddress>,
-    pub rcpt_to: Vec<EmailAddress>,
-    pub message: Vec<u8>,
+    reverse_ip_verified: bool,
+    ehlo_hostname: Option<FQDN>,
+    mail_from: Option<EmailAddress>,
+    rcpt_to: Vec<EmailAddress>,
+    message: Vec<u8>,
 }
 
 /// SMTP session counters
