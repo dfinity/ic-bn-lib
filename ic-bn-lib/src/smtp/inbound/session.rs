@@ -471,7 +471,7 @@ impl<S: AsyncReadWrite> Session<S> {
 
             let signatures_passed = outputs
                 .iter()
-                .filter(|x| matches!(x.result(), DkimResult::Pass))
+                .filter(|x| matches!(x.result(), DkimResult::Pass | DkimResult::None))
                 .count();
 
             if strict {

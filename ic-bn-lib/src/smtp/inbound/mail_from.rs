@@ -1,6 +1,9 @@
 use std::{borrow::Cow, fmt::Write as _, net::IpAddr, str::FromStr};
 
-use hickory_proto::rr::RData;
+use hickory_proto::rr::{
+    Name, RData,
+    rdata::{A, AAAA},
+};
 use mail_auth::{SpfResult, spf::verify::SpfParameters};
 use smtp_proto::{MAIL_BY_NOTIFY, MAIL_BY_RETURN, MailFrom};
 use tracing::{debug, info};
@@ -150,7 +153,7 @@ impl<S: AsyncReadWrite> Session<S> {
                 SpfResult::Pass | SpfResult::Neutral | SpfResult::None => {}
                 SpfResult::TempError => {
                     info!(
-                        "{self}: {address}: SPF verification failed: temporary error: {:?}",
+                        "{self}: {address}: SPF validation failed: temporary error: {:?}",
                         output.explanation()
                     );
 
@@ -160,7 +163,7 @@ impl<S: AsyncReadWrite> Session<S> {
                 }
                 SpfResult::Fail | SpfResult::PermError | SpfResult::SoftFail => {
                     info!(
-                        "{self}: {address}: SPF verification failed: permanent error: {:?}",
+                        "{self}: {address}: SPF validation failed: permanent error: {:?}",
                         output.explanation()
                     );
 
@@ -185,6 +188,7 @@ impl<S: AsyncReadWrite> Session<S> {
         Ok(())
     }
 
+    /// Replies about failed reverse IP verification
     async fn verify_reverse_ip_reply(&mut self, permanent: bool, msg: &str) -> SessionResult<bool> {
         // Emit permanent errors only if in strict mode
         if permanent && self.cfg.verify_reverse_ip_strict {
@@ -202,6 +206,64 @@ impl<S: AsyncReadWrite> Session<S> {
         Ok(false)
     }
 
+    /// Checks if given PTR resolves back to the client's IP
+    async fn verify_reverse_ip_ptr(&mut self, ptr: Name) -> SessionResult<bool> {
+        let remote_ip = self.remote_ip;
+
+        match remote_ip {
+            IpAddr::V4(remote_ip_v4) => {
+                let lookup = match self.cfg.authenticator.resolver().ipv4_lookup(ptr).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        info!("{self}: reverse IP verification: PTR->IP lookup failed: {e:#}");
+                        return self
+                            .verify_reverse_ip_reply(
+                                is_error_negative_lookup(&e),
+                                "unable to look up IP for the PTR record",
+                            )
+                            .await;
+                    }
+                };
+
+                // Check if any of the addresses match the client's
+                if lookup
+                    .answers()
+                    .iter()
+                    .any(|x| x.data == RData::A(A(remote_ip_v4)))
+                {
+                    return Ok(true);
+                }
+            }
+
+            IpAddr::V6(remote_ip_v6) => {
+                let lookup = match self.cfg.authenticator.resolver().ipv6_lookup(ptr).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        info!("{self}: reverse IP verification: PTR->IP lookup failed: {e:#}");
+                        return self
+                            .verify_reverse_ip_reply(
+                                is_error_negative_lookup(&e),
+                                "unable to look up IP for the PTR record",
+                            )
+                            .await;
+                    }
+                };
+
+                // Check if any of the addresses match the client's
+                if lookup
+                    .answers()
+                    .iter()
+                    .any(|x| x.data == RData::AAAA(AAAA(remote_ip_v6)))
+                {
+                    return Ok(true);
+                }
+            }
+        };
+
+        Ok(false)
+    }
+
+    /// Verifies correctness of the client's reverse IP mapping
     async fn verify_reverse_ip(&mut self) -> SessionResult<bool> {
         let remote_ip = self.remote_ip;
 
@@ -239,70 +301,18 @@ impl<S: AsyncReadWrite> Session<S> {
 
         // Take max 3 PTRs from the response to avoid DoS.
         // Usually there should be only one anyway.
-        for ptr in lookup.answers().iter().take(3).filter_map(|r| {
-            let RData::PTR(ptr) = &r.data else {
-                return None;
-            };
-
-            Some(ptr.to_lowercase())
-        }) {
-            match remote_ip {
-                IpAddr::V4(remote_ip_v4) => {
-                    let lookup = match self.cfg.authenticator.resolver().ipv4_lookup(ptr).await {
-                        Ok(v) => v,
-                        Err(e) => {
-                            info!("{self}: reverse IP verification: PTR->IP lookup failed: {e:#}");
-                            return self
-                                .verify_reverse_ip_reply(
-                                    is_error_negative_lookup(&e),
-                                    "unable to look up IP for the PTR record",
-                                )
-                                .await;
-                        }
-                    };
-
-                    // Check if any of the addresses match the client's
-                    for v in lookup.answers().iter().filter_map(|r| {
-                        if let RData::A(a) = &r.data {
-                            Some(a.0)
-                        } else {
-                            None
-                        }
-                    }) {
-                        if v == remote_ip_v4 {
-                            return Ok(true);
-                        }
-                    }
-                }
-
-                IpAddr::V6(remote_ip_v6) => {
-                    let lookup = match self.cfg.authenticator.resolver().ipv6_lookup(ptr).await {
-                        Ok(v) => v,
-                        Err(e) => {
-                            info!("{self}: reverse IP verification: PTR->IP lookup failed: {e:#}");
-                            return self
-                                .verify_reverse_ip_reply(
-                                    is_error_negative_lookup(&e),
-                                    "unable to look up IP for the PTR record",
-                                )
-                                .await;
-                        }
-                    };
-
-                    // Check if any of the addresses match the client's
-                    for v in lookup.answers().iter().filter_map(|r| {
-                        if let RData::AAAA(a) = &r.data {
-                            Some(a.0)
-                        } else {
-                            None
-                        }
-                    }) {
-                        if v == remote_ip_v6 {
-                            return Ok(true);
-                        }
-                    }
-                }
-            };
+        for ptr in lookup
+            .answers()
+            .iter()
+            .filter_map(|r| match &r.data {
+                RData::PTR(ptr) => Some(ptr.to_lowercase()),
+                _ => None,
+            })
+            .take(3)
+        {
+            if self.verify_reverse_ip_ptr(ptr).await? {
+                return Ok(true);
+            }
         }
 
         info!(

@@ -92,7 +92,7 @@ pub fn parse_email(raw: &[u8]) -> Result<Message, IcSmtpDeliveryAgentError> {
     // Get the offset to the beginning of the body
     let body_offset = parsed.root_part().offset_body as usize;
 
-    // In case of an empty body the offeset would be == len
+    // In case of an empty body the offset would be == len
     let body = if body_offset >= raw.len() {
         vec![]
     } else {
@@ -236,6 +236,7 @@ mod tests {
 
         "#};
 
-        parse_email(raw.as_bytes()).unwrap();
+        let r = parse_email(raw.as_bytes()).unwrap();
+        assert!(r.body.is_empty());
     }
 }

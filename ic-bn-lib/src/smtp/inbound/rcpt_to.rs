@@ -12,6 +12,7 @@ use crate::{
         address::EmailAddress,
         inbound::{MAX_REPLY_LEN, Session, SessionResult},
     },
+    truncate,
 };
 
 impl<S: AsyncReadWrite> Session<S> {
@@ -81,15 +82,17 @@ impl<S: AsyncReadWrite> Session<S> {
                         self.reply("550", "5.1.2", "Mailbox does not exist.").await
                     }
                     // Truncate the errors so that they don't overflow the reply buffer
-                    RecipientResolveError::Temporary(mut v) => {
-                        v.truncate(MAX_REPLY_LEN - 32);
-                        self.reply_with("451", "4.4.3", |buf| write!(buf, "Temporary error: {v}"))
-                            .await
+                    RecipientResolveError::Temporary(v) => {
+                        self.reply_with("451", "4.4.3", |buf| {
+                            write!(buf, "Temporary error: {}", truncate(&v, MAX_REPLY_LEN - 32))
+                        })
+                        .await
                     }
-                    RecipientResolveError::Permanent(mut v) => {
-                        v.truncate(MAX_REPLY_LEN - 32);
-                        self.reply_with("550", "5.1.3", |buf| write!(buf, "Permanent error: {v}"))
-                            .await
+                    RecipientResolveError::Permanent(v) => {
+                        self.reply_with("550", "5.1.3", |buf| {
+                            write!(buf, "Permanent error: {}", truncate(&v, MAX_REPLY_LEN - 32))
+                        })
+                        .await
                     }
                 };
             }
