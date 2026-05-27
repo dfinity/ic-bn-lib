@@ -183,7 +183,7 @@ macro_rules! dyn_event {
 }
 
 /// Truncates the given string to around n *bytes*,
-/// on the closest UTF-8 grapheme boundary.
+/// on the closest UTF-8 code point boundary.
 pub fn truncate(s: &str, n: usize) -> &str {
     let n = s.len().min(n);
     let m = (0..=n)
@@ -197,10 +197,11 @@ mod test {
     use super::*;
 
     #[test]
-    fn test_trucate() {
+    fn test_truncate() {
         assert_eq!(truncate("foobarbaz", 4), "foob");
         assert_eq!(truncate("tättähäärä härkä", 12), "tättähää");
         assert_eq!(truncate("", 99), "");
+        assert_eq!(truncate("🏁", 2), "");
         assert_eq!(truncate("foobarbaz", 99), "foobarbaz");
     }
 }

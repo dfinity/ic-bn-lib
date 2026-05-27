@@ -14,6 +14,7 @@ use std::{
 
 use bytes::Bytes;
 use fqdn::FQDN;
+use hickory_resolver::net::NetError;
 use ic_bn_lib_common::types::http::TlsInfo;
 use mail_auth::MessageAuthenticator;
 use rustls::ServerConfig;
@@ -43,6 +44,8 @@ pub enum SessionError {
     Io(#[from] io::Error),
     #[error("Fmt error: {0}")]
     Fmt(#[from] fmt::Error),
+    #[error("Dns error: {0}")]
+    Dns(#[from] NetError),
     #[error("Timed out")]
     Timeout,
     #[error("{0}")]

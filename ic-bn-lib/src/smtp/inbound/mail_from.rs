@@ -4,6 +4,7 @@ use hickory_proto::rr::{
     Name, RData,
     rdata::{A, AAAA},
 };
+use hickory_resolver::net::NetError;
 use mail_auth::{SpfResult, spf::verify::SpfParameters};
 use smtp_proto::{MAIL_BY_NOTIFY, MAIL_BY_RETURN, MailFrom};
 use tracing::{debug, info};
@@ -207,53 +208,27 @@ impl<S: AsyncReadWrite> Session<S> {
     }
 
     /// Checks if given PTR resolves back to the client's IP
-    async fn verify_reverse_ip_ptr(&mut self, ptr: Name) -> SessionResult<bool> {
+    async fn verify_reverse_ip_ptr(&self, ptr: Name) -> Result<bool, NetError> {
         let remote_ip = self.remote_ip;
 
         match remote_ip {
-            IpAddr::V4(remote_ip_v4) => {
-                let lookup = match self.cfg.authenticator.resolver().ipv4_lookup(ptr).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        info!("{self}: reverse IP verification: PTR->IP lookup failed: {e:#}");
-                        return self
-                            .verify_reverse_ip_reply(
-                                is_error_negative_lookup(&e),
-                                "unable to look up IP for the PTR record",
-                            )
-                            .await;
-                    }
-                };
+            IpAddr::V4(v4) => {
+                let lookup = self.cfg.authenticator.resolver().ipv4_lookup(ptr).await?;
 
                 // Check if any of the addresses match the client's
-                if lookup
-                    .answers()
-                    .iter()
-                    .any(|x| x.data == RData::A(A(remote_ip_v4)))
-                {
+                if lookup.answers().iter().any(|x| x.data == RData::A(A(v4))) {
                     return Ok(true);
                 }
             }
 
-            IpAddr::V6(remote_ip_v6) => {
-                let lookup = match self.cfg.authenticator.resolver().ipv6_lookup(ptr).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        info!("{self}: reverse IP verification: PTR->IP lookup failed: {e:#}");
-                        return self
-                            .verify_reverse_ip_reply(
-                                is_error_negative_lookup(&e),
-                                "unable to look up IP for the PTR record",
-                            )
-                            .await;
-                    }
-                };
+            IpAddr::V6(v6) => {
+                let lookup = self.cfg.authenticator.resolver().ipv6_lookup(ptr).await?;
 
                 // Check if any of the addresses match the client's
                 if lookup
                     .answers()
                     .iter()
-                    .any(|x| x.data == RData::AAAA(AAAA(remote_ip_v6)))
+                    .any(|x| x.data == RData::AAAA(AAAA(v6)))
                 {
                     return Ok(true);
                 }
@@ -301,6 +276,7 @@ impl<S: AsyncReadWrite> Session<S> {
 
         // Take max 3 PTRs from the response to avoid DoS.
         // Usually there should be only one anyway.
+        let mut last_error = None;
         for ptr in lookup
             .answers()
             .iter()
@@ -310,11 +286,30 @@ impl<S: AsyncReadWrite> Session<S> {
             })
             .take(3)
         {
-            if self.verify_reverse_ip_ptr(ptr).await? {
-                return Ok(true);
+            match self.verify_reverse_ip_ptr(ptr).await {
+                Ok(v) => {
+                    if v {
+                        return Ok(true);
+                    }
+                }
+                Err(e) => {
+                    info!("{self}: reverse IP verification: PTR->IP lookup failed: {e:#}");
+                    last_error = Some(e);
+                }
             }
         }
 
+        // Return the last error if there was any
+        if let Some(e) = last_error {
+            return self
+                .verify_reverse_ip_reply(
+                    is_error_negative_lookup(&e),
+                    "unable to look up IP for the PTR record",
+                )
+                .await;
+        }
+
+        // Otherwise everything succeeded but no matches found
         info!(
             "{self}: reverse IP verification failed: no addresses matching client's IP found after resolving PTR"
         );
