@@ -528,7 +528,7 @@ mod tests {
                 ehlo_hostname: fqdn!("foo.bar"),
                 mail_from: "foo@bar".try_into().unwrap(),
                 rcpt_to: vec!["bar@baz".try_into().unwrap()],
-                body: b"012345678998765432100123456789".to_vec(),
+                body: "012345678998765432100123456789".into(),
             })
         );
     }
@@ -569,7 +569,7 @@ mod tests {
                 ehlo_hostname: fqdn!("foo.bar"),
                 mail_from: email!("foo@bar"),
                 rcpt_to: vec![email!("bar@baz")],
-                body: b"foobarmessage".to_vec(),
+                body: "foobarmessage".into(),
             })
         )
     }
@@ -613,7 +613,7 @@ mod tests {
                 ehlo_hostname: fqdn!("foo.bar"),
                 mail_from: email!("foo@bar"),
                 rcpt_to: vec![email!("dead@beef"), email!("dead@dead"), email!("bar@bax"),],
-                body: b"foobarmessage".to_vec(),
+                body: "foobarmessage".into(),
             })
         )
     }

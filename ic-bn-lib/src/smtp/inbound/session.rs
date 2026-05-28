@@ -421,22 +421,28 @@ impl<S: AsyncReadWrite> Session<S> {
     #[allow(unreachable_code)]
     async fn verify_message(
         &mut self,
-        #[allow(unused_variables)] body: &[u8],
+        #[allow(unused_variables)] msg: &EmailMessage,
     ) -> SessionResult<bool> {
         #[cfg(test)]
         {
             return Ok(true);
         }
 
-        let Some(auth_message) = AuthenticatedMessage::parse(body) else {
-            info!("{self}: message parsing failed");
+        let Some(auth_message) = AuthenticatedMessage::parse(&msg.body) else {
+            info!(
+                "{self}: {}: {} -> {:?}: message parsing failed",
+                msg.ehlo_hostname, msg.mail_from, msg.rcpt_to
+            );
             self.reply("550", "5.7.7", "Failed to parse the message")
                 .await?;
             return Ok(false);
         };
 
         if auth_message.received_headers_count() > self.cfg.max_received_headers {
-            info!("{self}: message verification failed: too many 'Received' headers");
+            info!(
+                "{self}: {}: {} -> {:?}: message verification failed: too many 'Received' headers",
+                msg.ehlo_hostname, msg.mail_from, msg.rcpt_to
+            );
             self.reply(
                 "450",
                 "4.4.6",
@@ -459,12 +465,18 @@ impl<S: AsyncReadWrite> Session<S> {
                     .any(|x| matches!(x.result(), DkimResult::TempError(_)))
                 {
                     // If any of the signatures that failed with a temporary error - return temporary SMTP error code
-                    info!("{log_name}: DKIM verification temporary failure");
+                    info!(
+                        "{log_name}: {}: {} -> {:?}: DKIM verification temporary failure",
+                        msg.ehlo_hostname, msg.mail_from, msg.rcpt_to
+                    );
                     self.reply("451", "4.7.20", "DKIM validation temporary failure.")
                         .await
                 } else {
                     // Otherwise permanent
-                    info!("{log_name}: DKIM verification failure");
+                    info!(
+                        "{log_name}: {}: {} -> {:?}: DKIM verification failure",
+                        msg.ehlo_hostname, msg.mail_from, msg.rcpt_to
+                    );
                     self.reply("550", "5.7.20", "DKIM validation failed.").await
                 }
             };
@@ -490,7 +502,18 @@ impl<S: AsyncReadWrite> Session<S> {
 
             if signatures_passed > 0 {
                 debug!(
-                    "{log_name}: DKIM validation succeeded ({signatures_passed}/{} signatures passed)",
+                    "{log_name}: {}: {} -> {:?}: DKIM validation succeeded ({signatures_passed}/{} signatures passed)",
+                    msg.ehlo_hostname,
+                    msg.mail_from,
+                    msg.rcpt_to,
+                    outputs.len()
+                );
+            } else {
+                debug!(
+                    "{log_name}: {}: {} -> {:?}: DKIM validation succeeded ({signatures_passed}/{} signatures passed)",
+                    msg.ehlo_hostname,
+                    msg.mail_from,
+                    msg.rcpt_to,
                     outputs.len()
                 );
             }
@@ -509,22 +532,25 @@ impl<S: AsyncReadWrite> Session<S> {
 
         // SAFETY: Code makes sure these are all Some().
         // It's better to panic in tests if they are not.
-        let message = EmailMessage {
+        let msg = EmailMessage {
             id,
             ehlo_hostname: self.data.ehlo_hostname.clone().unwrap(),
             mail_from: self.data.mail_from.take().unwrap(),
             rcpt_to: std::mem::take(&mut self.data.rcpt_to),
-            body: std::mem::take(&mut self.data.message),
+            body: std::mem::take(&mut self.data.message).into(),
         };
 
         // Run configured verification steps on the message body
-        if !self.verify_message(&message.body).await? {
+        if !self.verify_message(&msg).await? {
             self.reset_message();
             return Ok(());
         }
 
-        if let Err(e) = self.cfg.delivery_agent.deliver_mail(message).await {
-            info!("{self}: message delivery failed: {e:#}");
+        if let Err(e) = self.cfg.delivery_agent.deliver_mail(msg.clone()).await {
+            info!(
+                "{self}: {}: {} -> {:?}: message delivery failed: {e:#}",
+                msg.ehlo_hostname, msg.mail_from, msg.rcpt_to
+            );
             self.reset_message();
 
             return match e {
@@ -543,7 +569,10 @@ impl<S: AsyncReadWrite> Session<S> {
             };
         }
 
-        info!("{self}: message ({message_size} bytes) queued with id {id}");
+        info!(
+            "{self}: {}: {} -> {:?}: message ({message_size} bytes) queued with id {id}",
+            msg.ehlo_hostname, msg.mail_from, msg.rcpt_to
+        );
         self.reply_with("250", "2.0.0", |buf| {
             write!(buf, "Message ({message_size} bytes) queued with id {id}")
         })
