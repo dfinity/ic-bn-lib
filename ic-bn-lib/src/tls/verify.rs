@@ -1,7 +1,9 @@
 use rustls::{
     DigitallySignedStruct,
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-    crypto::{WebPkiSupportedAlgorithms, aws_lc_rs, verify_tls12_signature, verify_tls13_signature},
+    crypto::{
+        WebPkiSupportedAlgorithms, aws_lc_rs, verify_tls12_signature, verify_tls13_signature,
+    },
     pki_types::{CertificateDer, ServerName, UnixTime},
 };
 

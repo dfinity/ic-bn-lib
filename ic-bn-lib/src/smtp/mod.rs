@@ -9,11 +9,13 @@ use uuid::Uuid;
 use crate::smtp::address::EmailAddress;
 
 pub mod address;
+pub mod cli;
 pub mod ic;
 pub mod inbound;
 pub mod server;
 
 /// Recipient resolution policy
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum RecipientPolicy {
     Accept,
     Rewrite(EmailAddress),
@@ -28,7 +30,9 @@ pub enum RecipientResolveError {
     #[error("Unknown domain")]
     UnknownDomain,
     #[error("{0}")]
-    Other(String),
+    Temporary(String),
+    #[error("{0}")]
+    Permanent(String),
 }
 
 /// Delivery error
@@ -41,8 +45,8 @@ pub enum DeliveryError {
 }
 
 /// Low-level E-Mail representation
-#[derive(Debug, Eq, PartialEq, Hash)]
-pub struct Message {
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub struct EmailMessage {
     pub id: Uuid,
     pub ehlo_hostname: FQDN,
     pub mail_from: EmailAddress,
@@ -50,7 +54,7 @@ pub struct Message {
     pub body: Vec<u8>,
 }
 
-impl Display for Message {
+impl Display for EmailMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -71,6 +75,7 @@ impl Display for Message {
 pub trait ResolvesRecipient: Send + Sync + Debug {
     async fn resolve_recipient(
         &self,
+        from: &EmailAddress,
         rcpt: &EmailAddress,
     ) -> Result<RecipientPolicy, RecipientResolveError>;
 }
@@ -78,7 +83,7 @@ pub trait ResolvesRecipient: Send + Sync + Debug {
 /// Delivers the E-Mail message
 #[async_trait]
 pub trait DeliversMail: Send + Sync + Debug {
-    async fn deliver_mail(&self, message: Message) -> Result<(), DeliveryError>;
+    async fn deliver_mail(&self, message: EmailMessage) -> Result<(), DeliveryError>;
 }
 
 #[derive(Debug)]
@@ -88,9 +93,10 @@ pub struct DummyRecipientResolver;
 impl ResolvesRecipient for DummyRecipientResolver {
     async fn resolve_recipient(
         &self,
+        from: &EmailAddress,
         rcpt: &EmailAddress,
     ) -> Result<RecipientPolicy, RecipientResolveError> {
-        warn!("DummyRecipientResolver: {rcpt}");
+        warn!("DummyRecipientResolver: from: {from}, to: {rcpt}");
         Ok(RecipientPolicy::Accept)
     }
 }
@@ -100,7 +106,7 @@ pub struct DummyDeliveryAgent;
 
 #[async_trait]
 impl DeliversMail for DummyDeliveryAgent {
-    async fn deliver_mail(&self, message: Message) -> Result<(), DeliveryError> {
+    async fn deliver_mail(&self, message: EmailMessage) -> Result<(), DeliveryError> {
         warn!("DummyDeliveryAgent: {message}");
         Ok(())
     }

@@ -11,6 +11,7 @@ pub mod custom_domains;
 pub mod http;
 pub mod network;
 pub mod pubsub;
+#[cfg(feature = "smtp")]
 pub mod smtp;
 pub mod tasks;
 pub mod tests;
@@ -27,16 +28,26 @@ use futures::StreamExt;
 use ic_bn_lib_common::Error;
 use tokio::io::AsyncWriteExt;
 
+pub use hickory_proto;
+pub use hickory_resolver;
 pub use hyper;
 pub use hyper_util;
 pub use ic_agent;
 pub use ic_bn_lib_common;
+#[cfg(feature = "smtp")]
+pub use mail_auth;
 pub use prometheus;
 pub use reqwest;
 pub use rustls;
 #[cfg(feature = "acme-alpn")]
 pub use rustls_acme;
 pub use uuid;
+
+/// Converts a string representation to an `EmailAddress`. Panics when an error occurs.
+#[macro_export]
+macro_rules! email {
+    ($email:expr) => {{ $crate::smtp::address::EmailAddress::from_text($email).unwrap() }};
+}
 
 /// Error to be used with `retry_async` macro
 /// which indicates whether it should be retried or not.

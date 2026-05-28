@@ -5,7 +5,7 @@ pub mod rcpt_to;
 pub mod session;
 
 use std::{
-    fmt::Display,
+    fmt::{self, Display},
     io,
     net::IpAddr,
     sync::Arc,
@@ -18,7 +18,8 @@ use ic_bn_lib_common::types::http::TlsInfo;
 use mail_auth::MessageAuthenticator;
 use rustls::ServerConfig;
 use smtp_proto::{
-    Error as SmtpError,
+    EXT_8BIT_MIME, EXT_CHUNKING, EXT_ENHANCED_STATUS_CODES, EXT_PIPELINING, EXT_SIZE,
+    EXT_SMTP_UTF8, EXT_START_TLS, EhloResponse, Error as SmtpError,
     request::receiver::{
         BdatReceiver, DataReceiver, DummyDataReceiver, DummyLineReceiver, RequestReceiver,
     },
@@ -34,10 +35,14 @@ use crate::{
     },
 };
 
+pub(crate) const MAX_REPLY_LEN: usize = 256;
+
 #[derive(thiserror::Error, Debug)]
 pub enum SessionError {
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
+    #[error("Fmt error: {0}")]
+    Fmt(#[from] fmt::Error),
     #[error("Timed out")]
     Timeout,
     #[error("{0}")]
@@ -68,6 +73,7 @@ pub enum SessionUpgrade {
 pub type SessionResult<T> = Result<T, SessionError>;
 
 /// Session TLS mode
+#[derive(Clone, Debug)]
 pub enum SessionTlsMode {
     Disabled,
     Allowed(Arc<ServerConfig>),
@@ -85,22 +91,29 @@ impl SessionTlsMode {
 }
 
 /// SMTP session config
+#[derive(Clone)]
 pub struct SessionConfig {
     hostname: String,
     greeting: Bytes,
+    helo: Bytes,
+    ehlo: Bytes,
+    ehlo_tls: Bytes,
 
-    pub max_message_size: usize,
+    max_message_size: usize,
     pub max_recipients: usize,
     pub max_session_duration: Duration,
     pub max_session_data: usize,
     pub max_errors: usize,
     pub max_messages_per_session: usize,
+    pub max_received_headers: usize,
 
     pub verify_ehlo_hostname: bool,
     pub verify_sender_domain: bool,
     pub verify_reverse_ip: bool,
     pub verify_spf: bool,
-    pub helo_delay: Option<Duration>,
+    pub verify_dkim: bool,
+    pub verify_dkim_strict: bool,
+    pub greeting_delay: Option<Duration>,
 
     pub timeout: Duration,
     pub tls_mode: SessionTlsMode,
@@ -111,30 +124,66 @@ pub struct SessionConfig {
 }
 
 impl SessionConfig {
-    pub fn new(hostname: &str) -> Self {
-        let greeting = format!("220 {hostname} ESMTP IC SMTP Gateway\r\n");
+    pub fn new(hostname: &str, max_message_size: usize) -> Self {
+        let greeting = Bytes::from(format!("220 {hostname} ESMTP IC SMTP Gateway\r\n"));
+        let helo = Bytes::from(format!("250 {hostname} you had me at HELO\r\n"));
+        let (ehlo, ehlo_tls) = Self::generate_ehlo(hostname, max_message_size);
 
         Self {
             hostname: hostname.into(),
-            greeting: Bytes::from(greeting),
-            max_message_size: 10 * 1024 * 1024,
+            greeting,
+            helo,
+            ehlo,
+            ehlo_tls,
+
+            max_message_size,
             max_recipients: 5,
             max_session_duration: Duration::from_secs(600),
             max_session_data: 50 * 1024 * 1024,
             max_errors: 5,
             max_messages_per_session: 5,
+            max_received_headers: 50,
+
             verify_ehlo_hostname: false,
             verify_reverse_ip: false,
             verify_sender_domain: false,
             verify_spf: false,
-            helo_delay: None,
+            verify_dkim: false,
+            verify_dkim_strict: false,
+
+            greeting_delay: None,
             timeout: Duration::from_secs(30),
+
             tls_mode: SessionTlsMode::Disabled,
+
             // SAFETY: this never fails
             authenticator: Arc::new(MessageAuthenticator::new_cloudflare().unwrap()),
             recipient_resolver: Arc::new(DummyRecipientResolver),
             delivery_agent: Arc::new(DummyDeliveryAgent),
         }
+    }
+
+    /// Generates all required HELO/EHLO bodies in advance
+    fn generate_ehlo(hostname: &str, max_message_size: usize) -> (Bytes, Bytes) {
+        let mut response = EhloResponse::new(hostname);
+        response.capabilities = EXT_ENHANCED_STATUS_CODES
+            | EXT_8BIT_MIME
+            | EXT_SMTP_UTF8
+            | EXT_CHUNKING
+            | EXT_SIZE
+            | EXT_PIPELINING;
+        response.size = max_message_size;
+
+        // EHLO w/o STARTTLS
+        let mut ehlo = Vec::new();
+        response.write(&mut ehlo).ok();
+
+        // EHLO with STARTTLS
+        let mut ehlo_tls = Vec::new();
+        response.capabilities |= EXT_START_TLS;
+        response.write(&mut ehlo_tls).ok();
+
+        (Bytes::from(ehlo), Bytes::from(ehlo_tls))
     }
 }
 
@@ -232,19 +281,24 @@ impl<S: AsyncReadWrite> Session<S> {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::SocketAddr, str::FromStr};
+    use std::{net::SocketAddr, str::FromStr, sync::Mutex};
 
     use async_trait::async_trait;
     use fqdn::fqdn;
+    use ic_bn_lib_common::types::http::ListenerOpts;
+    use mail_parser::{Addr, Address, MessageParser};
+    use mail_send::{SmtpClientBuilder, mail_builder::MessageBuilder};
     use rustls::{ClientConfig, pki_types::ServerName};
     use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
     use tokio_rustls::TlsConnector;
     use tokio_util::sync::CancellationToken;
 
     use crate::{
+        email,
+        network::listener::listen_tcp,
         smtp::{
-            DeliveryError, Message, RecipientPolicy, RecipientResolveError,
-            inbound::manager::SessionManager,
+            DeliveryError, EmailMessage, RecipientPolicy, RecipientResolveError,
+            inbound::manager::SessionManager, server::Server,
         },
         tests::{TEST_CERT_1, TEST_KEY_1},
         tls::{resolver::StubResolver, verify::NoopServerCertVerifier},
@@ -252,20 +306,17 @@ mod tests {
 
     use super::*;
 
-    #[derive(Debug)]
-    pub struct TestDeliveryAgent(Option<Message>, Option<DeliveryError>);
+    #[derive(Debug, Default)]
+    pub struct TestDeliveryAgent(Mutex<Option<EmailMessage>>, Option<DeliveryError>);
 
     #[async_trait]
     impl DeliversMail for TestDeliveryAgent {
-        async fn deliver_mail(&self, message: Message) -> Result<(), DeliveryError> {
+        async fn deliver_mail(&self, message: EmailMessage) -> Result<(), DeliveryError> {
             if let Some(e) = &self.1 {
                 return Err(e.clone());
             }
 
-            if let Some(v) = &self.0 {
-                assert_eq!(v, &message);
-            }
-
+            *self.0.lock().unwrap() = Some(message);
             Ok(())
         }
     }
@@ -281,6 +332,7 @@ mod tests {
     impl ResolvesRecipient for TestRecipientResolver {
         async fn resolve_recipient(
             &self,
+            _from: &EmailAddress,
             rcpt: &EmailAddress,
         ) -> Result<RecipientPolicy, RecipientResolveError> {
             assert_eq!(rcpt, &self.0);
@@ -296,11 +348,13 @@ mod tests {
         }
     }
 
-    fn create_session<S: AsyncReadWrite>(stream: S, helo_delay: Option<Duration>) -> Session<S> {
-        let mut cfg = SessionConfig::new("test");
+    fn create_session<S: AsyncReadWrite>(
+        stream: S,
+        greeting_delay: Option<Duration>,
+    ) -> Session<S> {
+        let mut cfg = SessionConfig::new("test", 512);
         cfg.max_errors = 5;
-        cfg.max_message_size = 512;
-        cfg.helo_delay = helo_delay;
+        cfg.greeting_delay = greeting_delay;
         cfg.max_messages_per_session = 3;
         cfg.max_session_data = 8192;
         cfg.max_recipients = 3;
@@ -315,7 +369,7 @@ mod tests {
             .read(b"HELO foo.bar\r\n")
             .write(b"250 test you had me at HELO\r\n")
             .read(b"EHLO foo.bar\r\n")
-            .write(b"250-test you had me at EHLO\r\n250-SMTPUTF8\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250 8BITMIME\r\n");
+            .write(b"250-test you had me at EHLO\r\n250-SMTPUTF8\r\n250-SIZE 512\r\n250-PIPELINING\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250 8BITMIME\r\n");
 
         builder
     }
@@ -337,6 +391,26 @@ mod tests {
             .write(b"220 test ESMTP IC SMTP Gateway\r\n")
             .read(b"MAIL FROM:<a@b>\r\n")
             .write(b"503 5.5.1 Polite people say EHLO first.\r\n")
+            .read(b"QUIT\r\n")
+            .write(b"221 2.0.0 Bye.\r\n")
+            .build();
+
+        let mut session = create_session(stream, None);
+
+        assert!(matches!(
+            session.handle(CancellationToken::new()).await.unwrap_err(),
+            SessionError::Quit
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_pipelining() {
+        let mut builder = create_basic_stream();
+        let stream = builder
+            .read(b"MAIL FROM:<a@a>\r\nRCPT TO:<a@b>\r\nDATA\r\n")
+            .write(b"250 2.1.0 OK\r\n250 2.1.5 OK\r\n354 Start mail input; end with <CRLF>.<CRLF>\r\n")
+            .read(b"foobarmessage\r\n.\r\n")
+            .write(b"250 2.0.0 Message (13 bytes) queued with id 00000000-0000-0000-0000-000000000000\r\n")
             .read(b"QUIT\r\n")
             .write(b"221 2.0.0 Bye.\r\n")
             .build();
@@ -422,24 +496,15 @@ mod tests {
             .write(b"221 2.0.0 Bye.\r\n")
             .build();
 
-        let agent = TestDeliveryAgent(
-            Some(Message {
-                id: Uuid::nil(),
-                ehlo_hostname: fqdn!("foo.bar"),
-                mail_from: "foo@bar".try_into().unwrap(),
-                rcpt_to: vec!["bar@baz".try_into().unwrap()],
-                body: b"012345678998765432100123456789".to_vec(),
-            }),
-            None,
-        );
+        let agent = Arc::new(TestDeliveryAgent::default());
         let resolver = TestRecipientResolver(
             "dead@beef".try_into().unwrap(),
             Some("bar@baz".try_into().unwrap()),
             None,
         );
 
-        let mut cfg = SessionConfig::new("test");
-        cfg.delivery_agent = Arc::new(agent);
+        let mut cfg = SessionConfig::new("test", 512);
+        cfg.delivery_agent = agent.clone();
         cfg.recipient_resolver = Arc::new(resolver);
 
         let mut session = Session::new(IpAddr::from_str("1.1.1.1").unwrap(), stream, Arc::new(cfg));
@@ -448,6 +513,18 @@ mod tests {
             session.handle(CancellationToken::new()).await.unwrap_err(),
             SessionError::Quit
         ));
+
+        // Make sure the agent gets the correct mail
+        assert_eq!(
+            agent.0.lock().unwrap().clone(),
+            Some(EmailMessage {
+                id: Uuid::nil(),
+                ehlo_hostname: fqdn!("foo.bar"),
+                mail_from: "foo@bar".try_into().unwrap(),
+                rcpt_to: vec!["bar@baz".try_into().unwrap()],
+                body: b"012345678998765432100123456789".to_vec(),
+            })
+        );
     }
 
     #[tokio::test]
@@ -460,24 +537,15 @@ mod tests {
             .write(b"221 2.0.0 Bye.\r\n")
             .build();
 
-        let agent = TestDeliveryAgent(
-            Some(Message {
-                id: Uuid::nil(),
-                ehlo_hostname: fqdn!("foo.bar"),
-                mail_from: EmailAddress::from_str("foo@bar").unwrap(),
-                rcpt_to: vec![EmailAddress::from_str("bar@baz").unwrap()],
-                body: b"foobarmessage".to_vec(),
-            }),
-            None,
-        );
+        let agent = Arc::new(TestDeliveryAgent::default());
         let resolver = TestRecipientResolver(
             "dead@beef".try_into().unwrap(),
             Some("bar@baz".try_into().unwrap()),
             None,
         );
 
-        let mut cfg = SessionConfig::new("test");
-        cfg.delivery_agent = Arc::new(agent);
+        let mut cfg = SessionConfig::new("test", 512);
+        cfg.delivery_agent = agent.clone();
         cfg.recipient_resolver = Arc::new(resolver);
 
         let mut session = Session::new(IpAddr::from_str("1.1.1.1").unwrap(), stream, Arc::new(cfg));
@@ -486,6 +554,18 @@ mod tests {
             session.handle(CancellationToken::new()).await.unwrap_err(),
             SessionError::Quit
         ));
+
+        // Make sure the agent gets the correct mail
+        assert_eq!(
+            agent.0.lock().unwrap().clone(),
+            Some(EmailMessage {
+                id: Uuid::nil(),
+                ehlo_hostname: fqdn!("foo.bar"),
+                mail_from: email!("foo@bar"),
+                rcpt_to: vec![email!("bar@baz")],
+                body: b"foobarmessage".to_vec(),
+            })
+        )
     }
 
     #[tokio::test]
@@ -498,20 +578,7 @@ mod tests {
             .write(b"221 2.0.0 Bye.\r\n")
             .build();
 
-        let agent = TestDeliveryAgent(
-            Some(Message {
-                id: Uuid::nil(),
-                ehlo_hostname: fqdn!("foo.bar"),
-                mail_from: EmailAddress::from_str("foo@bar").unwrap(),
-                rcpt_to: vec![
-                    EmailAddress::from_str("dead@beef").unwrap(),
-                    EmailAddress::from_str("dead@dead").unwrap(),
-                    EmailAddress::from_str("bar@bax").unwrap(),
-                ],
-                body: b"foobarmessage".to_vec(),
-            }),
-            None,
-        );
+        let agent = Arc::new(TestDeliveryAgent::default());
         let resolver = TestRecipientResolver(
             "dead@beef".try_into().unwrap(),
             None,
@@ -521,8 +588,8 @@ mod tests {
             ]),
         );
 
-        let mut cfg = SessionConfig::new("test");
-        cfg.delivery_agent = Arc::new(agent);
+        let mut cfg = SessionConfig::new("test", 512);
+        cfg.delivery_agent = agent.clone();
         cfg.recipient_resolver = Arc::new(resolver);
 
         let mut session = Session::new(IpAddr::from_str("1.1.1.1").unwrap(), stream, Arc::new(cfg));
@@ -531,6 +598,18 @@ mod tests {
             session.handle(CancellationToken::new()).await.unwrap_err(),
             SessionError::Quit
         ));
+
+        // Make sure the agent gets the correct mail
+        assert_eq!(
+            agent.0.lock().unwrap().clone(),
+            Some(EmailMessage {
+                id: Uuid::nil(),
+                ehlo_hostname: fqdn!("foo.bar"),
+                mail_from: email!("foo@bar"),
+                rcpt_to: vec![email!("dead@beef"), email!("dead@dead"), email!("bar@bax"),],
+                body: b"foobarmessage".to_vec(),
+            })
+        )
     }
 
     #[tokio::test]
@@ -570,7 +649,7 @@ mod tests {
             .read(b"DATA\r\n")
             .write(b"354 Start mail input; end with <CRLF>.<CRLF>\r\n")
             .read(format!("{}\r\n.\r\n", "1".repeat(513)).as_bytes())
-            .write(b"552 5.3.4 Message too big for, we accept up to 512 bytes.\r\n")
+            .write(b"552 5.3.4 Message too big, we accept up to 512 bytes.\r\n")
             .read(b"QUIT\r\n")
             .write(b"221 2.0.0 Bye.\r\n")
             .build();
@@ -677,7 +756,7 @@ mod tests {
             .ok();
 
         // Use an in-memory pipe
-        let (stream1, mut stream2) = duplex(128);
+        let (stream1, mut stream2) = duplex(8192);
 
         let rustls_server_cfg = ServerConfig::builder()
             .with_no_client_auth()
@@ -685,7 +764,7 @@ mod tests {
                 StubResolver::new(TEST_CERT_1.as_bytes(), TEST_KEY_1.as_bytes()).unwrap(),
             ));
 
-        let mut cfg = SessionConfig::new("test");
+        let mut cfg = SessionConfig::new("test", 512);
         cfg.tls_mode = SessionTlsMode::Required(Arc::new(rustls_server_cfg));
 
         tokio::spawn(async move {
@@ -698,15 +777,15 @@ mod tests {
             .await;
         });
 
-        let mut buf = vec![0; 256];
+        let mut buf = vec![0; 8192];
 
         let r = stream2.read(&mut buf).await.unwrap();
         assert_eq!(&buf[..r], b"220 test ESMTP IC SMTP Gateway\r\n");
 
-        // Make sure there's a 250-STARTTLS in EHLO
+        // Make sure EHLO advertises 250-STARTTLS
         stream2.write_all(b"EHLO foo.bar\r\n").await.unwrap();
         let r = stream2.read(&mut buf).await.unwrap();
-        assert_eq!(&buf[..r], b"250-test you had me at EHLO\r\n250-STARTTLS\r\n250-SMTPUTF8\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250 8BITMIME\r\n");
+        assert_eq!(&buf[..r], b"250-test you had me at EHLO\r\n250-STARTTLS\r\n250-SMTPUTF8\r\n250-SIZE 512\r\n250-PIPELINING\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250 8BITMIME\r\n");
 
         // Make sure TLS is required by the server due to SessionTlsMode::Required
         stream2.write_all(b"MAIL FROM:<a@b>\r\n").await.unwrap();
@@ -731,10 +810,10 @@ mod tests {
             .await
             .unwrap();
 
-        // Make sure there's no 250-STARTTLS in EHLO anymore inside TLS session
+        // Make sure there's no 250-STARTTLS and 250-REQUIRETLS in EHLO anymore inside TLS session
         tls_stream.write_all(b"EHLO foo.bar\r\n").await.unwrap();
         let r = tls_stream.read(&mut buf).await.unwrap();
-        assert_eq!(&buf[..r], b"250-test you had me at EHLO\r\n250-SMTPUTF8\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250 8BITMIME\r\n");
+        assert_eq!(&buf[..r], b"250-test you had me at EHLO\r\n250-SMTPUTF8\r\n250-SIZE 512\r\n250-PIPELINING\r\n250-ENHANCEDSTATUSCODES\r\n250-CHUNKING\r\n250 8BITMIME\r\n");
 
         // No TLS-in-TLS allowed
         tls_stream.write_all(b"STARTTLS\r\n").await.unwrap();
@@ -750,5 +829,86 @@ mod tests {
         tls_stream.write_all(b"QUIT\r\n").await.unwrap();
         let r = tls_stream.read(&mut buf).await.unwrap();
         assert_eq!(&buf[..r], b"221 2.0.0 Bye.\r\n");
+    }
+
+    #[tokio::test]
+    async fn test_with_smtp_client() {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
+
+        let rustls_server_cfg = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(
+                StubResolver::new(TEST_CERT_1.as_bytes(), TEST_KEY_1.as_bytes()).unwrap(),
+            ));
+
+        let agent = Arc::new(TestDeliveryAgent::default());
+
+        // Listen on the random free port
+        let listener = listen_tcp("127.0.0.1:0".parse().unwrap(), ListenerOpts::default()).unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let mut cfg = SessionConfig::new("test", 10 * 1024 * 1024);
+        cfg.delivery_agent = agent.clone();
+        cfg.tls_mode = SessionTlsMode::Allowed(Arc::new(rustls_server_cfg));
+
+        let server = Server::new_with_listener(listener, cfg).unwrap();
+
+        tokio::spawn(async move {
+            server.serve(CancellationToken::new()).await.unwrap();
+        });
+
+        let message = MessageBuilder::new()
+            .from(("John Doe", "john@doe.com"))
+            .to(("Jane Doe", "jane@doe.com"))
+            .subject("Hello")
+            .text_body("Blah");
+
+        let mut client = SmtpClientBuilder::new("127.0.0.1", port)
+            .unwrap()
+            .implicit_tls(false)
+            .helo_host("foo.bar")
+            .allow_invalid_certs()
+            .connect()
+            .await
+            .unwrap();
+
+        // Try some commands
+        client.noop().await.unwrap();
+        client.rset().await.unwrap();
+
+        // Make sure we have the required caps
+        let caps = client.capabilities("foo.bar", false).await.unwrap();
+        assert_eq!(
+            caps.capabilities,
+            EXT_SMTP_UTF8
+                | EXT_8BIT_MIME
+                | EXT_CHUNKING
+                | EXT_ENHANCED_STATUS_CODES
+                | EXT_SIZE
+                | EXT_PIPELINING
+        );
+
+        client.send(message).await.unwrap();
+
+        // Make sure the agent gets the correct mail
+        let msg = agent.0.lock().unwrap().clone().unwrap();
+        assert_eq!(msg.id, Uuid::nil());
+        assert_eq!(msg.ehlo_hostname, "foo.bar");
+        assert_eq!(msg.mail_from, "john@doe.com");
+        assert_eq!(msg.rcpt_to, vec!["jane@doe.com"]);
+
+        let parsed = MessageParser::new().parse(&msg.body).unwrap();
+        assert_eq!(parsed.subject(), Some("Hello"));
+        assert_eq!(
+            *parsed.from().unwrap(),
+            Address::List(vec![Addr::new(Some("John Doe"), "john@doe.com")])
+        );
+        assert_eq!(
+            *parsed.to().unwrap(),
+            Address::List(vec![Addr::new(Some("Jane Doe"), "jane@doe.com")])
+        );
+        assert_eq!(parsed.body_text(0).unwrap(), "Blah");
     }
 }

@@ -12,12 +12,7 @@ use crate::types::{dns::SocketAddrs, http::Error};
 /// Generic trait to resolve a DNS record
 #[async_trait]
 pub trait Resolves: Send + Sync {
-    async fn resolve(
-        &self,
-        record_type: RecordType,
-        name: &str,
-    ) -> Result<Vec<Record>, NetError>;
-
+    async fn resolve(&self, record_type: RecordType, name: &str) -> Result<Vec<Record>, NetError>;
     fn flush_cache(&self);
 }
 

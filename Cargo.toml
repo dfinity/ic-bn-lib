@@ -15,6 +15,7 @@ categories = []
 
 [workspace.dependencies]
 anyhow = "1.0.93"
+arrayvec = "0.7"
 async-trait = "0.1.83"
 axum = "0.8.1"
 candid = "0.10.10"
@@ -25,7 +26,8 @@ cloudflare = { git = "https://github.com/dfinity/cloudflare-rs", rev = "7d10dca3
 derive-new = "0.7.0"
 fqdn = { version = "0.5.2" }
 hickory-proto = "0.26.1"
-hickory-resolver = { version = "0.26.1", features = [
+hickory-resolver = { version = "0.26.1", default-features = false, features = [
+    "tokio",
     "tls-aws-lc-rs",
     "https-aws-lc-rs",
     "dnssec-aws-lc-rs",
@@ -40,12 +42,16 @@ hyper-util = { version = "0.1.10", features = ["full"] }
 ic-agent = { version = "0.47.3", features = [
     "_internal_dynamic-routing",
 ] }
+ic-bn-lib-common = { version = "0.2", path = "./ic-bn-lib-common" }
 instant-acme = { version = "0.8.5", default-features = false, features = [
     "aws-lc-rs",
     "hyper-rustls",
 ] }
 mail-auth = "0.9.0"
 mail-parser = { version = "0.11.3", features = ["full_encoding"] }
+mail-send = { version = "0.6.0", default-features = false, features = [
+    "builder",
+] }
 mockall = "0.13.0"
 parse-size = { version = "1.1.0", features = ["std"] }
 prometheus = "0.14.0"

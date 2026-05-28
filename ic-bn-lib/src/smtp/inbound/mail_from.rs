@@ -1,9 +1,10 @@
-use std::{borrow::Cow, fmt::Write, str::FromStr};
+use std::{borrow::Cow, fmt::Write as _, str::FromStr};
 
 use mail_auth::{IprevResult, Parameters, SpfResult, spf::verify::SpfParameters};
 use smtp_proto::{MAIL_BY_NOTIFY, MAIL_BY_RETURN, MailFrom};
 
 use crate::{
+    http::dns::is_error_negative_lookup,
     network::AsyncReadWrite,
     smtp::{
         address::EmailAddress,
@@ -87,6 +88,47 @@ impl<S: AsyncReadWrite> Session<S> {
             }
         }
 
+        if self.cfg.verify_sender_domain {
+            if address.domain().depth() < 2 {
+                return self.reply("550", "5.7.2", "Sender must be an FQDN.").await;
+            };
+
+            match self
+                .cfg
+                .authenticator
+                .resolver()
+                .mx_lookup(&address.domain().to_string())
+                .await
+            {
+                Ok(v) => {
+                    if v.answers().is_empty() {
+                        return self
+                            .reply(
+                                "550",
+                                "5.7.25",
+                                "No MX record matching your sender domain found.",
+                            )
+                            .await;
+                    }
+                }
+                Err(e) => {
+                    if is_error_negative_lookup(&e) {
+                        return self
+                            .reply(
+                                "550",
+                                "5.7.25",
+                                "No MX record matching your sender domain found.",
+                            )
+                            .await;
+                    } else {
+                        return self
+                            .reply("451", "4.7.25", "Temporary error validating sender domain.")
+                            .await;
+                    }
+                }
+            }
+        }
+
         if self.cfg.verify_spf {
             let output = self
                 .cfg
@@ -107,19 +149,22 @@ impl<S: AsyncReadWrite> Session<S> {
                         .await;
                 }
                 SpfResult::Fail | SpfResult::PermError | SpfResult::SoftFail => {
-                    let mut msg = "SPF validation failed".to_string();
-                    if let Some(v) = output.explanation() {
-                        write!(msg, ": {v}.").ok();
-                    }
-                    write!(msg, "\r\n").ok();
-
-                    return self.reply("550", "5.7.23", &msg).await;
+                    return self
+                        .reply_with("550", "5.7.23", |buf| {
+                            write!(buf, "SPF validation failed")?;
+                            if let Some(v) = output.explanation() {
+                                write!(buf, ": {v}")?;
+                            }
+                            Ok(())
+                        })
+                        .await;
                 }
             }
         }
 
         self.reply("250", "2.1.0", "OK").await?;
         self.data.mail_from = Some(address);
+
         Ok(())
     }
 }

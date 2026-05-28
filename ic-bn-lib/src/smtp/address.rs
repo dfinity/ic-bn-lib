@@ -1,7 +1,12 @@
-use std::{fmt::Display, str::FromStr};
+use std::{
+    fmt::{Debug, Display},
+    str::FromStr,
+};
 
 use derive_new::new;
-use fqdn::FQDN;
+use fqdn::{FQDN, Fqdn};
+
+use crate::smtp::ic::candid;
 
 #[derive(thiserror::Error, Clone, Debug, PartialEq, Eq)]
 pub enum EmailAddressError {
@@ -16,22 +21,14 @@ pub enum EmailAddressError {
 /// Currently we don't validate the local part at all
 /// and just consider everything to the right from the
 /// rightmost @ as a domain part.
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, new)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, new)]
 pub struct EmailAddress {
-    pub local: String,
-    pub domain: FQDN,
+    local: String,
+    domain: FQDN,
 }
 
-impl Display for EmailAddress {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}@{}", self.local, self.domain)
-    }
-}
-
-impl FromStr for EmailAddress {
-    type Err = EmailAddressError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+impl EmailAddress {
+    pub fn from_text(s: &str) -> Result<Self, EmailAddressError> {
         let (local, domain) = s.rsplit_once('@').ok_or(EmailAddressError::AtMissing)?;
         if domain.is_empty() {
             return Err(EmailAddressError::DomainIncorrect("Empty domain".into()));
@@ -45,6 +42,34 @@ impl FromStr for EmailAddress {
             domain,
         })
     }
+
+    pub fn local(&self) -> &str {
+        &self.local
+    }
+
+    pub fn domain(&self) -> &Fqdn {
+        &self.domain
+    }
+}
+
+impl Display for EmailAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}@{}", self.local, self.domain)
+    }
+}
+
+impl Debug for EmailAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}@{}", self.local, self.domain)
+    }
+}
+
+impl FromStr for EmailAddress {
+    type Err = EmailAddressError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_text(s)
+    }
 }
 
 impl TryFrom<&str> for EmailAddress {
@@ -55,8 +80,33 @@ impl TryFrom<&str> for EmailAddress {
     }
 }
 
+impl From<&EmailAddress> for candid::Address {
+    fn from(v: &EmailAddress) -> Self {
+        v.clone().into()
+    }
+}
+
+impl From<EmailAddress> for candid::Address {
+    fn from(v: EmailAddress) -> Self {
+        Self {
+            user: v.local,
+            domain: v.domain.to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl PartialEq<&str> for EmailAddress {
+    #[allow(clippy::cmp_owned)]
+    fn eq(&self, other: &&str) -> bool {
+        self.to_string() == *other
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::email;
+
     use super::*;
 
     #[test]
@@ -65,6 +115,7 @@ mod tests {
         for v in ["foo@bar", "john.doe@jane.doe", "\"foo+bar@baz\"@dead.beef"] {
             assert_eq!(EmailAddress::from_str(v).unwrap().to_string(), v);
         }
+        assert_eq!(email!("foo@bar"), "foo@bar");
 
         // no @
         assert_eq!(

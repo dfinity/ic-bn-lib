@@ -10,8 +10,7 @@ use candid::Principal;
 use hickory_proto::rr::{Record, RecordType};
 use hickory_resolver::{
     TokioResolver,
-    config::{ConnectionConfig, NameServerConfig, ResolveHosts, ResolverConfig, ResolverOpts},
-    net::{NetError, runtime::TokioRuntimeProvider},
+    net::{DnsError as HickoryDnsError, NetError, runtime::TokioRuntimeProvider},
 };
 use hyper_util::client::legacy::connect::dns::Name as HyperName;
 use ic_agent::Agent;
@@ -22,13 +21,28 @@ use ic_bn_lib_common::{
         dns::{CloneableDnsResolver, CloneableHyperDnsResolver, HyperDnsResolver, Resolves},
     },
     types::{
-        dns::{Options, Protocol, SocketAddrs},
+        dns::{Options, SocketAddrs},
         http::Error,
     },
 };
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use tokio_util::sync::CancellationToken;
 use tower::Service;
+
+#[derive(thiserror::Error, Debug)]
+pub enum DnsError {
+    #[error("Resolver error: {0}")]
+    Resolver(#[from] NetError),
+    #[error("{0}")]
+    Other(#[from] anyhow::Error),
+}
+
+/// Checks if given Hickory error means there was a negative lookup
+pub fn is_error_negative_lookup(e: &NetError) -> bool {
+    e.is_no_records_found()
+        || e.is_nx_domain()
+        || matches!(e, NetError::Dns(HickoryDnsError::Nsec { .. }))
+}
 
 /// DNS-resolver based on Hickory
 #[derive(Debug, Clone)]
@@ -40,95 +54,43 @@ impl CloneableHyperDnsResolver for Resolver {}
 impl Resolver {
     /// Creates a new resolver with given options.
     /// It must be called in Tokio context.
-    pub fn new(o: Options) -> Self {
-        let name_servers: Vec<NameServerConfig> = match &o.protocol {
-            Protocol::Clear(p) => {
-                let port = *p;
-                o.servers
-                    .iter()
-                    .map(|&ip| {
-                        let mut udp = ConnectionConfig::udp();
-                        udp.port = port;
-                        let mut tcp = ConnectionConfig::tcp();
-                        tcp.port = port;
-                        NameServerConfig::new(ip, true, vec![udp, tcp])
-                    })
-                    .collect()
-            }
-            Protocol::Tls(p) => {
-                let port = *p;
-                o.servers
-                    .iter()
-                    .map(|&ip| {
-                        let mut conn = ConnectionConfig::tls(Arc::from(o.tls_name.as_str()));
-                        conn.port = port;
-                        NameServerConfig::new(ip, true, vec![conn])
-                    })
-                    .collect()
-            }
-            Protocol::Https(p) => {
-                let port = *p;
-                o.servers
-                    .iter()
-                    .map(|&ip| {
-                        let mut conn =
-                            ConnectionConfig::https(Arc::from(o.tls_name.as_str()), None);
-                        conn.port = port;
-                        NameServerConfig::new(ip, true, vec![conn])
-                    })
-                    .collect()
-            }
-        };
+    pub fn new(o: Options) -> Result<Self, NetError> {
+        let resolver = TokioResolver::builder_with_config(o.cfg, TokioRuntimeProvider::default())
+            .with_options(o.opts)
+            .build()?;
 
-        let cfg = ResolverConfig::from_parts(None, vec![], name_servers);
-
-        let mut opts = ResolverOpts::default();
-        opts.cache_size = o.cache_size as u64;
-        opts.timeout = o.timeout;
-        opts.ip_strategy = o.lookup_ip_strategy;
-        opts.use_hosts_file = ResolveHosts::Never;
-        opts.preserve_intermediates = false;
-        opts.validate = !o.dnssec_disabled;
-        opts.try_tcp_on_error = true;
-
-        let builder =
-            TokioResolver::builder_with_config(cfg, TokioRuntimeProvider::default())
-                .with_options(opts);
-
-        Self(Arc::new(builder.build().expect("failed to build DNS resolver")))
+        Ok(Self(Arc::new(resolver)))
     }
 }
 
 impl Default for Resolver {
     fn default() -> Self {
-        Self::new(Options::default())
+        // SAFETY: the defaults shouldn't fail
+        Self::new(Options::default()).unwrap()
     }
 }
 
 // Implement resolving for Reqwest
+// Clippy being stupid here (lifetimes issue).
+#[allow(clippy::needless_collect)]
 impl Resolve for Resolver {
     fn resolve(&self, name: Name) -> Resolving {
         let resolver = self.clone();
 
         Box::pin(async move {
             let lookup = resolver.0.lookup_ip(name.as_str()).await?;
-            let ips: Vec<IpAddr> = lookup.iter().collect();
-            let addrs: Addrs = Box::new(SocketAddrs {
-                iter: Box::new(ips.into_iter()),
-            });
+            let addresses: Vec<IpAddr> = lookup.iter().collect();
 
-            Ok(addrs)
+            Ok(Box::new(SocketAddrs {
+                iter: Box::new(addresses.into_iter()),
+            }) as Addrs)
         })
     }
 }
 
 #[async_trait]
 impl Resolves for Resolver {
-    async fn resolve(
-        &self,
-        record_type: RecordType,
-        name: &str,
-    ) -> Result<Vec<Record>, NetError> {
+    async fn resolve(&self, record_type: RecordType, name: &str) -> Result<Vec<Record>, NetError> {
         let lookup = self.0.lookup(name, record_type).await?;
         Ok(lookup.answers().to_vec())
     }
@@ -138,7 +100,9 @@ impl Resolves for Resolver {
     }
 }
 
-/// Implement resolving for Hyper
+// Implement resolving for Hyper
+// Clippy being stupid here (lifetimes issue).
+#[allow(clippy::needless_collect)]
 impl Service<HyperName> for Resolver {
     type Response = SocketAddrs;
     type Error = Error;
@@ -153,11 +117,11 @@ impl Service<HyperName> for Resolver {
         let resolver = self.0.clone();
 
         Box::pin(async move {
-            let response = resolver
+            let lookup = resolver
                 .lookup_ip(name.as_str())
                 .await
-                .map_err(|e| Error::DnsError(e.to_string()))?;
-            let addresses: Vec<IpAddr> = response.iter().collect();
+                .map_err(|e: NetError| Error::DnsError(e.to_string()))?;
+            let addresses: Vec<IpAddr> = lookup.iter().collect();
 
             Ok(SocketAddrs {
                 iter: Box::new(addresses.into_iter()),
@@ -175,8 +139,8 @@ impl HyperDnsResolver for FixedResolver {}
 impl CloneableHyperDnsResolver for FixedResolver {}
 
 impl FixedResolver {
-    pub fn new(o: Options, name: String) -> Result<Self, Error> {
-        let resolver = Resolver::new(o);
+    pub fn new(o: Options, name: String) -> Result<Self, DnsError> {
+        let resolver = Resolver::new(o)?;
         let hyper_name = HyperName::from_str(&name).context("unable to parse name")?;
 
         Ok(Self(resolver, name, hyper_name))
@@ -419,6 +383,8 @@ impl Resolve for SingleResolver {
 #[cfg(test)]
 mod test {
     use std::net::{Ipv4Addr, SocketAddr};
+
+    use ic_bn_lib_common::types::dns::Protocol;
 
     use super::*;
 
