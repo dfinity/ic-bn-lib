@@ -751,7 +751,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_starttls() {
-        rustls::crypto::ring::default_provider()
+        rustls::crypto::aws_lc_rs::default_provider()
             .install_default()
             .ok();
 
@@ -833,7 +833,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_with_smtp_client() {
-        rustls::crypto::ring::default_provider()
+        rustls::crypto::aws_lc_rs::default_provider()
             .install_default()
             .ok();
 
