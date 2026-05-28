@@ -64,7 +64,11 @@ reqwest = { version = "0.13.2", default-features = false, features = [
     "stream",
     "gzip",
 ] }
-rcgen = { version = "0.14.3" }
+rcgen = { version = "0.14.3", default-features = false, features = [
+    "crypto",
+    "pem",
+    "aws_lc_rs",
+] }
 rustls = { version = "0.23.18", default-features = false, features = [
     "aws_lc_rs",
     "std",
