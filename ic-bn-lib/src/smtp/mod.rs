@@ -1,8 +1,10 @@
 use std::fmt::{Debug, Display};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use fqdn::FQDN;
 use itertools::Itertools;
+use strum::Display;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -15,10 +17,13 @@ pub mod inbound;
 pub mod server;
 
 /// Recipient resolution policy
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Display)]
 pub enum RecipientPolicy {
+    #[strum(to_string = "Accept")]
     Accept,
+    #[strum(to_string = "Rewrite({0})")]
     Rewrite(EmailAddress),
+    #[strum(to_string = "Expand({0:?})")]
     Expand(Vec<EmailAddress>),
 }
 
@@ -51,7 +56,7 @@ pub struct EmailMessage {
     pub ehlo_hostname: FQDN,
     pub mail_from: EmailAddress,
     pub rcpt_to: Vec<EmailAddress>,
-    pub body: Vec<u8>,
+    pub body: Bytes,
 }
 
 impl Display for EmailMessage {

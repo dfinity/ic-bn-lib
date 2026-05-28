@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use fqdn::FQDN;
+use tracing::{debug, info};
 
 use crate::{
     http::dns::is_error_negative_lookup,
@@ -13,6 +14,7 @@ impl<S: AsyncReadWrite> Session<S> {
     pub async fn handle_ehlo(&mut self, host: &str, extended: bool) -> SessionResult<()> {
         // Validate hostname
         let Ok(ehlo_hostname) = FQDN::from_str(host) else {
+            info!("{self}: {host}: Invalid EHLO hostname");
             return self.reply("550", "5.5.0", "Invalid EHLO hostname.").await;
         };
 
@@ -25,6 +27,7 @@ impl<S: AsyncReadWrite> Session<S> {
         }
 
         if ehlo_hostname.depth() < 2 {
+            info!("{self}: {host}: EHLO is not FQDN");
             return self
                 .reply("550", "5.5.0", "EHLO hostname must be an FQDN.")
                 .await;
@@ -33,15 +36,21 @@ impl<S: AsyncReadWrite> Session<S> {
         // Check if EHLO hostname resolves if configured
         if self.cfg.verify_ehlo_hostname {
             match self.cfg.authenticator.resolver().lookup_ip(host).await {
-                Ok(v) => {
-                    if v.iter().next().is_none() {
+                Ok(v) => match v.iter().next() {
+                    Some(v) => {
+                        debug!("{self}: {host}: EHLO hostname found in DNS: {v}");
+                    }
+                    None => {
+                        info!("{self}: {host}: EHLO not found in DNS");
                         return self
                             .reply("550", "5.5.0", "EHLO hostname not found in DNS.")
                             .await;
                     }
-                }
+                },
 
                 Err(e) => {
+                    info!("{self}: {host}: EHLO not found in DNS: {e:#}");
+
                     if is_error_negative_lookup(&e) {
                         return self
                             .reply("550", "5.5.0", "EHLO hostname not found in DNS.")

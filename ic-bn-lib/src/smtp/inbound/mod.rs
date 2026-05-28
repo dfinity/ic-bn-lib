@@ -14,6 +14,7 @@ use std::{
 
 use bytes::Bytes;
 use fqdn::FQDN;
+use hickory_resolver::net::NetError;
 use ic_bn_lib_common::types::http::TlsInfo;
 use mail_auth::MessageAuthenticator;
 use rustls::ServerConfig;
@@ -43,6 +44,8 @@ pub enum SessionError {
     Io(#[from] io::Error),
     #[error("Fmt error: {0}")]
     Fmt(#[from] fmt::Error),
+    #[error("Dns error: {0}")]
+    Dns(#[from] NetError),
     #[error("Timed out")]
     Timeout,
     #[error("{0}")]
@@ -110,6 +113,7 @@ pub struct SessionConfig {
     pub verify_ehlo_hostname: bool,
     pub verify_sender_domain: bool,
     pub verify_reverse_ip: bool,
+    pub verify_reverse_ip_strict: bool,
     pub verify_spf: bool,
     pub verify_dkim: bool,
     pub verify_dkim_strict: bool,
@@ -146,6 +150,7 @@ impl SessionConfig {
 
             verify_ehlo_hostname: false,
             verify_reverse_ip: false,
+            verify_reverse_ip_strict: false,
             verify_sender_domain: false,
             verify_spf: false,
             verify_dkim: false,
@@ -215,10 +220,11 @@ impl Default for SessionState {
 /// SMTP dynamic session data
 #[derive(Debug, Default)]
 pub struct SessionData {
-    pub ehlo_hostname: Option<FQDN>,
-    pub mail_from: Option<EmailAddress>,
-    pub rcpt_to: Vec<EmailAddress>,
-    pub message: Vec<u8>,
+    reverse_ip_verified: bool,
+    ehlo_hostname: Option<FQDN>,
+    mail_from: Option<EmailAddress>,
+    rcpt_to: Vec<EmailAddress>,
+    message: Vec<u8>,
 }
 
 /// SMTP session counters
@@ -522,7 +528,7 @@ mod tests {
                 ehlo_hostname: fqdn!("foo.bar"),
                 mail_from: "foo@bar".try_into().unwrap(),
                 rcpt_to: vec!["bar@baz".try_into().unwrap()],
-                body: b"012345678998765432100123456789".to_vec(),
+                body: "012345678998765432100123456789".into(),
             })
         );
     }
@@ -563,7 +569,7 @@ mod tests {
                 ehlo_hostname: fqdn!("foo.bar"),
                 mail_from: email!("foo@bar"),
                 rcpt_to: vec![email!("bar@baz")],
-                body: b"foobarmessage".to_vec(),
+                body: "foobarmessage".into(),
             })
         )
     }
@@ -607,7 +613,7 @@ mod tests {
                 ehlo_hostname: fqdn!("foo.bar"),
                 mail_from: email!("foo@bar"),
                 rcpt_to: vec![email!("dead@beef"), email!("dead@dead"), email!("bar@bax"),],
-                body: b"foobarmessage".to_vec(),
+                body: "foobarmessage".into(),
             })
         )
     }
