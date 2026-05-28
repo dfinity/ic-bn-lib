@@ -19,7 +19,7 @@ async-trait = "0.1.83"
 axum = "0.8.1"
 candid = "0.10.10"
 clap = { version = "4.5.20", features = ["derive", "string", "env"] }
-cloudflare = { git = "https://github.com/mraszyk/cloudflare-rs", rev = "972f379e51ac923be9db648a75b101892a89453c", default-features = false, features = [
+cloudflare = { git = "https://github.com/dfinity/cloudflare-rs", rev = "7d10dca3b339e8a29cb663341dbc802fe51bf322", default-features = false, features = [
     "rustls-tls",
 ] }
 derive-new = "0.7.0"
