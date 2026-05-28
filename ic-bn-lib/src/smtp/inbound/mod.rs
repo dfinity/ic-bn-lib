@@ -218,13 +218,27 @@ impl Default for SessionState {
 }
 
 /// SMTP dynamic session data
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SessionData {
+    message_id: Uuid,
     reverse_ip_verified: bool,
     ehlo_hostname: Option<FQDN>,
     mail_from: Option<EmailAddress>,
     rcpt_to: Vec<EmailAddress>,
     message: Vec<u8>,
+}
+
+impl Default for SessionData {
+    fn default() -> Self {
+        Self {
+            message_id: Uuid::now_v7(),
+            reverse_ip_verified: false,
+            ehlo_hostname: None,
+            mail_from: None,
+            rcpt_to: vec![],
+            message: vec![],
+        }
+    }
 }
 
 /// SMTP session counters
