@@ -322,11 +322,16 @@ impl ResolvesRecipient for IcSmtpDeliveryAgent {
             .canister_request(canister_id, ic_smtp_request, true)
             .await
             .map_err(|e| match e {
-                IcSmtpDeliveryAgentError::Agent(AgentError::InvalidMethodError(_)) => {
+                IcSmtpDeliveryAgentError::Agent(
+                    AgentError::CertifiedReject { reject, .. }
+                    | AgentError::UncertifiedReject { reject, .. },
+                    // It seems it's the only way to check that canister is missing a method
+                ) if reject.error_code.as_ref().is_some_and(|x| x == "IC0536") => {
                     RecipientResolveError::Permanent(format!(
                         "Canister {canister_id} does not support SMTP protocol"
                     ))
                 }
+
                 _ => RecipientResolveError::Temporary(e.to_string()),
             })?;
 

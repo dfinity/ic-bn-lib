@@ -26,7 +26,9 @@ impl SessionManager {
         params: Arc<SessionConfig>,
         shutdown_token: CancellationToken,
     ) {
-        let mut session = Session::new(remote_addr.ip(), stream, params);
+        // Convert v6-mapped address to v4
+        let remote_ip = remote_addr.ip().to_canonical();
+        let mut session = Session::new(remote_ip, stream, params);
 
         match session.handle(shutdown_token.child_token()).await {
             Ok(v) => match v {
@@ -51,12 +53,15 @@ impl SessionManager {
         }
     }
 
-    /// Converts session into TLS mode
+    /// Converts session into TLS mode & runs it
     async fn starttls<S: AsyncReadWrite>(session: Session<S>, shutdown_token: CancellationToken) {
         let session_name = session.to_string();
 
+        debug!("{session_name}: starting TLS handshake");
         match session.into_tls().await {
             Ok(mut session) => {
+                debug!("{session}: TLS handshake succeeded");
+
                 if let Err(e) = session.handle(shutdown_token.child_token()).await {
                     if !matches!(e, SessionError::Quit) {
                         info!("{session}: error: {e:#}");
