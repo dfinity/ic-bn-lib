@@ -359,9 +359,12 @@ impl ResolvesRecipient for IcSmtpDeliveryAgent {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Mutex,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        net::IpAddr,
+        sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use crate::{
@@ -607,6 +610,8 @@ mod tests {
 
         let message = EmailMessage {
             id: Uuid::nil(),
+            session_id: Uuid::nil(),
+            remote_ip: IpAddr::from_str("1.1.1.1").unwrap(),
             ehlo_hostname: fqdn!("foo.bar"),
             mail_from: email!("john@doe.com"),
             rcpt_to: vec![

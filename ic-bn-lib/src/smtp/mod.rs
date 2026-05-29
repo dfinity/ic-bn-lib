@@ -1,14 +1,21 @@
-use std::fmt::{Debug, Display};
+use std::{
+    fmt::{Debug, Display},
+    net::IpAddr,
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use fqdn::FQDN;
+use ic_bn_lib_common::types::http::TlsInfo;
 use itertools::Itertools;
-use strum::Display;
+use strum::{Display, IntoStaticStr};
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::smtp::address::EmailAddress;
+use crate::smtp::{
+    address::EmailAddress,
+    inbound::{SessionCounters, SessionData, SessionError},
+};
 
 pub mod address;
 pub mod cli;
@@ -49,10 +56,48 @@ pub enum DeliveryError {
     Permanent(String),
 }
 
+/// Error that might happen during message vaildation or delivery
+#[derive(thiserror::Error, Clone, Debug, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum MessageError {
+    #[error("Delivery failed: {0}")]
+    DeliveryFailed(#[from] DeliveryError),
+    #[error("Parsing failed")]
+    ParsingFailed,
+    #[error("Too many 'Received' headers")]
+    TooManyReceivedHeaders,
+    #[error("DKIM validation failed: {0}")]
+    DkimValidationFailed(String),
+}
+
+/// Error that might happen during SMTP exchange
+#[derive(thiserror::Error, Clone, Debug, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum ProtocolError {
+    #[error("Invalid EHLO hostname: {0}")]
+    InvalidEhloHostname(String),
+    #[error("Invalid command sequence: {0}")]
+    InvalidSequenceOfCommands(String),
+    #[error("Sender validation failed: {0}")]
+    SenderValidationFailed(String),
+    #[error("Recipient validation failed: {0}")]
+    RecipientValidationFailed(String),
+    #[error("Reverse IP validation failed: {0}")]
+    ReverseIpValidationFailed(String),
+    #[error("SPF validation failed: {0}")]
+    SpfValidationFailed(String),
+    #[error("Message too big: {0}")]
+    MessageTooBig(String),
+    #[error("SMTP protocol error: {0}")]
+    SmtpError(String),
+}
+
 /// Low-level E-Mail representation
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct EmailMessage {
     pub id: Uuid,
+    pub session_id: Uuid,
+    pub remote_ip: IpAddr,
     pub ehlo_hostname: FQDN,
     pub mail_from: EmailAddress,
     pub rcpt_to: Vec<EmailAddress>,
@@ -63,8 +108,10 @@ impl Display for EmailMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "id: {}, ehlo: {}, from: {}, to: {}, msg: {}",
+            "id: {}, session_id: {}, remote_ip: {}, ehlo: {}, from: {}, to: {}, msg: {}",
             self.id,
+            self.session_id,
+            self.remote_ip,
             self.ehlo_hostname,
             self.mail_from,
             self.rcpt_to.iter().map(|x| x.to_string()).join(", "),
@@ -83,6 +130,23 @@ pub trait ResolvesRecipient: Send + Sync + Debug {
         from: &EmailAddress,
         rcpt: &EmailAddress,
     ) -> Result<RecipientPolicy, RecipientResolveError>;
+}
+
+/// Notifies about events
+#[async_trait]
+pub trait ReceivesNotifications: Send + Sync + Debug {
+    /// Notify when the message is queued
+    async fn notify_about_message(&self, message: EmailMessage, error: Option<MessageError>);
+    /// Notify when the session is finished
+    async fn notify_session_finish(
+        &self,
+        id: Uuid,
+        remote_ip: IpAddr,
+        data: SessionData,
+        counters: SessionCounters,
+        tls_info: Option<TlsInfo>,
+        error: SessionError,
+    );
 }
 
 /// Delivers the E-Mail message

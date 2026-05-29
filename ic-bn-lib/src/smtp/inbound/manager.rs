@@ -35,9 +35,8 @@ impl SessionManager {
                 SessionUpgrade::No => {
                     session.stream.shutdown().await.ok();
                 }
-
                 SessionUpgrade::StartTls => {
-                    Self::starttls(session, shutdown_token.child_token()).await
+                    Self::handle_connection_tls(session, shutdown_token.child_token()).await
                 }
             },
 
@@ -49,15 +48,20 @@ impl SessionManager {
                 if let Err(e) = session.shutdown().await {
                     debug!("{session}: error closing connection: {e:#}");
                 };
+
+                Self::notify(session, e).await;
             }
         }
     }
 
     /// Converts session into TLS mode & runs it
-    async fn starttls<S: AsyncReadWrite>(session: Session<S>, shutdown_token: CancellationToken) {
+    async fn handle_connection_tls<S: AsyncReadWrite>(
+        session: Session<S>,
+        shutdown_token: CancellationToken,
+    ) {
         let session_name = session.to_string();
+        debug!("{session}: starting TLS handshake");
 
-        debug!("{session_name}: starting TLS handshake");
         match session.into_tls().await {
             Ok(mut session) => {
                 debug!("{session}: TLS handshake succeeded");
@@ -70,6 +74,8 @@ impl SessionManager {
                     if let Err(e) = session.shutdown().await {
                         debug!("{session}: error closing connection: {e:#}");
                     };
+
+                    Self::notify(session, e).await;
                 }
             }
 
@@ -77,6 +83,20 @@ impl SessionManager {
                 info!("{session_name}: TLS handshake failed: {e:#}");
             }
         };
+    }
+
+    async fn notify<S: AsyncReadWrite>(session: Session<S>, error: SessionError) {
+        if let Some(v) = &session.cfg.notifications_handler {
+            v.notify_session_finish(
+                session.id,
+                session.remote_ip,
+                session.data,
+                session.counters,
+                session.tls_info,
+                error,
+            )
+            .await;
+        }
     }
 }
 
@@ -92,7 +112,27 @@ impl<S: AsyncReadWrite> Session<S> {
             }
         };
 
-        let (stream, tls_info) = tls_handshake(tls_config, self.stream).await?;
+        let (stream, tls_info) = match tls_handshake(tls_config, self.stream).await {
+            Ok(v) => v,
+            Err(e) => {
+                let error_str = e.to_string();
+
+                // Session is partially consumed by `tls_handshake`, so we can't use `Manager::notify()`
+                if let Some(v) = &self.cfg.notifications_handler {
+                    v.notify_session_finish(
+                        self.id,
+                        self.remote_ip,
+                        self.data,
+                        self.counters,
+                        self.tls_info,
+                        SessionError::TlsHandshakeFailed(error_str.clone()),
+                    )
+                    .await;
+                }
+
+                return Err(SessionError::TlsHandshakeFailed(error_str));
+            }
+        };
 
         Ok(Session {
             id: self.id,

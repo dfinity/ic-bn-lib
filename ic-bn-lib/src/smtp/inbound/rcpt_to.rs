@@ -8,7 +8,7 @@ use tracing::{debug, info};
 use crate::{
     network::AsyncReadWrite,
     smtp::{
-        RecipientPolicy, RecipientResolveError,
+        ProtocolError, RecipientPolicy, RecipientResolveError,
         address::EmailAddress,
         inbound::{MAX_REPLY_LEN, Session, SessionResult},
     },
@@ -19,6 +19,9 @@ impl<S: AsyncReadWrite> Session<S> {
     /// Handles RCPT TO command
     pub async fn handle_rcpt_to(&mut self, to: RcptTo<Cow<'_, str>>) -> SessionResult<()> {
         let Some(mail_from) = &self.data.mail_from else {
+            self.set_error(ProtocolError::InvalidSequenceOfCommands(
+                "RCPT TO before MAIL FROM".into(),
+            ));
             return self
                 .reply("503", "5.5.1", "MAIL FROM is required first.")
                 .await;
@@ -35,6 +38,10 @@ impl<S: AsyncReadWrite> Session<S> {
 
         let Ok(address) = EmailAddress::from_str(&to.address) else {
             info!("{self}: {}: incorrect address", to.address);
+            self.set_error(ProtocolError::RecipientValidationFailed(format!(
+                "Incorrect address: {}",
+                to.address
+            )));
             return self.reply("550", "5.1.2", "Incorrect address.").await;
         };
 
@@ -44,6 +51,11 @@ impl<S: AsyncReadWrite> Session<S> {
 
         if self.data.rcpt_to.len() >= self.cfg.max_recipients {
             info!("{self}: {}: too many recipients", to.address);
+            self.set_error(ProtocolError::RecipientValidationFailed(format!(
+                "Too many recipients: {} > {}",
+                self.data.rcpt_to.len(),
+                self.cfg.max_recipients
+            )));
             return self.reply("455", "4.5.3", "Too many recipients.").await;
         }
 
@@ -72,6 +84,9 @@ impl<S: AsyncReadWrite> Session<S> {
 
             Err(e) => {
                 info!("{self}: {}: recipient resolution error: {e:#}", to.address);
+                self.set_error(ProtocolError::RecipientValidationFailed(format!(
+                    "Recipient resolution failed: {e:#}",
+                )));
 
                 return match e {
                     RecipientResolveError::UnknownDomain => {
