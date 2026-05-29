@@ -472,7 +472,7 @@ mod test {
     #[tokio::test]
     async fn test_acme_client() {
         // rustls 0.23+ requires a process-level CryptoProvider to be installed
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let pebble_env = Env::new().await;
 
         let tm = Arc::new(TokenManagerPebble::new(
