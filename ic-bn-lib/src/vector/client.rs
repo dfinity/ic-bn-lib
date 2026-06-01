@@ -312,16 +312,18 @@ impl Vector {
 
     pub fn send(&self, event: Value) {
         // If it fails we'll lose the event, but it's better than to block & eat memory.
+
         if self.tx.try_send(event).is_err() {
             self.metrics
                 .buffer_drops
                 .with_label_values(&[&self.namespace])
                 .inc();
         } else {
+            let len = self.tx.max_capacity() - self.tx.capacity();
             self.metrics
                 .buffer_event_size
                 .with_label_values(&[&self.namespace])
-                .inc();
+                .set(len as i64);
         };
     }
 
@@ -395,6 +397,10 @@ impl Batcher {
         debug!("{self}: batch ({len} events) queued in {dur}s");
 
         self.metrics
+            .batch_size
+            .with_label_values(&[&self.namespace])
+            .set(0);
+        self.metrics
             .batch_queue_duration
             .with_label_values(&[&self.namespace])
             .observe(dur);
@@ -410,6 +416,11 @@ impl Batcher {
 
         // Drain the buffer
         while let Some(v) = self.rx.recv().await {
+            let len = self.rx.max_capacity() - self.rx.capacity();
+            self.metrics
+                .buffer_event_size
+                .with_label_values(&[&self.namespace])
+                .set(len as i64);
             self.add_to_batch(v).await;
         }
 
@@ -434,7 +445,8 @@ impl Batcher {
                 },
 
                 Some(event) = self.rx.recv() => {
-                    self.metrics.buffer_event_size.with_label_values(&[&self.namespace]).dec();
+                    let len = self.rx.max_capacity() - self.rx.capacity();
+                    self.metrics.buffer_event_size.with_label_values(&[&self.namespace]).set(len as i64);
                     self.add_to_batch(event).await;
                 }
             }
