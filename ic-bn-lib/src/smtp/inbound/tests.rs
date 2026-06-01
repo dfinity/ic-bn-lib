@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use ic_bn_lib_common::types::http::ListenerOpts;
 use mail_parser::{Addr, Address, MessageParser};
 use mail_send::{SmtpClientBuilder, mail_builder::MessageBuilder};
+use prometheus::Registry;
 use rustls::{ClientConfig, ProtocolVersion, pki_types::ServerName};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 use tokio_rustls::TlsConnector;
@@ -104,7 +105,12 @@ fn create_session<S: AsyncReadWrite>(stream: S, greeting_delay: Option<Duration>
     cfg.max_session_data = 8192;
     cfg.max_recipients = 3;
 
-    Session::new(IpAddr::from_str("1.1.1.1").unwrap(), stream, Arc::new(cfg))
+    Session::new(
+        IpAddr::from_str("1.1.1.1").unwrap(),
+        stream,
+        Arc::new(cfg),
+        Metrics::new(&Registry::new()),
+    )
 }
 
 fn create_basic_stream() -> tokio_test::io::Builder {
@@ -259,7 +265,12 @@ async fn test_bdat() {
     cfg.recipient_resolver = Arc::new(resolver);
 
     let remote_ip = IpAddr::from_str("1.1.1.1").unwrap();
-    let mut session = Session::new(remote_ip, stream, Arc::new(cfg));
+    let mut session = Session::new(
+        remote_ip,
+        stream,
+        Arc::new(cfg),
+        Metrics::new(&Registry::new()),
+    );
 
     assert!(matches!(
         session.handle(CancellationToken::new()).await.unwrap_err(),
@@ -300,7 +311,12 @@ async fn test_data() {
     cfg.recipient_resolver = Arc::new(resolver);
 
     let remote_ip = IpAddr::from_str("1.1.1.1").unwrap();
-    let mut session = Session::new(remote_ip, stream, Arc::new(cfg));
+    let mut session = Session::new(
+        remote_ip,
+        stream,
+        Arc::new(cfg),
+        Metrics::new(&Registry::new()),
+    );
 
     assert!(matches!(
         session.handle(CancellationToken::new()).await.unwrap_err(),
@@ -344,7 +360,12 @@ async fn test_expand() {
     cfg.recipient_resolver = Arc::new(resolver);
 
     let remote_ip = IpAddr::from_str("1.1.1.1").unwrap();
-    let mut session = Session::new(remote_ip, stream, Arc::new(cfg));
+    let mut session = Session::new(
+        remote_ip,
+        stream,
+        Arc::new(cfg),
+        Metrics::new(&Registry::new()),
+    );
 
     assert!(matches!(
         session.handle(CancellationToken::new()).await.unwrap_err(),
@@ -523,6 +544,7 @@ async fn test_starttls() {
             stream1,
             SocketAddr::from_str("1.1.1.1:123").unwrap(),
             Arc::new(cfg),
+            Metrics::new(&Registry::new()),
             CancellationToken::new(),
         )
         .await;
@@ -608,7 +630,7 @@ async fn test_with_smtp_client() {
 
     let token = CancellationToken::new();
     let token_child = token.child_token();
-    let server = Server::new_with_listener(listener, cfg).unwrap();
+    let server = Server::new_with_listener(listener, cfg, Metrics::new(&Registry::new())).unwrap();
     let server_handle = tokio::spawn(async move {
         server.serve(token_child).await.unwrap();
     });

@@ -12,6 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use anyhow::Context;
 use bytes::Bytes;
 use fqdn::FQDN;
 use hickory_resolver::net::NetError;
@@ -20,19 +21,21 @@ use mail_auth::MessageAuthenticator;
 use rustls::ServerConfig;
 use smtp_proto::{
     EXT_8BIT_MIME, EXT_CHUNKING, EXT_ENHANCED_STATUS_CODES, EXT_PIPELINING, EXT_SIZE,
-    EXT_SMTP_UTF8, EXT_START_TLS, EhloResponse, Error as SmtpError,
+    EXT_SMTP_UTF8, EXT_START_TLS, EhloResponse, Error as SmtpError, Request,
     request::receiver::{
         BdatReceiver, DataReceiver, DummyDataReceiver, DummyLineReceiver, RequestReceiver,
     },
 };
 use strum::{Display, IntoStaticStr};
+use tokio::io::AsyncWriteExt;
+use tokio_util::time::FutureExt;
 use uuid::Uuid;
 
 use crate::{
     network::AsyncReadWrite,
     smtp::{
         DeliversMail, DummyDeliveryAgent, DummyRecipientResolver, EmailMessage, MessageError,
-        ProtocolError, ReceivesNotifications, ResolvesRecipient, address::EmailAddress,
+        Metrics, ProtocolError, ReceivesNotifications, ResolvesRecipient, address::EmailAddress,
     },
 };
 
@@ -109,6 +112,7 @@ pub struct SessionConfig {
     ehlo_tls: Bytes,
 
     max_message_size: usize,
+
     pub max_recipients: usize,
     pub max_session_duration: Duration,
     pub max_session_data: usize,
@@ -298,21 +302,31 @@ pub struct Session<S: AsyncReadWrite> {
     counters: SessionCounters,
     cfg: Arc<SessionConfig>,
     tls_info: Option<TlsInfo>,
+    labels: [&'static str; 2],
+    metrics: Metrics,
 }
 
 impl<S: AsyncReadWrite> Display for Session<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "SMTP/Session({}){}",
+            "SMTP/Session({}{})",
             self.remote_ip,
             if self.tls_info.is_some() { "/TLS" } else { "" }
-        )
+        )?;
+
+        if let Some(v) = &self.data.ehlo_hostname {
+            write!(f, "({v})")?;
+        }
+
+        Ok(())
     }
 }
 
 impl<S: AsyncReadWrite> Session<S> {
-    pub fn new(remote_ip: IpAddr, stream: S, cfg: Arc<SessionConfig>) -> Self {
+    pub fn new(remote_ip: IpAddr, stream: S, cfg: Arc<SessionConfig>, metrics: Metrics) -> Self {
+        let ip_family = if remote_ip.is_ipv4() { "v4" } else { "v6" };
+
         Self {
             #[cfg(not(test))]
             id: Uuid::now_v7(),
@@ -325,10 +339,30 @@ impl<S: AsyncReadWrite> Session<S> {
             counters: SessionCounters::new(),
             cfg,
             tls_info: None,
+            labels: [ip_family, "none"],
+            metrics,
         }
     }
 
+    /// Closes the connection
+    pub async fn shutdown(&mut self) -> SessionResult<()> {
+        self.stream
+            .shutdown()
+            .timeout(Duration::from_secs(10))
+            .await
+            .context("shutdown timed out")?
+            .context("shutdown failed")?;
+
+        Ok(())
+    }
+
     fn set_error(&mut self, error: ProtocolError) {
+        let error_lbl: &'static str = (&error).into();
+        self.metrics
+            .protocol_errors
+            .with_label_values(&[self.labels[0], self.labels[1], error_lbl])
+            .inc();
+
         self.data.last_error = Some(error.clone());
         self.counters.errors += 1;
 
@@ -359,6 +393,23 @@ impl<S: AsyncReadWrite> Session<S> {
             mail_from: self.data.mail_from.clone(),
             rcpt_to: self.data.rcpt_to.clone(),
         }
+    }
+}
+
+const fn request_str<T>(req: &Request<T>) -> &'static str {
+    match req {
+        Request::Bdat { .. } => "BDAT",
+        Request::Data => "DATA",
+        Request::Ehlo { .. } => "EHLO",
+        Request::Helo { .. } => "HELO",
+        Request::Help { .. } => "HELP",
+        Request::Mail { .. } => "MAIL",
+        Request::Rcpt { .. } => "RCPT",
+        Request::Noop { .. } => "NOOP",
+        Request::Quit => "QUIT",
+        Request::Rset => "RSET",
+        Request::StartTls => "STARTTLS",
+        _ => "UNKNOWN",
     }
 }
 

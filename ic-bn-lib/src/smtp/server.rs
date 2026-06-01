@@ -11,7 +11,10 @@ use tracing::{info, warn};
 
 use crate::{
     network::listener::listen_tcp,
-    smtp::inbound::{SessionConfig, manager::SessionManager},
+    smtp::{
+        Metrics,
+        inbound::{SessionConfig, manager::SessionManager},
+    },
 };
 
 /// Listens for new SMTP connections and creates sessions
@@ -20,6 +23,7 @@ pub struct Server {
     listener: TcpListener,
     params: Arc<SessionConfig>,
     tracker: TaskTracker,
+    metrics: Metrics,
 }
 
 impl Display for Server {
@@ -30,18 +34,23 @@ impl Display for Server {
 
 impl Server {
     /// Creates a new `Server` to listen on `listen_addr`
-    pub fn new(listen_addr: SocketAddr, cfg: SessionConfig) -> io::Result<Self> {
+    pub fn new(listen_addr: SocketAddr, cfg: SessionConfig, metrics: Metrics) -> io::Result<Self> {
         let listener = listen_tcp(listen_addr, ListenerOpts::default())?;
-        Self::new_with_listener(listener, cfg)
+        Self::new_with_listener(listener, cfg, metrics)
     }
 
     /// Creates a new `Server` from a pre-built `TcpListener`
-    pub fn new_with_listener(listener: TcpListener, params: SessionConfig) -> io::Result<Self> {
+    pub fn new_with_listener(
+        listener: TcpListener,
+        params: SessionConfig,
+        metrics: Metrics,
+    ) -> io::Result<Self> {
         Ok(Self {
             listen_addr: listener.local_addr()?,
             listener,
             params: Arc::new(params),
             tracker: TaskTracker::new(),
+            metrics,
         })
     }
 
@@ -56,7 +65,12 @@ impl Server {
 
                 let (params, token) = (self.params.clone(), token.child_token());
                 self.tracker.spawn(SessionManager::handle_connection(
-                    stream, addr, params, token,
+                    stream,
+                    addr,
+                    params,
+                    // Metrics are cheap to clone (Arc inside)
+                    self.metrics.clone(),
+                    token,
                 ));
             }
 

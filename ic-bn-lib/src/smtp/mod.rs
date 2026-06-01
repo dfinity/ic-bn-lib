@@ -6,6 +6,10 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use itertools::Itertools;
+use prometheus::{
+    HistogramVec, IntCounterVec, IntGaugeVec, Registry, register_histogram_vec_with_registry,
+    register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry,
+};
 use strum::{Display, IntoStaticStr};
 use tracing::warn;
 use uuid::Uuid;
@@ -148,6 +152,110 @@ pub trait DeliversMail: Send + Sync + Debug {
         meta: SessionMeta,
         message: Arc<EmailMessage>,
     ) -> Result<(), DeliveryError>;
+}
+
+#[derive(Clone)]
+pub struct Metrics {
+    bytes_rx: IntCounterVec,
+    bytes_tx: IntCounterVec,
+    commands: IntCounterVec,
+    replies: IntCounterVec,
+    messages: IntCounterVec,
+    protocol_errors: IntCounterVec,
+    sessions_open: IntGaugeVec,
+    sessions_processed: IntCounterVec,
+    session_duration: HistogramVec,
+    message_size: HistogramVec,
+}
+
+impl Metrics {
+    pub fn new(registry: &Registry) -> Self {
+        const LABELS: &[&str] = &["ip_family", "tls_proto"];
+
+        Self {
+            bytes_rx: register_int_counter_vec_with_registry!(
+                format!("smtp_bytes_rx"),
+                format!("Number of bytes received"),
+                LABELS,
+                registry
+            )
+            .unwrap(),
+
+            bytes_tx: register_int_counter_vec_with_registry!(
+                format!("smtp_bytes_tx"),
+                format!("Number of bytes sent"),
+                LABELS,
+                registry
+            )
+            .unwrap(),
+
+            commands: register_int_counter_vec_with_registry!(
+                format!("smtp_commands"),
+                format!("Number of SMTP commands received"),
+                &[LABELS[0], LABELS[1], "command"],
+                registry
+            )
+            .unwrap(),
+
+            replies: register_int_counter_vec_with_registry!(
+                format!("smtp_replies"),
+                format!("Number of SMTP replies sent"),
+                &[LABELS[0], LABELS[1], "code", "ext"],
+                registry
+            )
+            .unwrap(),
+
+            messages: register_int_counter_vec_with_registry!(
+                format!("smtp_messages"),
+                format!("Number of SMTP messages submitted"),
+                &[LABELS[0], LABELS[1], "error"],
+                registry
+            )
+            .unwrap(),
+
+            protocol_errors: register_int_counter_vec_with_registry!(
+                format!("smtp_protocol_errors"),
+                format!("Number of SMTP protocol errors"),
+                &[LABELS[0], LABELS[1], "error"],
+                registry
+            )
+            .unwrap(),
+
+            sessions_open: register_int_gauge_vec_with_registry!(
+                format!("smtp_sessions_open"),
+                format!("Number of SMTP sessions currently open"),
+                &[LABELS[0]],
+                registry
+            )
+            .unwrap(),
+
+            sessions_processed: register_int_counter_vec_with_registry!(
+                format!("smtp_sessions_processed"),
+                format!("Number of SMTP messages processed (already closed)"),
+                &[LABELS[0], LABELS[1], "error"],
+                registry
+            )
+            .unwrap(),
+
+            session_duration: register_histogram_vec_with_registry!(
+                format!("smtp_session_duration"),
+                format!("Time in seconds that the session was open"),
+                LABELS,
+                vec![5.0, 10.0, 30.0, 60.0, 120.0],
+                registry
+            )
+            .unwrap(),
+
+            message_size: register_histogram_vec_with_registry!(
+                format!("smtp_message_size"),
+                format!("Size of the SMTP messages in bytes"),
+                LABELS,
+                vec![1024.0, 16384.0, 131072.0, 524288.0, 2097152.0],
+                registry
+            )
+            .unwrap(),
+        }
+    }
 }
 
 #[derive(Debug)]

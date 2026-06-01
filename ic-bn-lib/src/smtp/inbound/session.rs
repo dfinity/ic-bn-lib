@@ -3,10 +3,9 @@ use std::{
     fmt::{self, Write as _},
     io::Write as _,
     sync::Arc,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
-use anyhow::Context;
 use arrayvec::ArrayString;
 use mail_auth::{AuthenticatedMessage, DkimResult};
 use smtp_proto::{
@@ -27,6 +26,7 @@ use crate::{
         DeliveryError, EmailMessage, MessageError, ProtocolError,
         inbound::{
             MAX_REPLY_LEN, Session, SessionError, SessionResult, SessionState, SessionUpgrade,
+            request_str,
         },
     },
 };
@@ -36,6 +36,12 @@ impl<S: AsyncReadWrite> Session<S> {
     pub async fn write(&mut self, bytes: &[u8]) -> SessionResult<()> {
         self.stream.write_all(bytes).await?;
         self.stream.flush().await?;
+
+        self.metrics
+            .bytes_tx
+            .with_label_values(&self.labels)
+            .inc_by(bytes.len() as u64);
+
         Ok(())
     }
 
@@ -45,6 +51,11 @@ impl<S: AsyncReadWrite> Session<S> {
     /// a stack array to avoid heap allocation for performance reasons.
     /// If ever this module would need more - increase the constant.
     pub(crate) async fn reply(&mut self, code: &str, ext: &str, msg: &str) -> SessionResult<()> {
+        self.metrics
+            .replies
+            .with_label_values(&[self.labels[0], self.labels[1], code, ext])
+            .inc();
+
         let len = code.len() + ext.len() + msg.len() + 4;
         assert!(
             len <= MAX_REPLY_LEN,
@@ -66,6 +77,11 @@ impl<S: AsyncReadWrite> Session<S> {
         ext: &str,
         msg_fn: impl FnOnce(&mut ArrayString<MAX_REPLY_LEN>) -> fmt::Result,
     ) -> SessionResult<()> {
+        self.metrics
+            .replies
+            .with_label_values(&[self.labels[0], self.labels[1], code, ext])
+            .inc();
+
         let mut buf = ArrayString::<MAX_REPLY_LEN>::new();
 
         write!(&mut buf, "{code} {ext} ")?;
@@ -113,6 +129,11 @@ impl<S: AsyncReadWrite> Session<S> {
             match self.stream.read(&mut buf).timeout(v).await {
                 Ok(Ok(bytes_read)) => {
                     if bytes_read > 0 {
+                        self.metrics
+                            .bytes_rx
+                            .with_label_values(&self.labels)
+                            .inc_by(bytes_read as u64);
+
                         self.reply(
                             "501",
                             "5.7.1",
@@ -213,6 +234,11 @@ impl<S: AsyncReadWrite> Session<S> {
 
     /// Main SMTP state machine
     async fn ingest(&mut self, bytes: &[u8]) -> SessionResult<SessionUpgrade> {
+        self.metrics
+            .bytes_rx
+            .with_label_values(&self.labels)
+            .inc_by(bytes.len() as u64);
+
         // Check if we are over session transfer quota
         if self.counters.bytes_ingested + bytes.len() > self.cfg.max_session_data {
             self.reply("452", "4.7.28", "Session transfer quota exceeded.")
@@ -251,64 +277,77 @@ impl<S: AsyncReadWrite> Session<S> {
                 }
                 SessionState::Request(rx) => {
                     match rx.ingest(&mut iter) {
-                        Ok(request) => match request {
-                            // ASCII data
-                            Request::Data => {
-                                debug!("{self}: <- DATA");
-                                if self.can_accept_message().await? {
-                                    self.write(b"354 Start mail input; end with <CRLF>.<CRLF>\r\n")
-                                        .await?;
-                                    self.data.message = Vec::with_capacity(1024);
-                                    state = SessionState::Data(DataReceiver::new());
-                                    continue;
-                                }
-                            }
-                            // Binary data
-                            Request::Bdat {
-                                chunk_size,
-                                is_last,
-                            } => {
-                                debug!("{self}: <- BDAT");
-                                // Check if we will be past max message limit with this chunk
-                                state = if self.data.message.len() + chunk_size
-                                    > self.cfg.max_message_size
-                                {
-                                    SessionState::DataTooLarge(DummyDataReceiver::new_bdat(
-                                        chunk_size,
-                                    ))
-                                } else {
-                                    // Preallocate the needed capacity for the chunk if need be
-                                    let free =
-                                        self.data.message.capacity() - self.data.message.len();
-                                    if free < chunk_size {
-                                        self.data.message.reserve(chunk_size - free);
-                                    }
+                        Ok(request) => {
+                            self.metrics
+                                .commands
+                                .with_label_values(&[
+                                    self.labels[0],
+                                    self.labels[1],
+                                    request_str(&request),
+                                ])
+                                .inc();
 
-                                    SessionState::Bdat(BdatReceiver::new(chunk_size, is_last))
+                            match request {
+                                // ASCII data
+                                Request::Data => {
+                                    debug!("{self}: <- DATA");
+                                    if self.can_accept_message().await? {
+                                        self.write(
+                                            b"354 Start mail input; end with <CRLF>.<CRLF>\r\n",
+                                        )
+                                        .await?;
+                                        self.data.message = Vec::with_capacity(1024);
+                                        state = SessionState::Data(DataReceiver::new());
+                                        continue;
+                                    }
+                                }
+                                // Binary data
+                                Request::Bdat {
+                                    chunk_size,
+                                    is_last,
+                                } => {
+                                    debug!("{self}: <- BDAT");
+                                    // Check if we will be past max message limit with this chunk
+                                    state = if self.data.message.len() + chunk_size
+                                        > self.cfg.max_message_size
+                                    {
+                                        SessionState::DataTooLarge(DummyDataReceiver::new_bdat(
+                                            chunk_size,
+                                        ))
+                                    } else {
+                                        // Preallocate the needed capacity for the chunk if need be
+                                        let free =
+                                            self.data.message.capacity() - self.data.message.len();
+                                        if free < chunk_size {
+                                            self.data.message.reserve(chunk_size - free);
+                                        }
+
+                                        SessionState::Bdat(BdatReceiver::new(chunk_size, is_last))
+                                    }
+                                }
+                                Request::StartTls => {
+                                    debug!("{self}: <- STARTTLS");
+                                    if self.tls_info.is_some() {
+                                        self.set_error(ProtocolError::InvalidSequenceOfCommands(
+                                            "STARTTLS inside STARTTLS".into(),
+                                        ));
+                                        self.reply("504", "5.7.4", "Already in TLS mode.").await?;
+                                    } else if !self.cfg.tls_mode.enabled() {
+                                        self.set_error(ProtocolError::InvalidSequenceOfCommands(
+                                            "STARTTLS without TLS enabled".into(),
+                                        ));
+                                        self.reply("502", "5.7.0", "TLS not available.").await?;
+                                    } else {
+                                        self.reply("220", "2.0.0", "Ready to start TLS.").await?;
+                                        self.state = state;
+                                        return Ok(SessionUpgrade::StartTls);
+                                    }
+                                }
+                                other_request => {
+                                    self.handle_request(other_request).await?;
                                 }
                             }
-                            Request::StartTls => {
-                                debug!("{self}: <- STARTTLS");
-                                if self.tls_info.is_some() {
-                                    self.set_error(ProtocolError::InvalidSequenceOfCommands(
-                                        "STARTTLS inside STARTTLS".into(),
-                                    ));
-                                    self.reply("504", "5.7.4", "Already in TLS mode.").await?;
-                                } else if !self.cfg.tls_mode.enabled() {
-                                    self.set_error(ProtocolError::InvalidSequenceOfCommands(
-                                        "STARTTLS without TLS enabled".into(),
-                                    ));
-                                    self.reply("502", "5.7.0", "TLS not available.").await?;
-                                } else {
-                                    self.reply("220", "2.0.0", "Ready to start TLS.").await?;
-                                    self.state = state;
-                                    return Ok(SessionUpgrade::StartTls);
-                                }
-                            }
-                            other_request => {
-                                self.handle_request(other_request).await?;
-                            }
-                        },
+                        }
                         Err(SmtpError::ResponseTooLong) => {
                             state = SessionState::RequestTooLarge(DummyLineReceiver::default());
                             continue;
@@ -641,17 +680,5 @@ impl<S: AsyncReadWrite> Session<S> {
         self.data.mail_from = None;
         self.data.rcpt_to.clear();
         self.data.message.clear();
-    }
-
-    /// Closes the connection
-    pub async fn shutdown(&mut self) -> SessionResult<()> {
-        self.stream
-            .shutdown()
-            .timeout(Duration::from_secs(10))
-            .await
-            .context("shutdown timed out")?
-            .context("shutdown failed")?;
-
-        Ok(())
     }
 }
