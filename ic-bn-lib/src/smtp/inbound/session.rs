@@ -444,8 +444,8 @@ impl<S: AsyncReadWrite> Session<S> {
 
         let Some(auth_message) = AuthenticatedMessage::parse(&msg.body) else {
             info!(
-                "{self}: {}: {} -> {:?}: message parsing failed",
-                msg.ehlo_hostname, msg.mail_from, msg.rcpt_to
+                "{self}: {} -> {:?}: message parsing failed",
+                msg.mail_from, msg.rcpt_to
             );
             self.reply("550", "5.7.7", "Failed to parse the message")
                 .await?;
@@ -454,8 +454,8 @@ impl<S: AsyncReadWrite> Session<S> {
 
         if auth_message.received_headers_count() > self.cfg.max_received_headers {
             info!(
-                "{self}: {}: {} -> {:?}: message verification failed: too many 'Received' headers",
-                msg.ehlo_hostname, msg.mail_from, msg.rcpt_to
+                "{self}: {} -> {:?}: message verification failed: too many 'Received' headers",
+                msg.mail_from, msg.rcpt_to
             );
             self.reply(
                 "450",
@@ -480,16 +480,16 @@ impl<S: AsyncReadWrite> Session<S> {
                 {
                     // If any of the signatures that failed with a temporary error - return temporary SMTP error code
                     info!(
-                        "{log_name}: {}: {} -> {:?}: DKIM verification temporary failure: {error}",
-                        msg.ehlo_hostname, msg.mail_from, msg.rcpt_to
+                        "{log_name}: {} -> {:?}: DKIM verification temporary failure: {error}",
+                        msg.mail_from, msg.rcpt_to
                     );
                     self.reply("451", "4.7.20", "DKIM validation temporary failure.")
                         .await
                 } else {
                     // Otherwise permanent
                     info!(
-                        "{log_name}: {}: {} -> {:?}: DKIM verification failure: {error}",
-                        msg.ehlo_hostname, msg.mail_from, msg.rcpt_to
+                        "{log_name}: {} -> {:?}: DKIM verification failure: {error}",
+                        msg.mail_from, msg.rcpt_to
                     );
                     self.reply("550", "5.7.20", "DKIM validation failed.").await
                 }
@@ -525,8 +525,7 @@ impl<S: AsyncReadWrite> Session<S> {
 
             if signatures_passed > 0 {
                 debug!(
-                    "{log_name}: {}: {} -> {:?}: DKIM validation succeeded ({signatures_passed}/{} signatures passed)",
-                    msg.ehlo_hostname,
+                    "{log_name}: {} -> {:?}: DKIM validation succeeded ({signatures_passed}/{} signatures passed)",
                     msg.mail_from,
                     msg.rcpt_to,
                     outputs.len()
@@ -545,9 +544,6 @@ impl<S: AsyncReadWrite> Session<S> {
         // It's better to panic in tests if they are not.
         let msg = EmailMessage {
             id,
-            session_id: self.id,
-            remote_ip: self.remote_ip,
-            ehlo_hostname: self.data.ehlo_hostname.clone().unwrap(),
             mail_from: self.data.mail_from.take().unwrap(),
             rcpt_to: std::mem::take(&mut self.data.rcpt_to),
             body: std::mem::take(&mut self.data.message).into(),
@@ -565,10 +561,15 @@ impl<S: AsyncReadWrite> Session<S> {
 
         // Deliver the message.
         // Message cloning is rather lightweight (body is Bytes)
-        if let Err(e) = self.cfg.delivery_agent.deliver_mail(msg.clone()).await {
+        if let Err(e) = self
+            .cfg
+            .delivery_agent
+            .deliver_mail(self.meta(), msg.clone())
+            .await
+        {
             info!(
-                "{self}: {}: {} -> {:?}: message delivery failed: {e:#}",
-                msg.ehlo_hostname, msg.mail_from, msg.rcpt_to
+                "{self}: {} -> {:?}: message delivery failed: {e:#}",
+                msg.mail_from, msg.rcpt_to
             );
 
             if let Some(v) = &self.cfg.notifications_handler {
@@ -602,8 +603,8 @@ impl<S: AsyncReadWrite> Session<S> {
         }
 
         info!(
-            "{self}: {}: {} -> {:?}: message ({message_size} bytes) queued with id {id}",
-            msg.ehlo_hostname, msg.mail_from, msg.rcpt_to
+            "{self}: {} -> {:?}: message ({message_size} bytes) queued with id {id}",
+            msg.mail_from, msg.rcpt_to
         );
         self.reply_with("250", "2.0.0", |buf| {
             write!(buf, "Message ({message_size} bytes) queued with id {id}")

@@ -22,6 +22,7 @@ use crate::{
             candid::{Envelope, SmtpRequest, SmtpResponse},
             parse_email,
         },
+        inbound::SessionMeta,
     },
 };
 
@@ -242,10 +243,14 @@ impl IcSmtpDeliveryAgent {
 
 #[async_trait]
 impl DeliversMail for IcSmtpDeliveryAgent {
-    async fn deliver_mail(&self, message: EmailMessage) -> Result<(), DeliveryError> {
+    async fn deliver_mail(
+        &self,
+        meta: SessionMeta,
+        message: EmailMessage,
+    ) -> Result<(), DeliveryError> {
         info!(
-            "{self}: delivering mail, ehlo: '{}', from: '{}', to: '{:?}', id '{}'",
-            message.ehlo_hostname, message.mail_from, message.rcpt_to, message.id
+            "{self}: delivering mail, ehlo: {:?}, from: '{}', to: '{:?}', id '{}'",
+            meta.ehlo_hostname, message.mail_from, message.rcpt_to, message.id
         );
 
         // A single message can be (potentially) destined for several canisters/domains.
@@ -369,7 +374,10 @@ mod tests {
 
     use crate::{
         email,
-        smtp::ic::candid::{Header, Message, SmtpOk, SmtpRequestError},
+        smtp::{
+            ic::candid::{Header, Message, SmtpOk, SmtpRequestError},
+            inbound::SessionCounters,
+        },
     };
 
     use super::*;
@@ -610,9 +618,6 @@ mod tests {
 
         let message = EmailMessage {
             id: Uuid::nil(),
-            session_id: Uuid::nil(),
-            remote_ip: IpAddr::from_str("1.1.1.1").unwrap(),
-            ehlo_hostname: fqdn!("foo.bar"),
             mail_from: email!("john@doe.com"),
             rcpt_to: vec![
                 // these two go to qoctq-giaaa-aaaaa-aaaea-cai as a single mail
@@ -624,7 +629,21 @@ mod tests {
             body: message.as_bytes().into(),
         };
 
-        delivery_agent.deliver_mail(message.clone()).await.unwrap();
+        let meta = SessionMeta {
+            id: Uuid::nil(),
+            message_id: Uuid::nil(),
+            remote_ip: IpAddr::from_str("1.1.1.1").unwrap(),
+            tls_info: None,
+            ehlo_hostname: None,
+            counters: SessionCounters::new(),
+            last_error: None,
+            mail_from: None,
+            rcpt_to: vec![],
+        };
+        delivery_agent
+            .deliver_mail(meta, message.clone())
+            .await
+            .unwrap();
 
         let body = indoc! {r#"
             --XXXXboundary text

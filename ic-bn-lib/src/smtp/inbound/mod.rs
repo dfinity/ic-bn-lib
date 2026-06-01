@@ -264,7 +264,7 @@ pub struct SessionCounters {
 }
 
 impl SessionCounters {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             started: Instant::now(),
             bytes_ingested: 0,

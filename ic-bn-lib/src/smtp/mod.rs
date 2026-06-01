@@ -1,11 +1,7 @@
-use std::{
-    fmt::{Debug, Display},
-    net::IpAddr,
-};
+use std::fmt::{Debug, Display};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use fqdn::FQDN;
 use itertools::Itertools;
 use strum::{Display, IntoStaticStr};
 use tracing::warn;
@@ -95,9 +91,6 @@ pub enum ProtocolError {
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct EmailMessage {
     pub id: Uuid,
-    pub session_id: Uuid,
-    pub remote_ip: IpAddr,
-    pub ehlo_hostname: FQDN,
     pub mail_from: EmailAddress,
     pub rcpt_to: Vec<EmailAddress>,
     pub body: Bytes,
@@ -107,11 +100,8 @@ impl Display for EmailMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "id: {}, session_id: {}, remote_ip: {}, ehlo: {}, from: {}, to: {}, msg: {}",
+            "id: {}, from: {}, to: {}, msg: {}",
             self.id,
-            self.session_id,
-            self.remote_ip,
-            self.ehlo_hostname,
             self.mail_from,
             self.rcpt_to.iter().map(|x| x.to_string()).join(", "),
             String::from_utf8_lossy(&self.body)
@@ -150,7 +140,11 @@ pub trait ReceivesNotifications: Send + Sync + Debug {
 /// Delivers the E-Mail message
 #[async_trait]
 pub trait DeliversMail: Send + Sync + Debug {
-    async fn deliver_mail(&self, message: EmailMessage) -> Result<(), DeliveryError>;
+    async fn deliver_mail(
+        &self,
+        meta: SessionMeta,
+        message: EmailMessage,
+    ) -> Result<(), DeliveryError>;
 }
 
 #[derive(Debug)]
@@ -173,7 +167,11 @@ pub struct DummyDeliveryAgent;
 
 #[async_trait]
 impl DeliversMail for DummyDeliveryAgent {
-    async fn deliver_mail(&self, message: EmailMessage) -> Result<(), DeliveryError> {
+    async fn deliver_mail(
+        &self,
+        _meta: SessionMeta,
+        message: EmailMessage,
+    ) -> Result<(), DeliveryError> {
         warn!("DummyDeliveryAgent: {message}");
         Ok(())
     }

@@ -1,7 +1,6 @@
 use std::{net::SocketAddr, str::FromStr, sync::Mutex};
 
 use async_trait::async_trait;
-use fqdn::fqdn;
 use ic_bn_lib_common::types::http::ListenerOpts;
 use mail_parser::{Addr, Address, MessageParser};
 use mail_send::{SmtpClientBuilder, mail_builder::MessageBuilder};
@@ -28,7 +27,11 @@ pub struct TestDeliveryAgent(Mutex<Option<EmailMessage>>, Option<DeliveryError>)
 
 #[async_trait]
 impl DeliversMail for TestDeliveryAgent {
-    async fn deliver_mail(&self, message: EmailMessage) -> Result<(), DeliveryError> {
+    async fn deliver_mail(
+        &self,
+        _meta: SessionMeta,
+        message: EmailMessage,
+    ) -> Result<(), DeliveryError> {
         if let Some(e) = &self.1 {
             return Err(e.clone());
         }
@@ -268,9 +271,6 @@ async fn test_bdat() {
         agent.0.lock().unwrap().clone(),
         Some(EmailMessage {
             id: Uuid::nil(),
-            session_id: Uuid::nil(),
-            remote_ip,
-            ehlo_hostname: fqdn!("foo.bar"),
             mail_from: "foo@bar".try_into().unwrap(),
             rcpt_to: vec!["bar@baz".try_into().unwrap()],
             body: "012345678998765432100123456789".into(),
@@ -312,9 +312,6 @@ async fn test_data() {
         agent.0.lock().unwrap().clone(),
         Some(EmailMessage {
             id: Uuid::nil(),
-            session_id: Uuid::nil(),
-            remote_ip,
-            ehlo_hostname: fqdn!("foo.bar"),
             mail_from: email!("foo@bar"),
             rcpt_to: vec![email!("bar@baz")],
             body: "foobarmessage".into(),
@@ -359,9 +356,6 @@ async fn test_expand() {
         agent.0.lock().unwrap().clone(),
         Some(EmailMessage {
             id: Uuid::nil(),
-            session_id: Uuid::nil(),
-            remote_ip,
-            ehlo_hostname: fqdn!("foo.bar"),
             mail_from: email!("foo@bar"),
             rcpt_to: vec![email!("dead@beef"), email!("dead@dead"), email!("bar@bax"),],
             body: "foobarmessage".into(),
@@ -656,7 +650,6 @@ async fn test_with_smtp_client() {
     // Make sure the agent gets the correct mail
     let msg = agent.0.lock().unwrap().clone().unwrap();
     assert_eq!(msg.id, Uuid::nil());
-    assert_eq!(msg.ehlo_hostname, "foo.bar");
     assert_eq!(msg.mail_from, "john@doe.com");
     assert_eq!(msg.rcpt_to, vec!["jane@doe.com"]);
 
@@ -680,7 +673,6 @@ async fn test_with_smtp_client() {
     let (meta, msg, error) = notification_handler.msg.lock().unwrap().clone().unwrap();
     assert_eq!(meta.id, Uuid::nil());
     assert_eq!(meta.message_id, Uuid::nil());
-    assert_eq!(msg.ehlo_hostname, "foo.bar");
     assert_eq!(msg.mail_from, "john@doe.com");
     assert_eq!(msg.rcpt_to, vec!["jane@doe.com"]);
     assert!(error.is_none());
