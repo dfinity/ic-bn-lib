@@ -366,6 +366,12 @@ impl Display for Batcher {
 impl Batcher {
     async fn add_to_batch(&mut self, event: Value) {
         self.batch.push(event);
+
+        let len = self.rx.max_capacity() - self.rx.capacity();
+        self.metrics
+            .buffer_event_size
+            .with_label_values(&[&self.namespace])
+            .set(len as i64);
         self.metrics
             .batch_size
             .with_label_values(&[&self.namespace])
@@ -416,11 +422,6 @@ impl Batcher {
 
         // Drain the buffer
         while let Some(v) = self.rx.recv().await {
-            let len = self.rx.max_capacity() - self.rx.capacity();
-            self.metrics
-                .buffer_event_size
-                .with_label_values(&[&self.namespace])
-                .set(len as i64);
             self.add_to_batch(v).await;
         }
 
@@ -445,8 +446,6 @@ impl Batcher {
                 },
 
                 Some(event) = self.rx.recv() => {
-                    let len = self.rx.max_capacity() - self.rx.capacity();
-                    self.metrics.buffer_event_size.with_label_values(&[&self.namespace]).set(len as i64);
                     self.add_to_batch(event).await;
                 }
             }
