@@ -257,16 +257,16 @@ impl Default for SessionData {
 /// SMTP session counters
 #[derive(Clone, Debug)]
 pub struct SessionCounters {
-    pub valid_until: Instant,
+    pub started: Instant,
     pub bytes_ingested: usize,
     pub messages_queued: usize,
     pub errors: usize,
 }
 
 impl SessionCounters {
-    fn new(ttl: Duration) -> Self {
+    fn new() -> Self {
         Self {
-            valid_until: Instant::now() + ttl,
+            started: Instant::now(),
             bytes_ingested: 0,
             messages_queued: 0,
             errors: 0,
@@ -308,7 +308,7 @@ impl<S: AsyncReadWrite> Session<S> {
             stream,
             state: SessionState::Greeting,
             data: SessionData::default(),
-            counters: SessionCounters::new(cfg.max_session_duration),
+            counters: SessionCounters::new(),
             cfg,
             tls_info: None,
         }

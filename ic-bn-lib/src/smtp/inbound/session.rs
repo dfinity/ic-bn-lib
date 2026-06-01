@@ -222,7 +222,7 @@ impl<S: AsyncReadWrite> Session<S> {
         }
 
         // Check if we are over session time quota
-        if Instant::now() > self.counters.valid_until {
+        if Instant::now() > self.counters.started + self.cfg.max_session_duration {
             self.reply("452", "4.3.2", "Session open for too long.")
                 .await?;
             return Err(SessionError::TtlExceeded(
