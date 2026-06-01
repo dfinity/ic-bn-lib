@@ -246,7 +246,7 @@ impl DeliversMail for IcSmtpDeliveryAgent {
     async fn deliver_mail(
         &self,
         meta: SessionMeta,
-        message: EmailMessage,
+        message: Arc<EmailMessage>,
     ) -> Result<(), DeliveryError> {
         info!(
             "{self}: delivering mail, ehlo: {:?}, from: '{}', to: '{:?}', id '{}'",
@@ -261,17 +261,17 @@ impl DeliversMail for IcSmtpDeliveryAgent {
         // The future in this loop usually resolves instantly due to the nature of the SMTP protocol.
         // Before the mail is delivered it goes through an RCPT TO sequence which populates the cache.
         // So making it concurrent isn't worth it probably currently.
-        for rcpt in message.rcpt_to {
+        for rcpt in &message.rcpt_to {
             // Figure out which canister we should talk to
             let canister_id = self
-                .resolve_canister_id(&rcpt)
+                .resolve_canister_id(rcpt)
                 .await
                 .ok_or_else(|| DeliveryError::Permanent("Unknown domain".into()))?;
 
             if let Some(v) = mapping.get_mut(&canister_id) {
-                v.push(rcpt);
+                v.push(rcpt.clone());
             } else {
-                mapping.insert(canister_id, vec![rcpt]);
+                mapping.insert(canister_id, vec![rcpt.clone()]);
             }
         }
 
@@ -641,7 +641,7 @@ mod tests {
             rcpt_to: vec![],
         };
         delivery_agent
-            .deliver_mail(meta, message.clone())
+            .deliver_mail(meta, Arc::new(message.clone()))
             .await
             .unwrap();
 

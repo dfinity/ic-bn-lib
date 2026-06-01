@@ -23,14 +23,14 @@ use crate::{
 use super::*;
 
 #[derive(Debug, Default)]
-pub struct TestDeliveryAgent(Mutex<Option<EmailMessage>>, Option<DeliveryError>);
+pub struct TestDeliveryAgent(Mutex<Option<Arc<EmailMessage>>>, Option<DeliveryError>);
 
 #[async_trait]
 impl DeliversMail for TestDeliveryAgent {
     async fn deliver_mail(
         &self,
         _meta: SessionMeta,
-        message: EmailMessage,
+        message: Arc<EmailMessage>,
     ) -> Result<(), DeliveryError> {
         if let Some(e) = &self.1 {
             return Err(e.clone());
@@ -44,7 +44,7 @@ impl DeliversMail for TestDeliveryAgent {
 #[allow(clippy::type_complexity)]
 #[derive(Debug, Default)]
 pub struct TestNotificationsReceiver {
-    msg: Mutex<Option<(SessionMeta, EmailMessage, Option<MessageError>)>>,
+    msg: Mutex<Option<(SessionMeta, Arc<EmailMessage>, Option<MessageError>)>>,
     sess: Mutex<Option<(SessionMeta, Option<SessionError>)>>,
     proto_error: Mutex<Option<(SessionMeta, ProtocolError)>>,
 }
@@ -54,7 +54,7 @@ impl ReceivesNotifications for TestNotificationsReceiver {
     async fn notify_message(
         &self,
         meta: SessionMeta,
-        message: EmailMessage,
+        message: Arc<EmailMessage>,
         error: Option<MessageError>,
     ) {
         *self.msg.lock().unwrap() = Some((meta, message, error));
@@ -268,13 +268,13 @@ async fn test_bdat() {
 
     // Make sure the agent gets the correct mail
     assert_eq!(
-        agent.0.lock().unwrap().clone(),
-        Some(EmailMessage {
+        agent.0.lock().unwrap().clone().unwrap().as_ref(),
+        &EmailMessage {
             id: Uuid::nil(),
             mail_from: "foo@bar".try_into().unwrap(),
             rcpt_to: vec!["bar@baz".try_into().unwrap()],
             body: "012345678998765432100123456789".into(),
-        })
+        }
     );
 }
 
@@ -309,13 +309,13 @@ async fn test_data() {
 
     // Make sure the agent gets the correct mail
     assert_eq!(
-        agent.0.lock().unwrap().clone(),
-        Some(EmailMessage {
+        agent.0.lock().unwrap().clone().unwrap().as_ref(),
+        &EmailMessage {
             id: Uuid::nil(),
             mail_from: email!("foo@bar"),
             rcpt_to: vec![email!("bar@baz")],
             body: "foobarmessage".into(),
-        })
+        }
     )
 }
 
@@ -353,13 +353,13 @@ async fn test_expand() {
 
     // Make sure the agent gets the correct mail
     assert_eq!(
-        agent.0.lock().unwrap().clone(),
-        Some(EmailMessage {
+        agent.0.lock().unwrap().clone().unwrap().as_ref(),
+        &EmailMessage {
             id: Uuid::nil(),
             mail_from: email!("foo@bar"),
             rcpt_to: vec![email!("dead@beef"), email!("dead@dead"), email!("bar@bax"),],
             body: "foobarmessage".into(),
-        })
+        }
     )
 }
 

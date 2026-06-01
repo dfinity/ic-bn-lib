@@ -2,6 +2,7 @@ use std::{
     borrow::Cow,
     fmt::{self, Write as _},
     io::Write as _,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -543,12 +544,12 @@ impl<S: AsyncReadWrite> Session<S> {
 
         // SAFETY: Code makes sure these are all Some().
         // It's better to panic in tests if they are not.
-        let msg = EmailMessage {
+        let msg = Arc::new(EmailMessage {
             id,
             mail_from: self.data.mail_from.take().unwrap(),
             rcpt_to: std::mem::take(&mut self.data.rcpt_to),
             body: std::mem::take(&mut self.data.message).into(),
-        };
+        });
 
         // Run configured verification steps on the message body
         if let Some(e) = self.verify_message(&msg).await? {

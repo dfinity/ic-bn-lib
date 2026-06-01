@@ -338,7 +338,7 @@ impl<S: AsyncReadWrite> Session<S> {
         }
     }
 
-    fn notify_message(&self, msg: EmailMessage, error: Option<MessageError>) {
+    fn notify_message(&self, msg: Arc<EmailMessage>, error: Option<MessageError>) {
         if let Some(v) = self.cfg.notifications_handler.clone() {
             let meta = self.meta();
             tokio::spawn(async move {

@@ -1,4 +1,7 @@
-use std::fmt::{Debug, Display};
+use std::{
+    fmt::{Debug, Display},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -128,7 +131,7 @@ pub trait ReceivesNotifications: Send + Sync + Debug {
     async fn notify_message(
         &self,
         meta: SessionMeta,
-        message: EmailMessage,
+        message: Arc<EmailMessage>,
         error: Option<MessageError>,
     );
     /// Notify when the protocol error happens
@@ -143,7 +146,7 @@ pub trait DeliversMail: Send + Sync + Debug {
     async fn deliver_mail(
         &self,
         meta: SessionMeta,
-        message: EmailMessage,
+        message: Arc<EmailMessage>,
     ) -> Result<(), DeliveryError>;
 }
 
@@ -170,7 +173,7 @@ impl DeliversMail for DummyDeliveryAgent {
     async fn deliver_mail(
         &self,
         _meta: SessionMeta,
-        message: EmailMessage,
+        message: Arc<EmailMessage>,
     ) -> Result<(), DeliveryError> {
         warn!("DummyDeliveryAgent: {message}");
         Ok(())
