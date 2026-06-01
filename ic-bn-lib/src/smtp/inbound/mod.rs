@@ -274,16 +274,30 @@ impl SessionCounters {
     }
 }
 
+/// Session metadata for logging/notification purposes
+#[derive(Clone, Debug)]
+pub struct SessionMeta {
+    pub id: Uuid,
+    pub message_id: Uuid,
+    pub remote_ip: IpAddr,
+    pub tls_info: Option<TlsInfo>,
+    pub counters: SessionCounters,
+    pub last_error: Option<ProtocolError>,
+    pub ehlo_hostname: Option<FQDN>,
+    pub mail_from: Option<EmailAddress>,
+    pub rcpt_to: Vec<EmailAddress>,
+}
+
 /// SMTP Session
 pub struct Session<S: AsyncReadWrite> {
-    pub id: Uuid,
-    pub remote_ip: IpAddr,
+    id: Uuid,
+    remote_ip: IpAddr,
     stream: S,
     state: SessionState,
-    pub data: SessionData,
-    pub counters: SessionCounters,
+    data: SessionData,
+    counters: SessionCounters,
     cfg: Arc<SessionConfig>,
-    pub tls_info: Option<TlsInfo>,
+    tls_info: Option<TlsInfo>,
 }
 
 impl<S: AsyncReadWrite> Display for Session<S> {
@@ -314,9 +328,27 @@ impl<S: AsyncReadWrite> Session<S> {
         }
     }
 
-    fn set_error(&mut self, error: ProtocolError) {
-        self.data.last_error = Some(error);
+    async fn set_error(&mut self, error: ProtocolError) {
+        self.data.last_error = Some(error.clone());
         self.counters.errors += 1;
+
+        if let Some(v) = &self.cfg.notifications_handler {
+            v.notify_protocol_error(self.meta(), error).await;
+        }
+    }
+
+    fn meta(&self) -> SessionMeta {
+        SessionMeta {
+            id: self.id,
+            message_id: self.data.message_id,
+            remote_ip: self.remote_ip,
+            tls_info: self.tls_info.clone(),
+            counters: self.counters.clone(),
+            last_error: self.data.last_error.clone(),
+            ehlo_hostname: self.data.ehlo_hostname.clone(),
+            mail_from: self.data.mail_from.clone(),
+            rcpt_to: self.data.rcpt_to.clone(),
+        }
     }
 }
 

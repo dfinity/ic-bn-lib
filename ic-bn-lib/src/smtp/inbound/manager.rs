@@ -87,15 +87,7 @@ impl SessionManager {
 
     async fn notify<S: AsyncReadWrite>(session: Session<S>, error: SessionError) {
         if let Some(v) = &session.cfg.notifications_handler {
-            v.notify_session_finish(
-                session.id,
-                session.remote_ip,
-                session.data,
-                session.counters,
-                session.tls_info,
-                error,
-            )
-            .await;
+            v.notify_session_finish(session.meta(), error).await;
         }
     }
 }
@@ -112,6 +104,7 @@ impl<S: AsyncReadWrite> Session<S> {
             }
         };
 
+        let meta = self.meta();
         let (stream, tls_info) = match tls_handshake(tls_config, self.stream).await {
             Ok(v) => v,
             Err(e) => {
@@ -120,11 +113,7 @@ impl<S: AsyncReadWrite> Session<S> {
                 // Session is partially consumed by `tls_handshake`, so we can't use `Manager::notify()`
                 if let Some(v) = &self.cfg.notifications_handler {
                     v.notify_session_finish(
-                        self.id,
-                        self.remote_ip,
-                        self.data,
-                        self.counters,
-                        self.tls_info,
+                        meta,
                         SessionError::TlsHandshakeFailed(error_str.clone()),
                     )
                     .await;

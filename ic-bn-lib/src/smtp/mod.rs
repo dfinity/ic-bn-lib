@@ -6,7 +6,6 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use fqdn::FQDN;
-use ic_bn_lib_common::types::http::TlsInfo;
 use itertools::Itertools;
 use strum::{Display, IntoStaticStr};
 use tracing::warn;
@@ -14,7 +13,7 @@ use uuid::Uuid;
 
 use crate::smtp::{
     address::EmailAddress,
-    inbound::{SessionCounters, SessionData, SessionError},
+    inbound::{SessionError, SessionMeta},
 };
 
 pub mod address;
@@ -136,17 +135,16 @@ pub trait ResolvesRecipient: Send + Sync + Debug {
 #[async_trait]
 pub trait ReceivesNotifications: Send + Sync + Debug {
     /// Notify when the message is queued
-    async fn notify_about_message(&self, message: EmailMessage, error: Option<MessageError>);
-    /// Notify when the session is finished
-    async fn notify_session_finish(
+    async fn notify_message(
         &self,
-        id: Uuid,
-        remote_ip: IpAddr,
-        data: SessionData,
-        counters: SessionCounters,
-        tls_info: Option<TlsInfo>,
-        error: SessionError,
+        meta: SessionMeta,
+        message: EmailMessage,
+        error: Option<MessageError>,
     );
+    /// Notify when the protocol error happens
+    async fn notify_protocol_error(&self, meta: SessionMeta, error: ProtocolError);
+    /// Notify when the session is finished
+    async fn notify_session_finish(&self, meta: SessionMeta, error: SessionError);
 }
 
 /// Delivers the E-Mail message

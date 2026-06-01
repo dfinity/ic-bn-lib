@@ -41,35 +41,28 @@ impl DeliversMail for TestDeliveryAgent {
 #[allow(clippy::type_complexity)]
 #[derive(Debug, Default)]
 pub struct TestNotificationsReceiver {
-    msg: Mutex<Option<(EmailMessage, Option<MessageError>)>>,
-    sess: Mutex<
-        Option<(
-            Uuid,
-            IpAddr,
-            SessionData,
-            SessionCounters,
-            Option<TlsInfo>,
-            SessionError,
-        )>,
-    >,
+    msg: Mutex<Option<(SessionMeta, EmailMessage, Option<MessageError>)>>,
+    sess: Mutex<Option<(SessionMeta, SessionError)>>,
+    proto_error: Mutex<Option<(SessionMeta, ProtocolError)>>,
 }
 
 #[async_trait]
 impl ReceivesNotifications for TestNotificationsReceiver {
-    async fn notify_about_message(&self, message: EmailMessage, error: Option<MessageError>) {
-        *self.msg.lock().unwrap() = Some((message, error));
+    async fn notify_message(
+        &self,
+        meta: SessionMeta,
+        message: EmailMessage,
+        error: Option<MessageError>,
+    ) {
+        *self.msg.lock().unwrap() = Some((meta, message, error));
     }
 
-    async fn notify_session_finish(
-        &self,
-        id: Uuid,
-        remote_ip: IpAddr,
-        data: SessionData,
-        counters: SessionCounters,
-        tls_info: Option<TlsInfo>,
-        error: SessionError,
-    ) {
-        *self.sess.lock().unwrap() = Some((id, remote_ip, data, counters, tls_info, error));
+    async fn notify_protocol_error(&self, meta: SessionMeta, error: ProtocolError) {
+        *self.proto_error.lock().unwrap() = Some((meta, error));
+    }
+
+    async fn notify_session_finish(&self, meta: SessionMeta, error: SessionError) {
+        *self.sess.lock().unwrap() = Some((meta, error));
     }
 }
 
@@ -684,19 +677,20 @@ async fn test_with_smtp_client() {
     server_handle.await.unwrap();
 
     // Check notifications
-    let (msg, error) = notification_handler.msg.lock().unwrap().clone().unwrap();
-    assert_eq!(msg.id, Uuid::nil());
+    let (meta, msg, error) = notification_handler.msg.lock().unwrap().clone().unwrap();
+    assert_eq!(meta.id, Uuid::nil());
+    assert_eq!(meta.message_id, Uuid::nil());
     assert_eq!(msg.ehlo_hostname, "foo.bar");
     assert_eq!(msg.mail_from, "john@doe.com");
     assert_eq!(msg.rcpt_to, vec!["jane@doe.com"]);
     assert!(error.is_none());
 
-    let r = notification_handler.sess.lock().unwrap().take().unwrap();
-    assert_eq!(r.0, Uuid::nil());
-    assert_eq!(r.1, IpAddr::from_str("127.0.0.1").unwrap());
-    assert!(r.2.last_error.is_none());
-    assert_eq!(r.4.unwrap().protocol, ProtocolVersion::TLSv1_3);
-    assert!(matches!(r.5, SessionError::Quit));
+    let (meta, error) = notification_handler.sess.lock().unwrap().take().unwrap();
+    assert_eq!(meta.id, Uuid::nil());
+    assert_eq!(meta.remote_ip, IpAddr::from_str("127.0.0.1").unwrap());
+    assert!(meta.last_error.is_none());
+    assert_eq!(meta.tls_info.unwrap().protocol, ProtocolVersion::TLSv1_3);
+    assert!(matches!(error, SessionError::Quit));
 }
 
 #[test]

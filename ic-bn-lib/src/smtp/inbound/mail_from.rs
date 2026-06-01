@@ -25,7 +25,8 @@ impl<S: AsyncReadWrite> Session<S> {
         let Some(helo_hostname) = self.data.ehlo_hostname.as_ref().map(|x| x.to_string()) else {
             self.set_error(ProtocolError::InvalidSequenceOfCommands(
                 "MAIL FROM before EHLO".into(),
-            ));
+            ))
+            .await;
             return self
                 .reply("503", "5.5.1", "Polite people say EHLO first.")
                 .await;
@@ -34,7 +35,8 @@ impl<S: AsyncReadWrite> Session<S> {
         if self.data.mail_from.is_some() {
             self.set_error(ProtocolError::InvalidSequenceOfCommands(
                 "Multiple MAIL FROM".into(),
-            ));
+            ))
+            .await;
             return self
                 .reply(
                     "503",
@@ -66,7 +68,8 @@ impl<S: AsyncReadWrite> Session<S> {
             self.set_error(ProtocolError::MessageTooBig(format!(
                 "MAIL FROM-specified size is too big: {} > {}",
                 from.size, self.cfg.max_message_size
-            )));
+            )))
+            .await;
             return self.message_too_big().await;
         }
 
@@ -84,7 +87,8 @@ impl<S: AsyncReadWrite> Session<S> {
             self.set_error(ProtocolError::SenderValidationFailed(format!(
                 "Incorrect sender address: {}",
                 from.address
-            )));
+            )))
+            .await;
             return self
                 .reply("550", "5.7.1", "Sender address is incorrect.")
                 .await;
@@ -106,7 +110,8 @@ impl<S: AsyncReadWrite> Session<S> {
                 self.set_error(ProtocolError::SenderValidationFailed(format!(
                     "Sender domain is not FQDN: {}",
                     address.domain()
-                )));
+                )))
+                .await;
                 return self.reply("550", "5.7.2", "Sender must be an FQDN.").await;
             };
 
@@ -124,7 +129,8 @@ impl<S: AsyncReadWrite> Session<S> {
                         );
                         self.set_error(ProtocolError::SenderValidationFailed(
                             "No MX records found".into(),
-                        ));
+                        ))
+                        .await;
                         return self
                             .reply(
                                 "550",
@@ -141,7 +147,8 @@ impl<S: AsyncReadWrite> Session<S> {
                         );
                         self.set_error(ProtocolError::SenderValidationFailed(
                             "No MX records found".into(),
-                        ));
+                        ))
+                        .await;
                         return self
                             .reply(
                                 "550",
@@ -155,7 +162,8 @@ impl<S: AsyncReadWrite> Session<S> {
                         );
                         self.set_error(ProtocolError::SenderValidationFailed(format!(
                             "Sender domain verification temporary error: {e:#}",
-                        )));
+                        )))
+                        .await;
                         return self
                             .reply("451", "4.7.25", "Temporary error validating sender domain.")
                             .await;
@@ -188,7 +196,8 @@ impl<S: AsyncReadWrite> Session<S> {
                     self.set_error(ProtocolError::SpfValidationFailed(format!(
                         "SPF validation temporary error: {:?}",
                         output.explanation()
-                    )));
+                    )))
+                    .await;
                     return self
                         .reply("451", "4.7.24", "Temporary SPF validation error.")
                         .await;
@@ -201,7 +210,8 @@ impl<S: AsyncReadWrite> Session<S> {
                     self.set_error(ProtocolError::SpfValidationFailed(format!(
                         "SPF validation permanent error: {:?}",
                         output.explanation()
-                    )));
+                    )))
+                    .await;
                     return self
                         .reply_with("550", "5.7.23", |buf| {
                             write!(buf, "SPF validation failed")?;
@@ -225,7 +235,8 @@ impl<S: AsyncReadWrite> Session<S> {
 
     /// Replies about failed reverse IP verification
     async fn verify_reverse_ip_reply(&mut self, permanent: bool, msg: &str) -> SessionResult<bool> {
-        self.set_error(ProtocolError::ReverseIpValidationFailed(msg.into()));
+        self.set_error(ProtocolError::ReverseIpValidationFailed(msg.into()))
+            .await;
 
         // Emit permanent errors only if in strict mode
         if permanent && self.cfg.verify_reverse_ip_strict {
