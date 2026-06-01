@@ -51,7 +51,7 @@ pub enum DeliveryError {
     Permanent(String),
 }
 
-/// Error that might happen during message vaildation or delivery
+/// Error that might happen during message validation or delivery
 #[derive(thiserror::Error, Clone, Debug, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum MessageError {
@@ -124,7 +124,7 @@ pub trait ResolvesRecipient: Send + Sync + Debug {
 /// Notifies about events
 #[async_trait]
 pub trait ReceivesNotifications: Send + Sync + Debug {
-    /// Notify when the message is queued
+    /// Notify when the message is queued or the validation failed
     async fn notify_message(
         &self,
         meta: SessionMeta,
@@ -134,7 +134,7 @@ pub trait ReceivesNotifications: Send + Sync + Debug {
     /// Notify when the protocol error happens
     async fn notify_protocol_error(&self, meta: SessionMeta, error: ProtocolError);
     /// Notify when the session is finished
-    async fn notify_session_finish(&self, meta: SessionMeta, error: SessionError);
+    async fn notify_session_finish(&self, meta: SessionMeta, error: Option<SessionError>);
 }
 
 /// Delivers the E-Mail message

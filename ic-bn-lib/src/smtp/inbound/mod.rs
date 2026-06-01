@@ -31,8 +31,8 @@ use uuid::Uuid;
 use crate::{
     network::AsyncReadWrite,
     smtp::{
-        DeliversMail, DummyDeliveryAgent, DummyRecipientResolver, ProtocolError,
-        ReceivesNotifications, ResolvesRecipient, address::EmailAddress,
+        DeliversMail, DummyDeliveryAgent, DummyRecipientResolver, EmailMessage, MessageError,
+        ProtocolError, ReceivesNotifications, ResolvesRecipient, address::EmailAddress,
     },
 };
 
@@ -328,13 +328,23 @@ impl<S: AsyncReadWrite> Session<S> {
         }
     }
 
-    async fn set_error(&mut self, error: ProtocolError) {
+    fn set_error(&mut self, error: ProtocolError) {
         self.data.last_error = Some(error.clone());
         self.counters.errors += 1;
 
-        if let Some(v) = &self.cfg.notifications_handler {
-            v.notify_protocol_error(self.meta(), error).await;
+        if let Some(v) = self.cfg.notifications_handler.clone() {
+            let meta = self.meta();
+            tokio::spawn(async move { v.notify_protocol_error(meta, error).await });
         }
+    }
+
+    fn notify_message(&self, msg: EmailMessage, error: Option<MessageError>) {
+        if let Some(v) = self.cfg.notifications_handler.clone() {
+            let meta = self.meta();
+            tokio::spawn(async move {
+                v.notify_message(meta, msg, error).await;
+            });
+        };
     }
 
     fn meta(&self) -> SessionMeta {

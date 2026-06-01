@@ -33,6 +33,7 @@ impl SessionManager {
         match session.handle(shutdown_token.child_token()).await {
             Ok(v) => match v {
                 SessionUpgrade::No => {
+                    Self::notify(&session, None).await;
                     session.stream.shutdown().await.ok();
                 }
                 SessionUpgrade::StartTls => {
@@ -49,7 +50,7 @@ impl SessionManager {
                     debug!("{session}: error closing connection: {e:#}");
                 };
 
-                Self::notify(session, e).await;
+                Self::notify(&session, Some(e)).await;
             }
         }
     }
@@ -75,7 +76,7 @@ impl SessionManager {
                         debug!("{session}: error closing connection: {e:#}");
                     };
 
-                    Self::notify(session, e).await;
+                    Self::notify(&session, Some(e)).await;
                 }
             }
 
@@ -85,9 +86,12 @@ impl SessionManager {
         };
     }
 
-    async fn notify<S: AsyncReadWrite>(session: Session<S>, error: SessionError) {
-        if let Some(v) = &session.cfg.notifications_handler {
-            v.notify_session_finish(session.meta(), error).await;
+    async fn notify<S: AsyncReadWrite>(session: &Session<S>, error: Option<SessionError>) {
+        if let Some(v) = session.cfg.notifications_handler.clone() {
+            let meta = session.meta();
+            tokio::spawn(async move {
+                v.notify_session_finish(meta, error).await;
+            });
         }
     }
 }
@@ -111,15 +115,17 @@ impl<S: AsyncReadWrite> Session<S> {
                 let error_str = e.to_string();
 
                 // Session is partially consumed by `tls_handshake`, so we can't use `Manager::notify()`
-                if let Some(v) = &self.cfg.notifications_handler {
-                    v.notify_session_finish(
-                        meta,
-                        SessionError::TlsHandshakeFailed(error_str.clone()),
-                    )
-                    .await;
+                if let Some(v) = self.cfg.notifications_handler.clone() {
+                    tokio::spawn(async move {
+                        v.notify_session_finish(
+                            meta,
+                            Some(SessionError::TlsHandshakeFailed(error_str.clone())),
+                        )
+                        .await;
+                    });
                 }
 
-                return Err(SessionError::TlsHandshakeFailed(error_str));
+                return Err(SessionError::TlsHandshakeFailed(e.to_string()));
             }
         };
 

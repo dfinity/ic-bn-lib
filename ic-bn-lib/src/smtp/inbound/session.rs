@@ -94,8 +94,7 @@ impl<S: AsyncReadWrite> Session<S> {
             "{} > {}",
             self.data.message.len(),
             max_size
-        )))
-        .await;
+        )));
         self.reply_with("552", "5.3.4", |buf| {
             write!(buf, "Message too big, we accept up to {max_size} bytes.",)
         })
@@ -131,8 +130,7 @@ impl<S: AsyncReadWrite> Session<S> {
     }
 
     async fn handle_error(&mut self, error: SmtpError) -> SessionResult<()> {
-        self.set_error(ProtocolError::SmtpError(error.to_string()))
-            .await;
+        self.set_error(ProtocolError::SmtpError(error.to_string()));
 
         let (code, ext, msg) = match error {
             SmtpError::UnknownCommand | SmtpError::InvalidResponse { .. } => {
@@ -203,8 +201,7 @@ impl<S: AsyncReadWrite> Session<S> {
                 self.reply("250", "2.0.0", "OK").await?;
             }
             _ => {
-                self.set_error(ProtocolError::SmtpError("Command not implemented".into()))
-                    .await;
+                self.set_error(ProtocolError::SmtpError("Command not implemented".into()));
                 self.reply("502", "5.5.1", "Command not implemented.")
                     .await?;
             }
@@ -294,14 +291,12 @@ impl<S: AsyncReadWrite> Session<S> {
                                 if self.tls_info.is_some() {
                                     self.set_error(ProtocolError::InvalidSequenceOfCommands(
                                         "STARTTLS inside STARTTLS".into(),
-                                    ))
-                                    .await;
+                                    ));
                                     self.reply("504", "5.7.4", "Already in TLS mode.").await?;
                                 } else if !self.cfg.tls_mode.enabled() {
                                     self.set_error(ProtocolError::InvalidSequenceOfCommands(
                                         "STARTTLS without TLS enabled".into(),
-                                    ))
-                                    .await;
+                                    ));
                                     self.reply("502", "5.7.0", "TLS not available.").await?;
                                 } else {
                                     self.reply("220", "2.0.0", "Ready to start TLS.").await?;
@@ -361,8 +356,7 @@ impl<S: AsyncReadWrite> Session<S> {
                 SessionState::RequestTooLarge(rx) => {
                     // If line-feed found - issue error, otherwise keep ingesting
                     if rx.ingest(&mut iter) {
-                        self.set_error(ProtocolError::SmtpError("Line is too long".into()))
-                            .await;
+                        self.set_error(ProtocolError::SmtpError("Line is too long".into()));
                         self.reply("554", "5.3.4", "Line is too long.").await?;
                         state = SessionState::default();
                     } else {
@@ -513,14 +507,16 @@ impl<S: AsyncReadWrite> Session<S> {
 
             // Strict: Check that *all* signatures have passed validation (or there are none)
             // else: Check if *any* of the signatures have passed validation (or there are none)
-            if (strict && outputs.len() != signatures_passed)
-                || (!strict && !outputs.is_empty() && signatures_passed == 0)
-            {
-                if outputs.len() != signatures_passed {
-                    let error = first_error.unwrap_or_default();
-                    reply(&error).await?;
-                    return Ok(Some(MessageError::DkimValidationFailed(error)));
-                }
+            let is_valid = if strict {
+                signatures_passed == outputs.len()
+            } else {
+                signatures_passed != 0 || outputs.is_empty()
+            };
+
+            if !is_valid {
+                let error = first_error.unwrap_or_default();
+                reply(&error).await?;
+                return Ok(Some(MessageError::DkimValidationFailed(error)));
             }
 
             if signatures_passed > 0 {
@@ -529,6 +525,11 @@ impl<S: AsyncReadWrite> Session<S> {
                     msg.mail_from,
                     msg.rcpt_to,
                     outputs.len()
+                );
+            } else {
+                debug!(
+                    "{log_name}: {} -> {:?}: No DKIM signatures found",
+                    msg.mail_from, msg.rcpt_to,
                 );
             }
         }
@@ -551,10 +552,7 @@ impl<S: AsyncReadWrite> Session<S> {
 
         // Run configured verification steps on the message body
         if let Some(e) = self.verify_message(&msg).await? {
-            if let Some(v) = &self.cfg.notifications_handler {
-                v.notify_message(self.meta(), msg.clone(), Some(e)).await;
-            }
-
+            self.notify_message(msg.clone(), Some(e));
             self.reset_message();
             return Ok(());
         }
@@ -572,16 +570,9 @@ impl<S: AsyncReadWrite> Session<S> {
                 msg.mail_from, msg.rcpt_to
             );
 
-            if let Some(v) = &self.cfg.notifications_handler {
-                v.notify_message(
-                    self.meta(),
-                    msg.clone(),
-                    Some(MessageError::DeliveryFailed(e.clone())),
-                )
-                .await;
-            }
-
+            self.notify_message(msg.clone(), Some(MessageError::DeliveryFailed(e.clone())));
             self.reset_message();
+
             return match e {
                 DeliveryError::Permanent(v) => {
                     self.reply_with("550", "5.5.0", |buf| {
@@ -598,9 +589,7 @@ impl<S: AsyncReadWrite> Session<S> {
             };
         }
 
-        if let Some(v) = &self.cfg.notifications_handler {
-            v.notify_message(self.meta(), msg.clone(), None).await;
-        }
+        self.notify_message(msg.clone(), None);
 
         info!(
             "{self}: {} -> {:?}: message ({message_size} bytes) queued with id {id}",
@@ -628,8 +617,7 @@ impl<S: AsyncReadWrite> Session<S> {
         } else if self.data.rcpt_to.is_empty() {
             self.set_error(ProtocolError::InvalidSequenceOfCommands(
                 "DATA before RCPT TO".into(),
-            ))
-            .await;
+            ));
             self.reply("503", "5.5.1", "RCPT TO is required first.")
                 .await?;
             return Ok(false);

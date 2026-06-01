@@ -21,8 +21,7 @@ impl<S: AsyncReadWrite> Session<S> {
         let Some(mail_from) = &self.data.mail_from else {
             self.set_error(ProtocolError::InvalidSequenceOfCommands(
                 "RCPT TO before MAIL FROM".into(),
-            ))
-            .await;
+            ));
             return self
                 .reply("503", "5.5.1", "MAIL FROM is required first.")
                 .await;
@@ -42,8 +41,7 @@ impl<S: AsyncReadWrite> Session<S> {
             self.set_error(ProtocolError::RecipientValidationFailed(format!(
                 "Incorrect address: {}",
                 to.address
-            )))
-            .await;
+            )));
             return self.reply("550", "5.1.2", "Incorrect address.").await;
         };
 
@@ -57,8 +55,7 @@ impl<S: AsyncReadWrite> Session<S> {
                 "Too many recipients: {} > {}",
                 self.data.rcpt_to.len(),
                 self.cfg.max_recipients
-            )))
-            .await;
+            )));
             return self.reply("455", "4.5.3", "Too many recipients.").await;
         }
 
@@ -89,8 +86,7 @@ impl<S: AsyncReadWrite> Session<S> {
                 info!("{self}: {}: recipient resolution error: {e:#}", to.address);
                 self.set_error(ProtocolError::RecipientValidationFailed(format!(
                     "Recipient resolution failed: {e:#}",
-                )))
-                .await;
+                )));
 
                 return match e {
                     RecipientResolveError::UnknownDomain => {

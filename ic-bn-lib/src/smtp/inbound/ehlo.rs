@@ -20,8 +20,7 @@ impl<S: AsyncReadWrite> Session<S> {
             info!("{self}: {host}: Invalid EHLO hostname");
             self.set_error(ProtocolError::InvalidEhloHostname(format!(
                 "{host}: incorrect hostname"
-            )))
-            .await;
+            )));
             return self.reply("550", "5.5.0", "Invalid EHLO hostname.").await;
         };
 
@@ -37,8 +36,7 @@ impl<S: AsyncReadWrite> Session<S> {
             info!("{self}: {host}: EHLO is not FQDN");
             self.set_error(ProtocolError::InvalidEhloHostname(format!(
                 "{host}: not FQDN"
-            )))
-            .await;
+            )));
             return self
                 .reply("550", "5.5.0", "EHLO hostname must be an FQDN.")
                 .await;
@@ -55,8 +53,7 @@ impl<S: AsyncReadWrite> Session<S> {
                         info!("{self}: {host}: EHLO not found in DNS");
                         self.set_error(ProtocolError::InvalidEhloHostname(format!(
                             "{host}: not found in DNS"
-                        )))
-                        .await;
+                        )));
                         return self
                             .reply("550", "5.5.0", "EHLO hostname not found in DNS.")
                             .await;
@@ -69,8 +66,7 @@ impl<S: AsyncReadWrite> Session<S> {
                     if is_error_negative_lookup(&e) {
                         self.set_error(ProtocolError::InvalidEhloHostname(format!(
                             "{host}: not found in DNS: {e:#}"
-                        )))
-                        .await;
+                        )));
 
                         return self
                             .reply("550", "5.5.0", "EHLO hostname not found in DNS.")

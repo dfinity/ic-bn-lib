@@ -37,6 +37,7 @@ pub use ic_bn_lib_common;
 #[cfg(feature = "smtp")]
 pub use mail_auth;
 pub use prometheus;
+#[cfg(feature = "acme")]
 pub use rcgen;
 pub use reqwest;
 pub use rustls;

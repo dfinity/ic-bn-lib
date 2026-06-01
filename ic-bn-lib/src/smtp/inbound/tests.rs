@@ -45,7 +45,7 @@ impl DeliversMail for TestDeliveryAgent {
 #[derive(Debug, Default)]
 pub struct TestNotificationsReceiver {
     msg: Mutex<Option<(SessionMeta, EmailMessage, Option<MessageError>)>>,
-    sess: Mutex<Option<(SessionMeta, SessionError)>>,
+    sess: Mutex<Option<(SessionMeta, Option<SessionError>)>>,
     proto_error: Mutex<Option<(SessionMeta, ProtocolError)>>,
 }
 
@@ -64,7 +64,7 @@ impl ReceivesNotifications for TestNotificationsReceiver {
         *self.proto_error.lock().unwrap() = Some((meta, error));
     }
 
-    async fn notify_session_finish(&self, meta: SessionMeta, error: SessionError) {
+    async fn notify_session_finish(&self, meta: SessionMeta, error: Option<SessionError>) {
         *self.sess.lock().unwrap() = Some((meta, error));
     }
 }
@@ -645,6 +645,8 @@ async fn test_with_smtp_client() {
     );
 
     client.send(message).await.unwrap();
+    // Send some bad command to emit a protocol error notification
+    client.cmd(b"FOOBAR\r\n").await.ok();
     client.quit().await.unwrap();
 
     // Make sure the agent gets the correct mail
@@ -680,9 +682,20 @@ async fn test_with_smtp_client() {
     let (meta, error) = notification_handler.sess.lock().unwrap().take().unwrap();
     assert_eq!(meta.id, Uuid::nil());
     assert_eq!(meta.remote_ip, IpAddr::from_str("127.0.0.1").unwrap());
-    assert!(meta.last_error.is_none());
+    assert!(matches!(meta.last_error, Some(ProtocolError::SmtpError(_))));
     assert_eq!(meta.tls_info.unwrap().protocol, ProtocolVersion::TLSv1_3);
-    assert!(matches!(error, SessionError::Quit));
+    assert!(matches!(error, Some(SessionError::Quit)));
+
+    // Error from the FOOBAR command
+    let (meta, error) = notification_handler
+        .proto_error
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap();
+    assert_eq!(meta.id, Uuid::nil());
+    assert_eq!(meta.remote_ip, IpAddr::from_str("127.0.0.1").unwrap());
+    assert!(matches!(error, ProtocolError::SmtpError(_)));
 }
 
 #[test]
