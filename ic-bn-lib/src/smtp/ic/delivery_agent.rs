@@ -22,6 +22,7 @@ use crate::{
             candid::{Envelope, SmtpRequest, SmtpResponse},
             parse_email,
         },
+        inbound::SessionMeta,
     },
 };
 
@@ -242,10 +243,14 @@ impl IcSmtpDeliveryAgent {
 
 #[async_trait]
 impl DeliversMail for IcSmtpDeliveryAgent {
-    async fn deliver_mail(&self, message: EmailMessage) -> Result<(), DeliveryError> {
+    async fn deliver_mail(
+        &self,
+        meta: SessionMeta,
+        message: Arc<EmailMessage>,
+    ) -> Result<(), DeliveryError> {
         info!(
-            "{self}: delivering mail, ehlo: '{}', from: '{}', to: '{:?}', id '{}'",
-            message.ehlo_hostname, message.mail_from, message.rcpt_to, message.id
+            "{self}: delivering mail, ehlo: {:?}, from: '{}', to: '{:?}', id '{}'",
+            meta.ehlo_hostname, message.mail_from, message.rcpt_to, message.id
         );
 
         // A single message can be (potentially) destined for several canisters/domains.
@@ -256,17 +261,17 @@ impl DeliversMail for IcSmtpDeliveryAgent {
         // The future in this loop usually resolves instantly due to the nature of the SMTP protocol.
         // Before the mail is delivered it goes through an RCPT TO sequence which populates the cache.
         // So making it concurrent isn't worth it probably currently.
-        for rcpt in message.rcpt_to {
+        for rcpt in &message.rcpt_to {
             // Figure out which canister we should talk to
             let canister_id = self
-                .resolve_canister_id(&rcpt)
+                .resolve_canister_id(rcpt)
                 .await
                 .ok_or_else(|| DeliveryError::Permanent("Unknown domain".into()))?;
 
             if let Some(v) = mapping.get_mut(&canister_id) {
-                v.push(rcpt);
+                v.push(rcpt.clone());
             } else {
-                mapping.insert(canister_id, vec![rcpt]);
+                mapping.insert(canister_id, vec![rcpt.clone()]);
             }
         }
 
@@ -359,14 +364,20 @@ impl ResolvesRecipient for IcSmtpDeliveryAgent {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Mutex,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        net::IpAddr,
+        sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use crate::{
         email,
-        smtp::ic::candid::{Header, Message, SmtpOk, SmtpRequestError},
+        smtp::{
+            ic::candid::{Header, Message, SmtpOk, SmtpRequestError},
+            inbound::SessionCounters,
+        },
     };
 
     use super::*;
@@ -607,7 +618,6 @@ mod tests {
 
         let message = EmailMessage {
             id: Uuid::nil(),
-            ehlo_hostname: fqdn!("foo.bar"),
             mail_from: email!("john@doe.com"),
             rcpt_to: vec![
                 // these two go to qoctq-giaaa-aaaaa-aaaea-cai as a single mail
@@ -619,7 +629,21 @@ mod tests {
             body: message.as_bytes().into(),
         };
 
-        delivery_agent.deliver_mail(message.clone()).await.unwrap();
+        let meta = SessionMeta {
+            id: Uuid::nil(),
+            message_id: Uuid::nil(),
+            remote_ip: IpAddr::from_str("1.1.1.1").unwrap(),
+            tls_info: None,
+            ehlo_hostname: None,
+            counters: SessionCounters::new(),
+            last_error: None,
+            mail_from: None,
+            rcpt_to: vec![],
+        };
+        delivery_agent
+            .deliver_mail(meta, Arc::new(message.clone()))
+            .await
+            .unwrap();
 
         let body = indoc! {r#"
             --XXXXboundary text

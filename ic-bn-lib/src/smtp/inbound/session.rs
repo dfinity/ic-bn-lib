@@ -2,6 +2,7 @@ use std::{
     borrow::Cow,
     fmt::{self, Write as _},
     io::Write as _,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -23,7 +24,7 @@ use uuid::Uuid;
 use crate::{
     network::AsyncReadWrite,
     smtp::{
-        DeliveryError, EmailMessage,
+        DeliveryError, EmailMessage, MessageError, ProtocolError,
         inbound::{
             MAX_REPLY_LEN, Session, SessionError, SessionResult, SessionState, SessionUpgrade,
         },
@@ -90,6 +91,11 @@ impl<S: AsyncReadWrite> Session<S> {
 
     pub(crate) async fn message_too_big(&mut self) -> SessionResult<()> {
         let max_size = self.cfg.max_message_size;
+        self.set_error(ProtocolError::MessageTooBig(format!(
+            "{} > {}",
+            self.data.message.len(),
+            max_size
+        )));
         self.reply_with("552", "5.3.4", |buf| {
             write!(buf, "Message too big, we accept up to {max_size} bytes.",)
         })
@@ -125,7 +131,7 @@ impl<S: AsyncReadWrite> Session<S> {
     }
 
     async fn handle_error(&mut self, error: SmtpError) -> SessionResult<()> {
-        self.counters.errors += 1;
+        self.set_error(ProtocolError::SmtpError(error.to_string()));
 
         let (code, ext, msg) = match error {
             SmtpError::UnknownCommand | SmtpError::InvalidResponse { .. } => {
@@ -196,9 +202,9 @@ impl<S: AsyncReadWrite> Session<S> {
                 self.reply("250", "2.0.0", "OK").await?;
             }
             _ => {
+                self.set_error(ProtocolError::SmtpError("Command not implemented".into()));
                 self.reply("502", "5.5.1", "Command not implemented.")
                     .await?;
-                self.counters.errors += 1;
             }
         }
 
@@ -217,7 +223,7 @@ impl<S: AsyncReadWrite> Session<S> {
         }
 
         // Check if we are over session time quota
-        if Instant::now() > self.counters.valid_until {
+        if Instant::now() > self.counters.started + self.cfg.max_session_duration {
             self.reply("452", "4.3.2", "Session open for too long.")
                 .await?;
             return Err(SessionError::TtlExceeded(
@@ -284,11 +290,15 @@ impl<S: AsyncReadWrite> Session<S> {
                             Request::StartTls => {
                                 debug!("{self}: <- STARTTLS");
                                 if self.tls_info.is_some() {
+                                    self.set_error(ProtocolError::InvalidSequenceOfCommands(
+                                        "STARTTLS inside STARTTLS".into(),
+                                    ));
                                     self.reply("504", "5.7.4", "Already in TLS mode.").await?;
-                                    self.counters.errors += 1;
                                 } else if !self.cfg.tls_mode.enabled() {
+                                    self.set_error(ProtocolError::InvalidSequenceOfCommands(
+                                        "STARTTLS without TLS enabled".into(),
+                                    ));
                                     self.reply("502", "5.7.0", "TLS not available.").await?;
-                                    self.counters.errors += 1;
                                 } else {
                                     self.reply("220", "2.0.0", "Ready to start TLS.").await?;
                                     self.state = state;
@@ -347,9 +357,9 @@ impl<S: AsyncReadWrite> Session<S> {
                 SessionState::RequestTooLarge(rx) => {
                     // If line-feed found - issue error, otherwise keep ingesting
                     if rx.ingest(&mut iter) {
+                        self.set_error(ProtocolError::SmtpError("Line is too long".into()));
                         self.reply("554", "5.3.4", "Line is too long.").await?;
                         state = SessionState::default();
-                        self.counters.errors += 1;
                     } else {
                         // No line-feed found yet
                         break;
@@ -360,7 +370,6 @@ impl<S: AsyncReadWrite> Session<S> {
                     if rx.ingest(&mut iter) {
                         self.message_too_big().await?;
                         state = SessionState::default();
-                        self.counters.errors += 1;
                     } else {
                         // No end-of-message marker found yet
                         break;
@@ -422,26 +431,26 @@ impl<S: AsyncReadWrite> Session<S> {
     async fn verify_message(
         &mut self,
         #[allow(unused_variables)] msg: &EmailMessage,
-    ) -> SessionResult<bool> {
+    ) -> SessionResult<Option<MessageError>> {
         #[cfg(test)]
         {
-            return Ok(true);
+            return Ok(None);
         }
 
         let Some(auth_message) = AuthenticatedMessage::parse(&msg.body) else {
             info!(
-                "{self}: {}: {} -> {:?}: message parsing failed",
-                msg.ehlo_hostname, msg.mail_from, msg.rcpt_to
+                "{self}: {} -> {:?}: message parsing failed",
+                msg.mail_from, msg.rcpt_to
             );
             self.reply("550", "5.7.7", "Failed to parse the message")
                 .await?;
-            return Ok(false);
+            return Ok(Some(MessageError::ParsingFailed));
         };
 
         if auth_message.received_headers_count() > self.cfg.max_received_headers {
             info!(
-                "{self}: {}: {} -> {:?}: message verification failed: too many 'Received' headers",
-                msg.ehlo_hostname, msg.mail_from, msg.rcpt_to
+                "{self}: {} -> {:?}: message verification failed: too many 'Received' headers",
+                msg.mail_from, msg.rcpt_to
             );
             self.reply(
                 "450",
@@ -449,7 +458,7 @@ impl<S: AsyncReadWrite> Session<S> {
                 "Too many 'Received' headers. Possible loop detected.",
             )
             .await?;
-            return Ok(false);
+            return Ok(Some(MessageError::TooManyReceivedHeaders));
         }
 
         if self.cfg.verify_dkim {
@@ -459,23 +468,23 @@ impl<S: AsyncReadWrite> Session<S> {
             let log_name = self.to_string();
 
             // Replies with either a temporary or a permanent error code
-            let mut reply = async || -> SessionResult<()> {
+            let mut reply = async |error: &str| -> SessionResult<()> {
                 if outputs
                     .iter()
                     .any(|x| matches!(x.result(), DkimResult::TempError(_)))
                 {
                     // If any of the signatures that failed with a temporary error - return temporary SMTP error code
                     info!(
-                        "{log_name}: {}: {} -> {:?}: DKIM verification temporary failure",
-                        msg.ehlo_hostname, msg.mail_from, msg.rcpt_to
+                        "{log_name}: {} -> {:?}: DKIM verification temporary failure: {error}",
+                        msg.mail_from, msg.rcpt_to
                     );
                     self.reply("451", "4.7.20", "DKIM validation temporary failure.")
                         .await
                 } else {
                     // Otherwise permanent
                     info!(
-                        "{log_name}: {}: {} -> {:?}: DKIM verification failure",
-                        msg.ehlo_hostname, msg.mail_from, msg.rcpt_to
+                        "{log_name}: {} -> {:?}: DKIM verification failure: {error}",
+                        msg.mail_from, msg.rcpt_to
                     );
                     self.reply("550", "5.7.20", "DKIM validation failed.").await
                 }
@@ -486,71 +495,83 @@ impl<S: AsyncReadWrite> Session<S> {
                 .filter(|x| matches!(x.result(), DkimResult::Pass | DkimResult::None))
                 .count();
 
-            if strict {
-                // Check that *all* signatures have passed validation (or there are none)
-                if outputs.len() != signatures_passed {
-                    reply().await?;
-                    return Ok(false);
-                }
+            // Get first validation error (if any)
+            let first_error = outputs
+                .iter()
+                .filter_map(|x| match x.result() {
+                    DkimResult::Fail(e) | DkimResult::PermError(e) | DkimResult::TempError(e) => {
+                        Some(e.to_string())
+                    }
+                    _ => None,
+                })
+                .next();
+
+            // Strict: Check that *all* signatures have passed validation (or there are none)
+            // else: Check if *any* of the signatures have passed validation (or there are none)
+            let is_valid = if strict {
+                signatures_passed == outputs.len()
             } else {
-                // Check if *any* of the signatures have passed validation (or there are none)
-                if !outputs.is_empty() && signatures_passed == 0 {
-                    reply().await?;
-                    return Ok(false);
-                }
+                signatures_passed != 0 || outputs.is_empty()
+            };
+
+            if !is_valid {
+                let error = first_error.unwrap_or_default();
+                reply(&error).await?;
+                return Ok(Some(MessageError::DkimValidationFailed(error)));
             }
 
             if signatures_passed > 0 {
                 debug!(
-                    "{log_name}: {}: {} -> {:?}: DKIM validation succeeded ({signatures_passed}/{} signatures passed)",
-                    msg.ehlo_hostname,
+                    "{log_name}: {} -> {:?}: DKIM validation succeeded ({signatures_passed}/{} signatures passed)",
                     msg.mail_from,
                     msg.rcpt_to,
                     outputs.len()
                 );
             } else {
                 debug!(
-                    "{log_name}: {}: {} -> {:?}: DKIM validation succeeded ({signatures_passed}/{} signatures passed)",
-                    msg.ehlo_hostname,
-                    msg.mail_from,
-                    msg.rcpt_to,
-                    outputs.len()
+                    "{log_name}: {} -> {:?}: No DKIM signatures found",
+                    msg.mail_from, msg.rcpt_to,
                 );
             }
         }
 
-        Ok(true)
+        Ok(None)
     }
 
     async fn queue_message(&mut self) -> SessionResult<()> {
-        #[cfg(not(test))]
-        let id = Uuid::now_v7();
-        #[cfg(test)]
-        let id = Uuid::nil();
-
         let message_size = self.data.message.len();
+        let id = self.data.message_id;
 
         // SAFETY: Code makes sure these are all Some().
         // It's better to panic in tests if they are not.
-        let msg = EmailMessage {
+        let msg = Arc::new(EmailMessage {
             id,
-            ehlo_hostname: self.data.ehlo_hostname.clone().unwrap(),
             mail_from: self.data.mail_from.take().unwrap(),
             rcpt_to: std::mem::take(&mut self.data.rcpt_to),
             body: std::mem::take(&mut self.data.message).into(),
-        };
+        });
 
         // Run configured verification steps on the message body
-        if !self.verify_message(&msg).await? {
+        if let Some(e) = self.verify_message(&msg).await? {
+            self.notify_message(msg.clone(), Some(e));
             self.reset_message();
             return Ok(());
         }
 
-        if let Err(e) = self.cfg.delivery_agent.deliver_mail(msg.clone()).await {
+        // Deliver the message.
+        // Message cloning is rather lightweight (body is Bytes)
+        if let Err(e) = self
+            .cfg
+            .delivery_agent
+            .deliver_mail(self.meta(), msg.clone())
+            .await
+        {
             info!(
-                "{self}: {}: {} -> {:?}: message delivery failed: {e:#}",
-                msg.ehlo_hostname, msg.mail_from, msg.rcpt_to
+                "{self}: {} -> {:?}: message delivery failed: {e:#}",
+                msg.mail_from, msg.rcpt_to
             );
+
+            self.notify_message(msg.clone(), Some(MessageError::DeliveryFailed(e.clone())));
             self.reset_message();
 
             return match e {
@@ -569,9 +590,11 @@ impl<S: AsyncReadWrite> Session<S> {
             };
         }
 
+        self.notify_message(msg.clone(), None);
+
         info!(
-            "{self}: {}: {} -> {:?}: message ({message_size} bytes) queued with id {id}",
-            msg.ehlo_hostname, msg.mail_from, msg.rcpt_to
+            "{self}: {} -> {:?}: message ({message_size} bytes) queued with id {id}",
+            msg.mail_from, msg.rcpt_to
         );
         self.reply_with("250", "2.0.0", |buf| {
             write!(buf, "Message ({message_size} bytes) queued with id {id}")
@@ -593,9 +616,11 @@ impl<S: AsyncReadWrite> Session<S> {
             .await?;
             return Err(SessionError::TooManyMessagesPerSession);
         } else if self.data.rcpt_to.is_empty() {
+            self.set_error(ProtocolError::InvalidSequenceOfCommands(
+                "DATA before RCPT TO".into(),
+            ));
             self.reply("503", "5.5.1", "RCPT TO is required first.")
                 .await?;
-            self.counters.errors += 1;
             return Ok(false);
         }
 
@@ -604,6 +629,15 @@ impl<S: AsyncReadWrite> Session<S> {
 
     /// Resets the message-related fields to their initial state
     pub(crate) fn reset_message(&mut self) {
+        #[cfg(not(test))]
+        {
+            self.data.message_id = Uuid::now_v7();
+        }
+        #[cfg(test)]
+        {
+            self.data.message_id = Uuid::nil();
+        }
+
         self.data.mail_from = None;
         self.data.rcpt_to.clear();
         self.data.message.clear();

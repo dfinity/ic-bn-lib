@@ -6,7 +6,10 @@ use tracing::{debug, info};
 use crate::{
     http::dns::is_error_negative_lookup,
     network::AsyncReadWrite,
-    smtp::inbound::{Session, SessionResult},
+    smtp::{
+        ProtocolError,
+        inbound::{Session, SessionResult},
+    },
 };
 
 impl<S: AsyncReadWrite> Session<S> {
@@ -15,6 +18,9 @@ impl<S: AsyncReadWrite> Session<S> {
         // Validate hostname
         let Ok(ehlo_hostname) = FQDN::from_str(host) else {
             info!("{self}: {host}: Invalid EHLO hostname");
+            self.set_error(ProtocolError::InvalidEhloHostname(format!(
+                "{host}: incorrect hostname"
+            )));
             return self.reply("550", "5.5.0", "Invalid EHLO hostname.").await;
         };
 
@@ -28,6 +34,9 @@ impl<S: AsyncReadWrite> Session<S> {
 
         if ehlo_hostname.depth() < 2 {
             info!("{self}: {host}: EHLO is not FQDN");
+            self.set_error(ProtocolError::InvalidEhloHostname(format!(
+                "{host}: not FQDN"
+            )));
             return self
                 .reply("550", "5.5.0", "EHLO hostname must be an FQDN.")
                 .await;
@@ -42,6 +51,9 @@ impl<S: AsyncReadWrite> Session<S> {
                     }
                     None => {
                         info!("{self}: {host}: EHLO not found in DNS");
+                        self.set_error(ProtocolError::InvalidEhloHostname(format!(
+                            "{host}: not found in DNS"
+                        )));
                         return self
                             .reply("550", "5.5.0", "EHLO hostname not found in DNS.")
                             .await;
@@ -52,6 +64,10 @@ impl<S: AsyncReadWrite> Session<S> {
                     info!("{self}: {host}: EHLO not found in DNS: {e:#}");
 
                     if is_error_negative_lookup(&e) {
+                        self.set_error(ProtocolError::InvalidEhloHostname(format!(
+                            "{host}: not found in DNS: {e:#}"
+                        )));
+
                         return self
                             .reply("550", "5.5.0", "EHLO hostname not found in DNS.")
                             .await;
