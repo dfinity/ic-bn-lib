@@ -35,6 +35,7 @@ use crate::{
 };
 
 #[derive(thiserror::Error, Debug, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum IcSmtpDeliveryAgentError {
     #[error("IC Agent error: {0}")]
     Agent(#[from] ic_agent::AgentError),
@@ -109,7 +110,7 @@ impl IcSmtpDeliveryAgent {
         )
     }
 
-    fn observe_cansiter_lookup(
+    fn observe_canister_lookup(
         &self,
         success: bool,
         custom_domain: bool,
@@ -243,13 +244,13 @@ impl IcSmtpDeliveryAgent {
             })
         else {
             debug!("{self}: {address}: unable to resolve canister ID");
-            self.observe_cansiter_lookup(false, false, false, false, start);
+            self.observe_canister_lookup(false, false, false, false, start);
             return None;
         };
 
         // Finally check if there's an SMTP canister ID defined
         let (smtp_canister_id, cached) = self.resolve_smtp_canister_id(canister_id).await;
-        self.observe_cansiter_lookup(
+        self.observe_canister_lookup(
             true,
             custom_domain,
             smtp_canister_id != canister_id,
@@ -334,7 +335,6 @@ impl DeliversMail for IcSmtpDeliveryAgent {
             parse_email(&message.body).map_err(|e| DeliveryError::Permanent(e.to_string()))?;
 
         // Deliver the message to all relevant canisters in parallel
-        let start = Instant::now();
         let mut futs = Vec::with_capacity(mapping.len());
         for (canister_id, rcpts) in mapping {
             let ic_smtp_request = SmtpRequest {
@@ -348,6 +348,7 @@ impl DeliversMail for IcSmtpDeliveryAgent {
             };
 
             futs.push(async move {
+                let start = Instant::now();
                 let res = self
                     .smtp_request_deliver(canister_id, ic_smtp_request)
                     .await;

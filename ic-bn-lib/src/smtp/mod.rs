@@ -38,6 +38,7 @@ pub enum RecipientPolicy {
 
 /// Recipient resolution error
 #[derive(thiserror::Error, Debug, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum RecipientResolveError {
     #[error("Unknown recipient")]
     UnknownRecipient,
@@ -51,6 +52,7 @@ pub enum RecipientResolveError {
 
 /// Delivery error
 #[derive(thiserror::Error, Clone, Debug, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum DeliveryError {
     #[error("{0}")]
     Temporary(String),
@@ -240,7 +242,7 @@ impl Metrics {
 
             sessions_processed: register_int_counter_vec_with_registry!(
                 format!("smtp_sessions_processed"),
-                format!("Number of SMTP messages processed (already closed)"),
+                format!("Number of SMTP sessions processed"),
                 &[LABELS[0], LABELS[1], "error"],
                 registry
             )

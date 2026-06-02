@@ -165,6 +165,14 @@ impl<S: AsyncReadWrite> Session<S> {
                     .sessions_open
                     .with_label_values(&[ip_family])
                     .dec();
+                self.metrics
+                    .session_duration
+                    .with_label_values(&[ip_family, ""])
+                    .observe(
+                        Instant::now()
+                            .duration_since(self.counters.started)
+                            .as_secs_f64(),
+                    );
 
                 if let Some(v) = self.cfg.notifications_handler.clone() {
                     tokio::spawn(async move {

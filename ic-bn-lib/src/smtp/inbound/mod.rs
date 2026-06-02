@@ -339,7 +339,7 @@ impl<S: AsyncReadWrite> Session<S> {
             counters: SessionCounters::new(),
             cfg,
             tls_info: None,
-            labels: [ip_family, "none"],
+            labels: [ip_family, ""],
             metrics,
         }
     }
