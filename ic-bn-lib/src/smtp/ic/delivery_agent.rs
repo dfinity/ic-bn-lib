@@ -116,7 +116,7 @@ impl IcSmtpDeliveryAgent {
         custom_domain: bool,
         smtp_canister: bool,
         cached: bool,
-        start: Instant,
+        elapsed: Duration,
     ) {
         self.metrics
             .canister_id_lookups
@@ -136,7 +136,7 @@ impl IcSmtpDeliveryAgent {
                 smtp_canister.yesno(),
                 cached.yesno(),
             ])
-            .observe(start.elapsed().as_secs_f64());
+            .observe(elapsed.as_secs_f64());
     }
 
     /// Executes an HTTP request to the canister to get the SMTP canister id
@@ -192,7 +192,8 @@ impl IcSmtpDeliveryAgent {
         }
     }
 
-    /// Resolves SMTP canister ID for the given canister_id
+    /// Resolves SMTP canister ID for the given canister_id.
+    /// Returns also if it was obtained from the cache.
     async fn resolve_smtp_canister_id(&self, canister_id: Principal) -> (Principal, bool) {
         debug!("{self}: {canister_id}: Looking up SMTP canister ID");
 
@@ -244,7 +245,7 @@ impl IcSmtpDeliveryAgent {
             })
         else {
             debug!("{self}: {address}: unable to resolve canister ID");
-            self.observe_canister_lookup(false, false, false, false, start);
+            self.observe_canister_lookup(false, false, false, false, start.elapsed());
             return None;
         };
 
@@ -255,7 +256,7 @@ impl IcSmtpDeliveryAgent {
             custom_domain,
             smtp_canister_id != canister_id,
             cached,
-            start,
+            start.elapsed(),
         );
 
         Some(smtp_canister_id)
@@ -305,8 +306,11 @@ impl DeliversMail for IcSmtpDeliveryAgent {
         message: Arc<EmailMessage>,
     ) -> Result<(), DeliveryError> {
         info!(
-            "{self}: delivering mail, ehlo: {:?}, from: '{}', to: '{:?}', id '{}'",
-            meta.ehlo_hostname, message.mail_from, message.rcpt_to, message.id
+            "{self}: delivering mail, ehlo: {}, from: '{}', to: '{:?}', id '{}'",
+            meta.ehlo_hostname.unwrap_or_default(),
+            message.mail_from,
+            message.rcpt_to,
+            message.id
         );
 
         // A single message can be (potentially) destined for several canisters/domains.
