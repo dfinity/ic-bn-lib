@@ -37,7 +37,7 @@ pub enum RecipientPolicy {
 }
 
 /// Recipient resolution error
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, IntoStaticStr)]
 pub enum RecipientResolveError {
     #[error("Unknown recipient")]
     UnknownRecipient,
@@ -50,7 +50,7 @@ pub enum RecipientResolveError {
 }
 
 /// Delivery error
-#[derive(thiserror::Error, Clone, Debug)]
+#[derive(thiserror::Error, Clone, Debug, IntoStaticStr)]
 pub enum DeliveryError {
     #[error("{0}")]
     Temporary(String),
@@ -213,6 +213,15 @@ impl Metrics {
             )
             .unwrap(),
 
+            message_size: register_histogram_vec_with_registry!(
+                format!("smtp_message_size"),
+                format!("Size of the SMTP messages in bytes"),
+                LABELS,
+                vec![1024.0, 16384.0, 131072.0, 524288.0, 2097152.0],
+                registry
+            )
+            .unwrap(),
+
             protocol_errors: register_int_counter_vec_with_registry!(
                 format!("smtp_protocol_errors"),
                 format!("Number of SMTP protocol errors"),
@@ -242,15 +251,6 @@ impl Metrics {
                 format!("Time in seconds that the session was open"),
                 LABELS,
                 vec![5.0, 10.0, 30.0, 60.0, 120.0],
-                registry
-            )
-            .unwrap(),
-
-            message_size: register_histogram_vec_with_registry!(
-                format!("smtp_message_size"),
-                format!("Size of the SMTP messages in bytes"),
-                LABELS,
-                vec![1024.0, 16384.0, 131072.0, 524288.0, 2097152.0],
                 registry
             )
             .unwrap(),

@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Instant};
 
 use tokio::io::AsyncWriteExt;
 use tokio_rustls::server::TlsStream;
@@ -115,6 +115,15 @@ impl SessionManager {
             .sessions_open
             .with_label_values(&[ip_family])
             .dec();
+        session
+            .metrics
+            .session_duration
+            .with_label_values(&[ip_family, tls_proto])
+            .observe(
+                Instant::now()
+                    .duration_since(session.counters.started)
+                    .as_secs_f64(),
+            );
 
         if let Some(v) = session.cfg.notifications_handler.clone() {
             let meta = session.meta();

@@ -6,6 +6,10 @@ use async_trait::async_trait;
 use derive_new::new;
 use ic_agent::Agent;
 use mail_parser::MessageParser;
+use prometheus::{
+    HistogramVec, IntCounterVec, Registry, register_histogram_vec_with_registry,
+    register_int_counter_vec_with_registry,
+};
 use tracing::debug;
 
 use crate::smtp::ic::{
@@ -68,6 +72,58 @@ impl ExecutesIcSmtpRequest for IcSmtpRequestExecutor {
 impl Display for IcSmtpRequestExecutor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "IcSmtpRequestExecutor")
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Metrics {
+    canister_id_lookups: IntCounterVec,
+    canister_id_lookup_latency: HistogramVec,
+    smtp_requests: IntCounterVec,
+    smtp_request_latency: HistogramVec,
+}
+
+impl Metrics {
+    pub fn new(registry: &Registry) -> Self {
+        const CANISTER_LABELS: &[&str] =
+            &["success", "custom_domain", "is_smtp_canister", "cached"];
+        const REQUEST_LABELS: &[&str] = &["validate", "error"];
+
+        Self {
+            canister_id_lookups: register_int_counter_vec_with_registry!(
+                format!("smtp_ic_agent_canister_id_lookups"),
+                format!("Number of canister ID lookups"),
+                CANISTER_LABELS,
+                registry
+            )
+            .unwrap(),
+
+            canister_id_lookup_latency: register_histogram_vec_with_registry!(
+                format!("smtp_ic_agent_canister_id_lookup_latency"),
+                format!("Time it took to resolve the canister ID"),
+                CANISTER_LABELS,
+                vec![0.01, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6],
+                registry
+            )
+            .unwrap(),
+
+            smtp_requests: register_int_counter_vec_with_registry!(
+                format!("smtp_ic_agent_smtp_requests"),
+                format!("Number of IC SMTP requests"),
+                REQUEST_LABELS,
+                registry
+            )
+            .unwrap(),
+
+            smtp_request_latency: register_histogram_vec_with_registry!(
+                format!("smtp_ic_agent_smtp_request_latency"),
+                format!("Time it took to execute IC SMTP request"),
+                REQUEST_LABELS,
+                vec![0.2, 0.4, 0.8, 1.6, 3.2, 6.4],
+                registry
+            )
+            .unwrap(),
+        }
     }
 }
 

@@ -373,6 +373,17 @@ impl<S: AsyncReadWrite> Session<S> {
     }
 
     fn notify_message(&self, msg: Arc<EmailMessage>, error: Option<MessageError>) {
+        self.metrics
+            .message_size
+            .with_label_values(&self.labels)
+            .observe(msg.body.len() as f64);
+
+        let error_lbl: &'static str = error.as_ref().map_or("", |x| x.into());
+        self.metrics
+            .messages
+            .with_label_values(&[self.labels[0], self.labels[1], error_lbl])
+            .inc();
+
         if let Some(v) = self.cfg.notifications_handler.clone() {
             let meta = self.meta();
             tokio::spawn(async move {
@@ -396,6 +407,7 @@ impl<S: AsyncReadWrite> Session<S> {
     }
 }
 
+/// Hand-made implementation of IntoStaticStr for an SMTP request
 const fn request_str<T>(req: &Request<T>) -> &'static str {
     match req {
         Request::Bdat { .. } => "BDAT",
@@ -409,7 +421,13 @@ const fn request_str<T>(req: &Request<T>) -> &'static str {
         Request::Quit => "QUIT",
         Request::Rset => "RSET",
         Request::StartTls => "STARTTLS",
-        _ => "UNKNOWN",
+        Request::Atrn { .. } => "ATRN",
+        Request::Auth { .. } => "AUTH",
+        Request::Burl { .. } => "BURL",
+        Request::Etrn { .. } => "ETRN",
+        Request::Expn { .. } => "EXPN",
+        Request::Lhlo { .. } => "LHLO",
+        Request::Vrfy { .. } => "VRFY",
     }
 }
 

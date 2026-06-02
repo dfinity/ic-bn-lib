@@ -182,6 +182,17 @@ impl IpFamily for IpAddr {
     }
 }
 
+/// Converts bool to yes/no static str
+pub trait BoolYesNo {
+    fn yesno(&self) -> &'static str;
+}
+
+impl BoolYesNo for bool {
+    fn yesno(&self) -> &'static str {
+        if *self { "yes" } else { "no" }
+    }
+}
+
 #[macro_export]
 macro_rules! dyn_event {
     ($lvl:ident, $($arg:tt)+) => {
