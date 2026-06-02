@@ -1,13 +1,58 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use bytes::BytesMut;
+use ic_bn_lib_common::types::vector::VectorCli;
 use prost::Message;
+use url::Url;
 use vrl::value::{ObjectMap, Value};
 
 pub mod client;
 #[allow(warnings, clippy::all, clippy::pedantic)]
 mod event;
+
+/// Vector options
+#[derive(Clone, Debug)]
+pub struct VectorOptions {
+    pub url: Url,
+    pub user: Option<String>,
+    pub pass: Option<String>,
+    pub batch_size: usize,
+    pub batch_queue: usize,
+    pub batch_flush_interval: Duration,
+    pub buffer: usize,
+    pub flushers: usize,
+    pub flush_timeout: Duration,
+    pub retry_interval: Duration,
+    pub retry_count: usize,
+    pub zstd_level: usize,
+}
+
+impl TryFrom<&VectorCli> for VectorOptions {
+    type Error = anyhow::Error;
+
+    fn try_from(v: &VectorCli) -> Result<Self, Self::Error> {
+        let url = v
+            .log_vector_url
+            .clone()
+            .ok_or_else(|| anyhow!("URL is required"))?;
+
+        Ok(Self {
+            url,
+            user: v.log_vector_user.clone(),
+            pass: v.log_vector_pass.clone(),
+            batch_size: v.log_vector_batch,
+            batch_queue: v.log_vector_batch_queue,
+            batch_flush_interval: v.log_vector_interval,
+            buffer: v.log_vector_buffer,
+            flushers: v.log_vector_flushers,
+            flush_timeout: v.log_vector_timeout,
+            retry_interval: v.log_vector_retry_interval,
+            retry_count: v.log_vector_retry_count,
+            zstd_level: v.log_vector_zstd_level,
+        })
+    }
+}
 
 pub fn encode_map(fields: ObjectMap) -> event::ValueMap {
     event::ValueMap {

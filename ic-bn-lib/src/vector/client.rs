@@ -6,12 +6,13 @@ use std::{
 
 use crate::{
     http::{client::basic_auth, headers::CONTENT_TYPE_OCTET_STREAM},
-    hval, vector,
+    hval,
+    vector::{self, VectorOptions},
 };
 use anyhow::{Context, Error, anyhow};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http::header::{AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE};
-use ic_bn_lib_common::{traits::http::Client as HttpClient, types::vector::VectorCli};
+use ic_bn_lib_common::traits::http::Client as HttpClient;
 use prometheus::{
     HistogramVec, IntCounterVec, IntGaugeVec, Registry, register_histogram_vec_with_registry,
     register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry,
@@ -222,38 +223,36 @@ pub struct Vector {
 
 impl Vector {
     pub fn new(
-        cli: &VectorCli,
+        opts: VectorOptions,
         client: Arc<dyn HttpClient>,
         namespace: &str,
         registry: &Registry,
     ) -> Self {
         let metrics = Metrics::new(registry);
-        Self::new_with_metrics(cli, client, namespace, metrics)
+        Self::new_with_metrics(opts, client, namespace, metrics)
     }
 
     pub fn new_with_metrics(
-        cli: &VectorCli,
+        opts: VectorOptions,
         client: Arc<dyn HttpClient>,
         namespace: &str,
         metrics: Metrics,
     ) -> Self {
-        let cli = cli.clone();
-
-        let (tx_event, rx_event) = mpsc::channel(cli.log_vector_buffer);
-        let (tx_batch, rx_batch) = async_channel::bounded(cli.log_vector_batch_queue);
+        let (tx_event, rx_event) = mpsc::channel(opts.buffer);
+        let (tx_batch, rx_batch) = async_channel::bounded(opts.batch_queue);
 
         // Start batcher
         warn!("Vector: starting batcher");
         let token_batcher = CancellationToken::new();
 
-        let mut interval = interval(cli.log_vector_interval);
+        let mut interval = interval(opts.batch_flush_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         interval.reset();
 
         let batcher = Batcher {
             rx: rx_event,
             tx: tx_batch,
-            batch: Vec::with_capacity(cli.log_vector_batch),
+            batch: Vec::with_capacity(opts.batch_size),
             interval,
             token: token_batcher.child_token(),
             namespace: namespace.to_string(),
@@ -271,24 +270,22 @@ impl Vector {
         let tracker_flushers = TaskTracker::new();
 
         // Prepare auth header
-        let auth = cli
-            .log_vector_user
-            .map(|x| basic_auth(x, cli.log_vector_pass));
+        let auth = opts.user.map(|x| basic_auth(x, opts.pass));
 
-        warn!("Vector: starting flushers ({})", cli.log_vector_flushers);
-        for id in 0..cli.log_vector_flushers {
+        warn!("Vector: starting flushers ({})", opts.flushers);
+        for id in 0..opts.flushers {
             let flusher = Flusher {
                 id,
                 rx: rx_batch.clone(),
                 client: client.clone(),
-                url: cli.log_vector_url.clone().unwrap(),
+                url: opts.url.clone(),
                 auth: auth.clone(),
-                zstd_level: cli.log_vector_zstd_level,
+                zstd_level: opts.zstd_level,
                 token: token_flushers.child_token(),
                 token_drain: token_flushers_drain.child_token(),
-                retry_interval: cli.log_vector_retry_interval,
-                retry_count: cli.log_vector_retry_count,
-                timeout: cli.log_vector_timeout,
+                retry_interval: opts.retry_interval,
+                retry_count: opts.retry_count,
+                timeout: opts.flush_timeout,
                 namespace: namespace.to_string(),
                 metrics: metrics.clone(),
             };
@@ -753,29 +750,27 @@ mod test {
         );
     }
 
-    fn make_cli() -> VectorCli {
-        VectorCli {
-            log_vector_url: Some(Url::parse("http://127.0.0.1:1234").unwrap()),
-            log_vector_user: None,
-            log_vector_pass: None,
-            log_vector_batch: 50,
-            log_vector_buffer: 5000,
-            log_vector_interval: Duration::from_secs(100),
-            log_vector_timeout: Duration::from_secs(10),
-            log_vector_flushers: 4,
-            log_vector_zstd_level: 3,
-            log_vector_batch_queue: 32,
-            log_vector_retry_interval: Duration::from_millis(1),
-            log_vector_retry_count: 100,
+    fn make_opts() -> VectorOptions {
+        VectorOptions {
+            url: Url::parse("http://127.0.0.1:1234").unwrap(),
+            user: None,
+            pass: None,
+            batch_size: 50,
+            buffer: 5000,
+            batch_flush_interval: Duration::from_secs(100),
+            flush_timeout: Duration::from_secs(10),
+            flushers: 4,
+            zstd_level: 3,
+            batch_queue: 32,
+            retry_interval: Duration::from_millis(1),
+            retry_count: 100,
         }
     }
 
     #[tokio::test]
     async fn test_vector() {
-        let cli = make_cli();
-
         let client = Arc::new(TestClient(AtomicU64::new(0), AtomicU64::new(0)));
-        let vector = Vector::new(&cli, client.clone(), "", &Registry::new());
+        let vector = Vector::new(make_opts(), client.clone(), "", &Registry::new());
 
         for i in 0..5000 {
             let event = json!({
@@ -793,16 +788,16 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_vector_drain_alive() {
-        let mut cli = make_cli();
-        cli.log_vector_buffer = 10000;
-        cli.log_vector_batch = 1000;
-        cli.log_vector_interval = Duration::from_secs(1);
-        cli.log_vector_flushers = 32;
+        let mut opts = make_opts();
+        opts.buffer = 10000;
+        opts.batch_size = 1000;
+        opts.batch_flush_interval = Duration::from_secs(1);
+        opts.flushers = 32;
 
         let client = Arc::new(TestClientOk);
-        let vector = Vector::new(&cli, client, "", &Registry::new());
+        let vector = Vector::new(opts.clone(), client, "", &Registry::new());
 
-        for _ in 0..cli.log_vector_buffer {
+        for _ in 0..opts.buffer {
             let event = json!({
                 "env": "prod",
                 "hostname": "da11-bnp00",
@@ -851,17 +846,15 @@ mod test {
 
         assert_eq!(
             vector.metrics.sent_events.with_label_values(&[""]).get(),
-            cli.log_vector_buffer as u64,
+            opts.buffer as u64,
         );
     }
 
     /// Make sure we can drain when the endpoint is down
     #[tokio::test]
     async fn test_vector_drain_dead() {
-        let cli = make_cli();
-
         let client = Arc::new(TestClientDead);
-        let vector = Vector::new(&cli, client, "", &Registry::new());
+        let vector = Vector::new(make_opts(), client, "", &Registry::new());
 
         for i in 0..6000 {
             let event = json!({
