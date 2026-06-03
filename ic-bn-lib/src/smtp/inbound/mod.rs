@@ -9,7 +9,7 @@ use std::{
     io,
     net::IpAddr,
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -19,6 +19,7 @@ use hickory_resolver::net::NetError;
 use ic_bn_lib_common::types::http::TlsInfo;
 use mail_auth::MessageAuthenticator;
 use rustls::ServerConfig;
+use serde_with::SerializeDisplay;
 use smtp_proto::{
     EXT_8BIT_MIME, EXT_CHUNKING, EXT_ENHANCED_STATUS_CODES, EXT_PIPELINING, EXT_SIZE,
     EXT_SMTP_UTF8, EXT_START_TLS, EhloResponse, Error as SmtpError, Request,
@@ -35,7 +36,8 @@ use crate::{
     network::AsyncReadWrite,
     smtp::{
         DeliversMail, DummyDeliveryAgent, DummyRecipientResolver, EmailMessage, MessageError,
-        Metrics, ProtocolError, ReceivesNotifications, ResolvesRecipient, address::EmailAddress,
+        Metrics, ProtocolError, ReceivesSmtpNotifications, ResolvesRecipient, SessionCounters,
+        SessionMeta, address::EmailAddress,
     },
 };
 
@@ -44,7 +46,7 @@ pub(crate) const MAX_REPLY_LEN: usize = 256;
 /// Error that leads to session termination.
 /// The only "expected" error is `Quit` that is caused by the client QUIT
 /// command.
-#[derive(thiserror::Error, Debug, IntoStaticStr)]
+#[derive(thiserror::Error, Debug, IntoStaticStr, SerializeDisplay)]
 #[strum(serialize_all = "snake_case")]
 pub enum SessionError {
     #[error("I/O error: {0}")]
@@ -135,7 +137,7 @@ pub struct SessionConfig {
     pub authenticator: Arc<MessageAuthenticator>,
     pub recipient_resolver: Arc<dyn ResolvesRecipient>,
     pub delivery_agent: Arc<dyn DeliversMail>,
-    pub notifications_handler: Option<Arc<dyn ReceivesNotifications>>,
+    pub notifications_handler: Option<Arc<dyn ReceivesSmtpNotifications>>,
 }
 
 impl SessionConfig {
@@ -258,40 +260,6 @@ impl Default for SessionData {
     }
 }
 
-/// SMTP session counters
-#[derive(Clone, Debug)]
-pub struct SessionCounters {
-    pub started: Instant,
-    pub bytes_ingested: usize,
-    pub messages_queued: usize,
-    pub errors: usize,
-}
-
-impl SessionCounters {
-    pub(crate) fn new() -> Self {
-        Self {
-            started: Instant::now(),
-            bytes_ingested: 0,
-            messages_queued: 0,
-            errors: 0,
-        }
-    }
-}
-
-/// Session metadata for logging/notification purposes
-#[derive(Clone, Debug)]
-pub struct SessionMeta {
-    pub id: Uuid,
-    pub message_id: Uuid,
-    pub remote_ip: IpAddr,
-    pub tls_info: Option<TlsInfo>,
-    pub counters: SessionCounters,
-    pub last_error: Option<ProtocolError>,
-    pub ehlo_hostname: Option<FQDN>,
-    pub mail_from: Option<EmailAddress>,
-    pub rcpt_to: Vec<EmailAddress>,
-}
-
 /// SMTP Session
 pub struct Session<S: AsyncReadWrite> {
     id: Uuid,
@@ -372,7 +340,12 @@ impl<S: AsyncReadWrite> Session<S> {
         }
     }
 
-    fn notify_message(&self, msg: Arc<EmailMessage>, error: Option<MessageError>) {
+    fn notify_message(
+        &self,
+        msg: Arc<EmailMessage>,
+        error: Option<MessageError>,
+        latency: Duration,
+    ) {
         self.metrics
             .message_size
             .with_label_values(&self.labels)
@@ -387,7 +360,7 @@ impl<S: AsyncReadWrite> Session<S> {
         if let Some(v) = self.cfg.notifications_handler.clone() {
             let meta = self.meta();
             tokio::spawn(async move {
-                v.notify_message(meta, msg, error).await;
+                v.notify_message(meta, msg, latency, error).await;
             });
         };
     }

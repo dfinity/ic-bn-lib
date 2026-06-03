@@ -41,6 +41,7 @@ impl<S: AsyncReadWrite> Session<S> {
             .bytes_tx
             .with_label_values(&self.labels)
             .inc_by(bytes.len() as u64);
+        self.counters.bytes_tx += bytes.len();
 
         Ok(())
     }
@@ -234,13 +235,15 @@ impl<S: AsyncReadWrite> Session<S> {
 
     /// Main SMTP state machine
     async fn ingest(&mut self, bytes: &[u8]) -> SessionResult<SessionUpgrade> {
+        self.counters.bytes_rx += bytes.len();
+
         self.metrics
             .bytes_rx
             .with_label_values(&self.labels)
             .inc_by(bytes.len() as u64);
 
         // Check if we are over session transfer quota
-        if self.counters.bytes_ingested + bytes.len() > self.cfg.max_session_data {
+        if self.counters.bytes_rx > self.cfg.max_session_data {
             self.reply("452", "4.7.28", "Session transfer quota exceeded.")
                 .await?;
             return Err(SessionError::TransferQuotaExceeded(
@@ -263,7 +266,6 @@ impl<S: AsyncReadWrite> Session<S> {
             return Err(SessionError::TooManyErrors);
         }
 
-        self.counters.bytes_ingested += bytes.len();
         let mut iter = bytes.iter();
         // We can't take mutable ref to self.state & self at the same time,
         // so we extract state temporarily.
@@ -286,6 +288,7 @@ impl<S: AsyncReadWrite> Session<S> {
                                     request_str(&request),
                                 ])
                                 .inc();
+                            self.counters.commands += 1;
 
                             match request {
                                 // ASCII data
@@ -580,6 +583,7 @@ impl<S: AsyncReadWrite> Session<S> {
     async fn queue_message(&mut self) -> SessionResult<()> {
         let message_size = self.data.message.len();
         let id = self.data.message_id;
+        let start = Instant::now();
 
         // SAFETY: Code makes sure these are all Some().
         // It's better to panic in tests if they are not.
@@ -592,7 +596,7 @@ impl<S: AsyncReadWrite> Session<S> {
 
         // Run configured verification steps on the message body
         if let Some(e) = self.verify_message(&msg).await? {
-            self.notify_message(msg.clone(), Some(e));
+            self.notify_message(msg.clone(), Some(e), start.elapsed());
             self.reset_message();
             return Ok(());
         }
@@ -610,7 +614,11 @@ impl<S: AsyncReadWrite> Session<S> {
                 msg.mail_from, msg.rcpt_to
             );
 
-            self.notify_message(msg.clone(), Some(MessageError::DeliveryFailed(e.clone())));
+            self.notify_message(
+                msg.clone(),
+                Some(MessageError::DeliveryFailed(e.clone())),
+                start.elapsed(),
+            );
             self.reset_message();
 
             return match e {
@@ -629,7 +637,7 @@ impl<S: AsyncReadWrite> Session<S> {
             };
         }
 
-        self.notify_message(msg.clone(), None);
+        self.notify_message(msg.clone(), None, start.elapsed());
 
         info!(
             "{self}: {} -> {:?}: message ({message_size} bytes) queued with id {id}",

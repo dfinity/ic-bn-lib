@@ -4,6 +4,7 @@ use anyhow::anyhow;
 use clap::Args;
 use humantime::parse_duration;
 use ic_bn_lib_common::parse_size;
+use url::Url;
 
 use crate::smtp::inbound::SessionConfig;
 
@@ -106,6 +107,19 @@ pub struct SmtpServerCli {
     /// validation.
     #[clap(env, long)]
     pub smtp_server_verify_dkim_strict: bool,
+
+    /// Setting this enables logging of SMTP sessions/messages/errors to Vector using native protocol.
+    /// The rest of the options are used from LOG_VECTOR_* parameters.
+    #[clap(env, long)]
+    pub smtp_server_vector_url: Option<Url>,
+
+    /// SMTP Vector username
+    #[clap(env, long)]
+    pub smtp_server_vector_user: Option<String>,
+
+    /// SMTP Vector password
+    #[clap(env, long)]
+    pub smtp_server_vector_pass: Option<String>,
 }
 
 impl TryFrom<&SmtpServerCli> for SessionConfig {

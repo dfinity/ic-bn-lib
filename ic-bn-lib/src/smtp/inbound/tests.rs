@@ -51,11 +51,12 @@ pub struct TestNotificationsReceiver {
 }
 
 #[async_trait]
-impl ReceivesNotifications for TestNotificationsReceiver {
+impl ReceivesSmtpNotifications for TestNotificationsReceiver {
     async fn notify_message(
         &self,
         meta: SessionMeta,
         message: Arc<EmailMessage>,
+        _latency: Duration,
         error: Option<MessageError>,
     ) {
         *self.msg.lock().unwrap() = Some((meta, message, error));

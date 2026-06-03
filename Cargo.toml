@@ -39,9 +39,7 @@ http-body-util = "0.1.2"
 humantime = "2.2.0"
 hyper = "1.7.0"
 hyper-util = { version = "0.1.10", features = ["full"] }
-ic-agent = { version = "0.47.3", features = [
-    "_internal_dynamic-routing",
-] }
+ic-agent = { version = "0.47.3", features = ["_internal_dynamic-routing"] }
 ic-bn-lib-common = { version = "0.2", path = "./ic-bn-lib-common" }
 instant-acme = { version = "0.8.5", default-features = false, features = [
     "aws-lc-rs",
@@ -90,4 +88,4 @@ tower-service = "0.3.3"
 url = "2.5.3"
 # DO NOT upgrade, this breaks monorepo compatibility
 # Read https://github.com/uuid-rs/uuid/releases/tag/1.13.0
-uuid = { version = "=1.12.1", features = ["v7"] }
+uuid = { version = "=1.12.1", features = ["v7", "serde"] }

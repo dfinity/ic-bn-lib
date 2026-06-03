@@ -61,7 +61,7 @@ impl Server {
     ) {
         match res {
             Ok((stream, addr)) => {
-                info!("{self}: New connection from {addr}");
+                info!("{self}: New connection from {}", addr.ip().to_canonical());
 
                 let (params, token) = (self.params.clone(), token.child_token());
                 self.tracker.spawn(SessionManager::handle_connection(

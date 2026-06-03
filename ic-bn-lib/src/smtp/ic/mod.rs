@@ -1,4 +1,8 @@
-use std::fmt::{Debug, Display};
+use std::{
+    fmt::{Debug, Display},
+    sync::Arc,
+    time::Duration,
+};
 
 use ::candid::{Decode, Encode, Principal};
 use anyhow::Context as _;
@@ -12,13 +16,26 @@ use prometheus::{
 };
 use tracing::debug;
 
-use crate::smtp::ic::{
-    candid::{Header, Message, SmtpRequest, SmtpResponse},
-    delivery_agent::IcSmtpDeliveryAgentError,
+use crate::smtp::{
+    DeliveryError, EmailMessage, SessionMeta,
+    ic::{
+        candid::{Header, Message, SmtpRequest, SmtpResponse},
+        delivery_agent::IcSmtpDeliveryAgentError,
+    },
 };
 
 pub mod candid;
 pub mod delivery_agent;
+
+/// Destination canisters of the mail.
+/// SMTP canister is equal to the original one
+/// if there's no dedicated SMTP canister.
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, PartialOrd, Ord)]
+pub struct DestCanister {
+    pub smtp: Principal,
+    pub orig: Principal,
+    pub custom_domain: bool,
+}
 
 /// Trait to execute IC SMTP Request
 #[async_trait]
@@ -29,6 +46,20 @@ pub trait ExecutesIcSmtpRequest: Send + Sync + Debug {
         request: SmtpRequest,
         validate: bool,
     ) -> Result<SmtpResponse, IcSmtpDeliveryAgentError>;
+}
+
+/// Gets notifications about IC SMTP messages
+#[async_trait]
+pub trait ReceivesIcSmtpNotifications: Send + Sync + Debug {
+    /// Notify when the message is sent to the canister
+    async fn notify_ic_message(
+        &self,
+        meta: Arc<SessionMeta>,
+        message: Arc<EmailMessage>,
+        dest: DestCanister,
+        latency: Duration,
+        error: Option<DeliveryError>,
+    );
 }
 
 /// Executes IC SMTP requests through IC Agent
