@@ -330,6 +330,7 @@ impl IcSmtpDeliveryAgent {
 
         let start = Instant::now();
         let res = self.send_smtp_request(dest.smtp, ic_smtp_request).await;
+        let latency = start.elapsed();
 
         let error_lbl: &'static str = if let Err(e) = &res { e.into() } else { "" };
         self.metrics
@@ -339,7 +340,7 @@ impl IcSmtpDeliveryAgent {
         self.metrics
             .smtp_request_latency
             .with_label_values(&["no", error_lbl])
-            .observe(start.elapsed().as_secs_f64());
+            .observe(latency.as_secs_f64());
 
         if let Some(v) = self.notification_handler.clone() {
             let error = res.clone().err();
@@ -347,7 +348,8 @@ impl IcSmtpDeliveryAgent {
             let message = message.clone();
 
             tokio::spawn(async move {
-                v.notify_ic_message(meta, message, dest, error).await;
+                v.notify_ic_message(meta, message, dest, latency, error)
+                    .await;
             });
         }
 
@@ -571,6 +573,7 @@ mod tests {
             meta: Arc<SessionMeta>,
             message: Arc<EmailMessage>,
             dest: DestCanister,
+            _latency: Duration,
             error: Option<DeliveryError>,
         ) {
             self.0.send((meta, message, dest, error)).await.unwrap();
@@ -906,9 +909,7 @@ mod tests {
         let mut notifs = [
             notif_rx.recv().await.unwrap(),
             notif_rx.recv().await.unwrap(),
-        ]
-        .into_iter()
-        .collect::<Vec<_>>();
+        ];
         notifs.sort_by_key(|x| x.2.smtp);
 
         let (meta, msg, dest, error) = notifs[0].clone();

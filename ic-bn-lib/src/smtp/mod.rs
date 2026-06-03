@@ -2,7 +2,7 @@ use std::{
     fmt::{Debug, Display},
     net::IpAddr,
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
@@ -140,6 +140,7 @@ pub trait ReceivesSmtpNotifications: Send + Sync + Debug {
         &self,
         meta: SessionMeta,
         message: Arc<EmailMessage>,
+        latency: Duration,
         error: Option<MessageError>,
     );
     /// Notify when the protocol error happens

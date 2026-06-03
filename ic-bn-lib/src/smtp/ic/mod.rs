@@ -1,6 +1,7 @@
 use std::{
     fmt::{Debug, Display},
     sync::Arc,
+    time::Duration,
 };
 
 use ::candid::{Decode, Encode, Principal};
@@ -56,6 +57,7 @@ pub trait ReceivesIcSmtpNotifications: Send + Sync + Debug {
         meta: Arc<SessionMeta>,
         message: Arc<EmailMessage>,
         dest: DestCanister,
+        latency: Duration,
         error: Option<DeliveryError>,
     );
 }

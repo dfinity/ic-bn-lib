@@ -583,6 +583,7 @@ impl<S: AsyncReadWrite> Session<S> {
     async fn queue_message(&mut self) -> SessionResult<()> {
         let message_size = self.data.message.len();
         let id = self.data.message_id;
+        let start = Instant::now();
 
         // SAFETY: Code makes sure these are all Some().
         // It's better to panic in tests if they are not.
@@ -595,7 +596,7 @@ impl<S: AsyncReadWrite> Session<S> {
 
         // Run configured verification steps on the message body
         if let Some(e) = self.verify_message(&msg).await? {
-            self.notify_message(msg.clone(), Some(e));
+            self.notify_message(msg.clone(), Some(e), start.elapsed());
             self.reset_message();
             return Ok(());
         }
@@ -613,7 +614,11 @@ impl<S: AsyncReadWrite> Session<S> {
                 msg.mail_from, msg.rcpt_to
             );
 
-            self.notify_message(msg.clone(), Some(MessageError::DeliveryFailed(e.clone())));
+            self.notify_message(
+                msg.clone(),
+                Some(MessageError::DeliveryFailed(e.clone())),
+                start.elapsed(),
+            );
             self.reset_message();
 
             return match e {
@@ -632,7 +637,7 @@ impl<S: AsyncReadWrite> Session<S> {
             };
         }
 
-        self.notify_message(msg.clone(), None);
+        self.notify_message(msg.clone(), None, start.elapsed());
 
         info!(
             "{self}: {} -> {:?}: message ({message_size} bytes) queued with id {id}",

@@ -56,6 +56,7 @@ impl ReceivesSmtpNotifications for TestNotificationsReceiver {
         &self,
         meta: SessionMeta,
         message: Arc<EmailMessage>,
+        _latency: Duration,
         error: Option<MessageError>,
     ) {
         *self.msg.lock().unwrap() = Some((meta, message, error));

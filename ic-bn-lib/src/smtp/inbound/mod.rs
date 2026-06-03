@@ -340,7 +340,12 @@ impl<S: AsyncReadWrite> Session<S> {
         }
     }
 
-    fn notify_message(&self, msg: Arc<EmailMessage>, error: Option<MessageError>) {
+    fn notify_message(
+        &self,
+        msg: Arc<EmailMessage>,
+        error: Option<MessageError>,
+        latency: Duration,
+    ) {
         self.metrics
             .message_size
             .with_label_values(&self.labels)
@@ -355,7 +360,7 @@ impl<S: AsyncReadWrite> Session<S> {
         if let Some(v) = self.cfg.notifications_handler.clone() {
             let meta = self.meta();
             tokio::spawn(async move {
-                v.notify_message(meta, msg, error).await;
+                v.notify_message(meta, msg, latency, error).await;
             });
         };
     }
