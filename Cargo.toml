@@ -22,7 +22,7 @@ candid = "0.10.10"
 clap = { version = "4.5.20", features = ["derive", "string", "env"] }
 # Lock it down for now so that our fork (which has 0.14.1)
 # is selected during patching in ic-gateway etc
-cloudflare = { version = "<=0.14.1", default-features = false, features = [
+cloudflare = { version = ">=0.14.0,<=0.14.1", default-features = false, features = [
     "rustls-tls",
 ] }
 derive-new = "0.7.0"
