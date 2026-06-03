@@ -36,6 +36,7 @@ pub struct SmtpRequest {
     pub message: Option<Message>,
     pub envelope: Option<Envelope>,
     pub gateway_flags: Option<Vec<String>>,
+    pub message_id: Option<String>,
 }
 
 /// Candid `SmtpRequestError` (`code` is `nat64` on the wire in typical canisters).

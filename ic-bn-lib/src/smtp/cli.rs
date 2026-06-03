@@ -43,8 +43,9 @@ pub struct SmtpServerCli {
     #[clap(env, long, default_value = "5")]
     pub smtp_server_max_errors_per_session: usize,
 
-    /// Maximum message body size
-    #[clap(env, long, default_value = "2MB", value_parser = parse_size)]
+    /// Maximum message body size.
+    /// Default accounts for max IC message size + some overhead.
+    #[clap(env, long, default_value = "1950KB", value_parser = parse_size)]
     pub smtp_server_max_message_size: u64,
 
     /// How much data can be ingested during a single SMTP session

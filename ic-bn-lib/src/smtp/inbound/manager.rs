@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Instant};
 
 use tokio::io::AsyncWriteExt;
 use tokio_rustls::server::TlsStream;
@@ -6,10 +6,14 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 use crate::{
+    IpFamily as _,
     network::{AsyncReadWrite, tls_handshake},
-    smtp::inbound::{
-        Session, SessionConfig, SessionData, SessionError, SessionResult, SessionTlsMode,
-        SessionUpgrade,
+    smtp::{
+        Metrics,
+        inbound::{
+            Session, SessionConfig, SessionData, SessionError, SessionResult, SessionTlsMode,
+            SessionUpgrade,
+        },
     },
 };
 
@@ -24,11 +28,18 @@ impl SessionManager {
         stream: S,
         remote_addr: SocketAddr,
         params: Arc<SessionConfig>,
+        metrics: Metrics,
         shutdown_token: CancellationToken,
     ) {
         // Convert v6-mapped address to v4
         let remote_ip = remote_addr.ip().to_canonical();
-        let mut session = Session::new(remote_ip, stream, params);
+        let mut session = Session::new(remote_ip, stream, params, metrics);
+
+        session
+            .metrics
+            .sessions_open
+            .with_label_values(&[remote_ip.family()])
+            .inc();
 
         match session.handle(shutdown_token.child_token()).await {
             Ok(v) => match v {
@@ -87,6 +98,33 @@ impl SessionManager {
     }
 
     async fn notify<S: AsyncReadWrite>(session: &Session<S>, error: Option<SessionError>) {
+        let ip_family = session.remote_ip.family();
+
+        let tls_proto = session
+            .tls_info
+            .as_ref()
+            .map_or("", |x| x.protocol.as_str().unwrap_or_default());
+        let error_lbl: &'static str = error.as_ref().map_or("", |x| x.into());
+        session
+            .metrics
+            .sessions_processed
+            .with_label_values(&[ip_family, tls_proto, error_lbl])
+            .inc();
+        session
+            .metrics
+            .sessions_open
+            .with_label_values(&[ip_family])
+            .dec();
+        session
+            .metrics
+            .session_duration
+            .with_label_values(&[ip_family, tls_proto])
+            .observe(
+                Instant::now()
+                    .duration_since(session.counters.started)
+                    .as_secs_f64(),
+            );
+
         if let Some(v) = session.cfg.notifications_handler.clone() {
             let meta = session.meta();
             tokio::spawn(async move {
@@ -99,6 +137,8 @@ impl SessionManager {
 impl<S: AsyncReadWrite> Session<S> {
     /// Converts the plain-text session into a TLS one by doing a TLS handshake
     pub async fn into_tls(self) -> SessionResult<Session<TlsStream<S>>> {
+        let ip_family = self.remote_ip.family();
+
         // SAFETY: We should end up here only if TLS is enabled.
         // It's better to panic otherwise.
         let tls_config = match &self.cfg.tls_mode {
@@ -112,22 +152,43 @@ impl<S: AsyncReadWrite> Session<S> {
         let (stream, tls_info) = match tls_handshake(tls_config, self.stream).await {
             Ok(v) => v,
             Err(e) => {
+                let error = SessionError::TlsHandshakeFailed(e.to_string());
                 let error_str = e.to_string();
+                let error_lbl: &'static str = (&error).into();
 
                 // Session is partially consumed by `tls_handshake`, so we can't use `Manager::notify()`
+                self.metrics
+                    .sessions_processed
+                    .with_label_values(&[ip_family, "", error_lbl])
+                    .inc();
+                self.metrics
+                    .sessions_open
+                    .with_label_values(&[ip_family])
+                    .dec();
+                self.metrics
+                    .session_duration
+                    .with_label_values(&[ip_family, ""])
+                    .observe(
+                        Instant::now()
+                            .duration_since(self.counters.started)
+                            .as_secs_f64(),
+                    );
+
                 if let Some(v) = self.cfg.notifications_handler.clone() {
                     tokio::spawn(async move {
                         v.notify_session_finish(
                             meta,
-                            Some(SessionError::TlsHandshakeFailed(error_str.clone())),
+                            Some(SessionError::TlsHandshakeFailed(error_str)),
                         )
                         .await;
                     });
                 }
 
-                return Err(SessionError::TlsHandshakeFailed(e.to_string()));
+                return Err(error);
             }
         };
+
+        let tls_proto = tls_info.protocol.as_str().unwrap_or_default();
 
         Ok(Session {
             id: self.id,
@@ -141,6 +202,8 @@ impl<S: AsyncReadWrite> Session<S> {
             counters: self.counters,
             cfg: self.cfg,
             tls_info: Some(tls_info),
+            labels: [ip_family, tls_proto],
+            metrics: self.metrics,
         })
     }
 }

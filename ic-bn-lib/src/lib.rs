@@ -20,7 +20,7 @@ pub mod utils;
 #[cfg(feature = "vector")]
 pub mod vector;
 
-use std::{fs::File, path::Path};
+use std::{fs::File, net::IpAddr, path::Path};
 
 use anyhow::{Context, anyhow};
 use bytes::Bytes;
@@ -169,6 +169,28 @@ macro_rules! retry_async {
     ($f:expr) => {
         retry_async!($f, Duration::from_secs(60), Duration::from_millis(500))
     };
+}
+
+/// Returns family of an IP address
+pub trait IpFamily {
+    fn family(&self) -> &'static str;
+}
+
+impl IpFamily for IpAddr {
+    fn family(&self) -> &'static str {
+        if self.is_ipv4() { "v4" } else { "v6" }
+    }
+}
+
+/// Converts bool to yes/no static str
+pub trait BoolYesNo {
+    fn yesno(&self) -> &'static str;
+}
+
+impl BoolYesNo for bool {
+    fn yesno(&self) -> &'static str {
+        if *self { "yes" } else { "no" }
+    }
 }
 
 #[macro_export]
