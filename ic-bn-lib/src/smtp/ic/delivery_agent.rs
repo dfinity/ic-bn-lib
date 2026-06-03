@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::{
     fmt::Display,
     str::FromStr,
@@ -13,6 +15,7 @@ use http::Method;
 use ic_agent::{Agent, AgentError};
 use ic_bn_lib_common::traits::http::Client;
 use moka::sync::Cache;
+use show_option::ShowOption as _;
 use strum::IntoStaticStr;
 use tracing::{debug, info};
 use url::Url;
@@ -22,14 +25,14 @@ use crate::{
     custom_domains::LooksUpCustomDomain,
     smtp::{
         DeliversMail, DeliveryError, EmailMessage, RecipientPolicy, RecipientResolveError,
-        ResolvesRecipient,
+        ResolvesRecipient, SessionMeta,
         address::EmailAddress,
         ic::{
-            ExecutesIcSmtpRequest, IcSmtpRequestExecutor, Metrics,
-            candid::{Envelope, SmtpRequest, SmtpResponse},
+            DestCanister, ExecutesIcSmtpRequest, IcSmtpRequestExecutor, Metrics,
+            ReceivesIcSmtpNotifications,
+            candid::{Envelope, Message, SmtpRequest, SmtpResponse},
             parse_email,
         },
-        inbound::SessionMeta,
     },
     truncate,
 };
@@ -53,6 +56,7 @@ pub struct IcSmtpDeliveryAgent {
     ic_base_domain: String,
     smtp_canister_id_cache: Cache<Principal, Principal, RandomState>,
     metrics: Metrics,
+    notification_handler: Option<Arc<dyn ReceivesIcSmtpNotifications>>,
 }
 
 impl Display for IcSmtpDeliveryAgent {
@@ -71,6 +75,7 @@ impl IcSmtpDeliveryAgent {
         cache_ttl: Duration,
         cache_capacity: u64,
         metrics: Metrics,
+        notification_handler: Option<Arc<dyn ReceivesIcSmtpNotifications>>,
     ) -> Self {
         let smtp_canister_id_cache = Cache::builder()
             .time_to_live(cache_ttl)
@@ -84,6 +89,7 @@ impl IcSmtpDeliveryAgent {
             ic_base_domain: ic_base_domain.into(),
             smtp_canister_id_cache,
             metrics,
+            notification_handler,
         }
     }
 
@@ -96,6 +102,7 @@ impl IcSmtpDeliveryAgent {
         cache_ttl: Duration,
         cache_capacity: u64,
         metrics: Metrics,
+        notification_handler: Option<Arc<dyn ReceivesIcSmtpNotifications>>,
     ) -> Self {
         let request_executor = Arc::new(IcSmtpRequestExecutor::new(agent));
 
@@ -107,6 +114,7 @@ impl IcSmtpDeliveryAgent {
             cache_ttl,
             cache_capacity,
             metrics,
+            notification_handler,
         )
     }
 
@@ -220,8 +228,8 @@ impl IcSmtpDeliveryAgent {
         (smtp_canister_id, false)
     }
 
-    /// Resolves destination SMTP canister id for the given address
-    async fn resolve_canister_id(&self, address: &EmailAddress) -> Option<Principal> {
+    /// Resolves destination SMTP canister id for the given address.
+    async fn resolve_canister_id(&self, address: &EmailAddress) -> Option<DestCanister> {
         debug!("{self}: {address}: resolving SMTP canister ID");
         let start = Instant::now();
 
@@ -259,11 +267,15 @@ impl IcSmtpDeliveryAgent {
             start.elapsed(),
         );
 
-        Some(smtp_canister_id)
+        Some(DestCanister {
+            smtp: smtp_canister_id,
+            orig: canister_id,
+            custom_domain,
+        })
     }
 
-    /// Delivers given SMTP request to the canister
-    async fn smtp_request_deliver(
+    /// Sends the given SMTP request to the canister
+    async fn send_smtp_request(
         &self,
         canister_id: Principal,
         ic_smtp_request: SmtpRequest,
@@ -296,6 +308,51 @@ impl IcSmtpDeliveryAgent {
 
         Ok(())
     }
+
+    /// Sends the message to the listed recipients
+    async fn smtp_message_send(
+        &self,
+        rcpts: Vec<EmailAddress>,
+        dest: DestCanister,
+        meta: Arc<SessionMeta>,
+        message: Arc<EmailMessage>,
+        ic_message: Message,
+    ) -> Result<(), DeliveryError> {
+        let ic_smtp_request = SmtpRequest {
+            envelope: Some(Envelope {
+                from: message.mail_from.clone().into(),
+                to: rcpts.into_iter().map(|x| x.into()).collect(),
+            }),
+            message: Some(ic_message.clone()),
+            gateway_flags: None,
+            message_id: Some(message.id.to_string()),
+        };
+
+        let start = Instant::now();
+        let res = self.send_smtp_request(dest.smtp, ic_smtp_request).await;
+
+        let error_lbl: &'static str = if let Err(e) = &res { e.into() } else { "" };
+        self.metrics
+            .smtp_requests
+            .with_label_values(&["no", error_lbl])
+            .inc();
+        self.metrics
+            .smtp_request_latency
+            .with_label_values(&["no", error_lbl])
+            .observe(start.elapsed().as_secs_f64());
+
+        if let Some(v) = self.notification_handler.clone() {
+            let error = res.clone().err();
+            let meta = meta.clone();
+            let message = message.clone();
+
+            tokio::spawn(async move {
+                v.notify_ic_message(meta, message, dest, error).await;
+            });
+        }
+
+        res
+    }
 }
 
 #[async_trait]
@@ -307,15 +364,18 @@ impl DeliversMail for IcSmtpDeliveryAgent {
     ) -> Result<(), DeliveryError> {
         info!(
             "{self}: delivering mail, ehlo: {}, from: '{}', to: '{:?}', id '{}'",
-            meta.ehlo_hostname.unwrap_or_default(),
+            meta.ehlo_hostname.show_or(""),
             message.mail_from,
             message.rcpt_to,
             message.id
         );
 
+        let ic_message = parse_email(&message.body)
+            .map_err(|e| DeliveryError::Permanent(format!("message parsing failed: {e:#}")))?;
+
         // A single message can be (potentially) destined for several canisters/domains.
-        // So we build a map (canister_id) -> (recipients).
-        let mut mapping: AHashMap<Principal, Vec<EmailAddress>> =
+        // So we build a map (canister_ids) -> (recipients).
+        let mut mapping: AHashMap<DestCanister, Vec<EmailAddress>> =
             AHashMap::with_capacity(message.rcpt_to.len());
 
         // The future in this loop usually resolves instantly due to the nature of the SMTP protocol.
@@ -323,52 +383,30 @@ impl DeliversMail for IcSmtpDeliveryAgent {
         // So making it concurrent isn't worth it probably currently.
         for rcpt in &message.rcpt_to {
             // Figure out which canister we should talk to
-            let canister_id = self
+            let dest = self
                 .resolve_canister_id(rcpt)
                 .await
                 .ok_or_else(|| DeliveryError::Permanent("Unknown domain".into()))?;
 
-            if let Some(v) = mapping.get_mut(&canister_id) {
+            if let Some(v) = mapping.get_mut(&dest) {
                 v.push(rcpt.clone());
             } else {
-                mapping.insert(canister_id, vec![rcpt.clone()]);
+                mapping.insert(dest, vec![rcpt.clone()]);
             }
         }
 
-        let parsed =
-            parse_email(&message.body).map_err(|e| DeliveryError::Permanent(e.to_string()))?;
+        let meta = Arc::new(meta);
 
         // Deliver the message to all relevant canisters in parallel
         let mut futs = Vec::with_capacity(mapping.len());
-        for (canister_id, rcpts) in mapping {
-            let ic_smtp_request = SmtpRequest {
-                envelope: Some(Envelope {
-                    from: message.mail_from.clone().into(),
-                    to: rcpts.into_iter().map(|x| x.into()).collect(),
-                }),
-                message: Some(parsed.clone()),
-                gateway_flags: None,
-                message_id: Some(message.id.to_string()),
-            };
-
-            futs.push(async move {
-                let start = Instant::now();
-                let res = self
-                    .smtp_request_deliver(canister_id, ic_smtp_request)
-                    .await;
-
-                let error_lbl: &'static str = if let Err(e) = &res { e.into() } else { "" };
-                self.metrics
-                    .smtp_requests
-                    .with_label_values(&["no", error_lbl])
-                    .inc();
-                self.metrics
-                    .smtp_request_latency
-                    .with_label_values(&["no", error_lbl])
-                    .observe(start.elapsed().as_secs_f64());
-
-                res
-            });
+        for (dest, rcpts) in mapping {
+            futs.push(self.smtp_message_send(
+                rcpts,
+                dest,
+                meta.clone(),
+                message.clone(),
+                ic_message.clone(),
+            ));
         }
 
         // Find & return 1st error if there's any
@@ -390,7 +428,7 @@ impl ResolvesRecipient for IcSmtpDeliveryAgent {
         debug!("{self}: looking up recipient, from: '{from}', to: '{rcpt}'");
 
         // Figure out which canister we should talk to
-        let canister_id = self
+        let dest = self
             .resolve_canister_id(rcpt)
             .await
             .ok_or(RecipientResolveError::UnknownDomain)?;
@@ -408,7 +446,7 @@ impl ResolvesRecipient for IcSmtpDeliveryAgent {
         let start = Instant::now();
         let res = self
             .request_executor
-            .canister_request(canister_id, ic_smtp_request, true)
+            .canister_request(dest.smtp, ic_smtp_request, true)
             .await
             .map_err(|e| match e {
                 IcSmtpDeliveryAgentError::Agent(
@@ -417,7 +455,8 @@ impl ResolvesRecipient for IcSmtpDeliveryAgent {
                     // It seems it's the only way to check that canister is missing a method
                 ) if reject.error_code.as_ref().is_some_and(|x| x == "IC0536") => {
                     RecipientResolveError::Permanent(format!(
-                        "Canister {canister_id} does not support SMTP protocol"
+                        "Canister {} does not support SMTP protocol",
+                        dest.smtp
                     ))
                 }
 
@@ -436,8 +475,8 @@ impl ResolvesRecipient for IcSmtpDeliveryAgent {
 
         if let SmtpResponse::Err(e) = res? {
             info!(
-                "{self}: {canister_id}: failed to resolve recipient: {} {}",
-                e.code, e.message
+                "{self}: {}: failed to resolve recipient: {} {}",
+                dest.smtp, e.code, e.message
             );
 
             // Code 550 indicates that the recipient is unknown
@@ -469,8 +508,8 @@ mod tests {
     use crate::{
         email,
         smtp::{
+            SessionCounters,
             ic::candid::{Header, Message, SmtpOk, SmtpRequestError},
-            inbound::SessionCounters,
         },
     };
 
@@ -480,6 +519,7 @@ mod tests {
     use ic_bn_lib_common::principal;
     use indoc::indoc;
     use prometheus::Registry;
+    use tokio::sync::mpsc;
     use uuid::Uuid;
 
     #[derive(Debug)]
@@ -510,6 +550,30 @@ mod tests {
             Ok(reqwest::Response::from(
                 http::response::Builder::new().status(404).body("").unwrap(),
             ))
+        }
+    }
+
+    #[derive(Debug)]
+    #[allow(clippy::type_complexity)]
+    struct TestNotificationHandler(
+        mpsc::Sender<(
+            Arc<SessionMeta>,
+            Arc<EmailMessage>,
+            DestCanister,
+            Option<DeliveryError>,
+        )>,
+    );
+
+    #[async_trait]
+    impl ReceivesIcSmtpNotifications for TestNotificationHandler {
+        async fn notify_ic_message(
+            &self,
+            meta: Arc<SessionMeta>,
+            message: Arc<EmailMessage>,
+            dest: DestCanister,
+            error: Option<DeliveryError>,
+        ) {
+            self.0.send((meta, message, dest, error)).await.unwrap();
         }
     }
 
@@ -558,10 +622,17 @@ mod tests {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn create_agent() -> (
         IcSmtpDeliveryAgent,
         Arc<TestHttpClient>,
         Arc<TestIcSmtpRequestExecutor>,
+        mpsc::Receiver<(
+            Arc<SessionMeta>,
+            Arc<EmailMessage>,
+            DestCanister,
+            Option<DeliveryError>,
+        )>,
     ) {
         let resolver = TestDomainResolver(HashMap::from_iter([
             (fqdn!("foo.bar"), principal!("qoctq-giaaa-aaaaa-aaaea-cai")),
@@ -587,6 +658,8 @@ mod tests {
         ));
 
         let request_executor = Arc::new(TestIcSmtpRequestExecutor::default());
+        let (tx, rx) = mpsc::channel(10);
+        let notif_handler = Arc::new(TestNotificationHandler(tx));
 
         (
             IcSmtpDeliveryAgent::new(
@@ -597,34 +670,55 @@ mod tests {
                 Duration::from_secs(10),
                 10,
                 Metrics::new(&Registry::new()),
+                Some(notif_handler),
             ),
             http_client,
             request_executor,
+            rx,
         )
     }
 
     #[tokio::test]
     async fn test_resolve_canister_id() {
-        let (delivery_agent, http_client, _) = create_agent();
+        let (delivery_agent, http_client, _, _) = create_agent();
 
-        for (email, canister_id) in [
+        for (email, dest_expect) in [
             // Normal canister address (w/o custom domains)
             (
                 "foo@lusdn-iiaaa-aaaam-qivpa-cai.icp0.io",
-                Some(principal!("lusdn-iiaaa-aaaam-qivpa-cai")),
+                Some(DestCanister {
+                    smtp: principal!("lusdn-iiaaa-aaaam-qivpa-cai"),
+                    orig: principal!("lusdn-iiaaa-aaaam-qivpa-cai"),
+                    custom_domain: false,
+                }),
             ),
             // Custom domain
             (
                 "foo@foo.bar",
-                Some(principal!("qoctq-giaaa-aaaaa-aaaea-cai")),
+                Some(DestCanister {
+                    smtp: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
+                    orig: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
+                    custom_domain: true,
+                }),
             ),
             // Normal canister with SMTP canister ID set up
             (
                 "foo@gjxif-ryaaa-aaaad-ae4ka-cai.icp0.io",
-                Some(principal!("6hsbt-vqaaa-aaaaf-aaafq-cai")),
+                Some(DestCanister {
+                    smtp: principal!("6hsbt-vqaaa-aaaaf-aaafq-cai"),
+                    orig: principal!("gjxif-ryaaa-aaaad-ae4ka-cai"),
+                    custom_domain: false,
+                }),
             ),
             // Custom domain with SMTP canister ID set up
-            ("foo@dead.beef", Some(principal!("aaaaa-aa"))),
+            (
+                "foo@dead.beef",
+                Some(DestCanister {
+                    smtp: principal!("aaaaa-aa"),
+                    orig: principal!("uqzsh-gqaaa-aaaaq-qaada-cai"),
+                    custom_domain: true,
+                }),
+            ),
             // Unknown custom domain
             ("foo@some-random-domain.org", None),
             // Bad canister ID
@@ -632,8 +726,8 @@ mod tests {
         ] {
             // Run each check a few times to make sure caching kicks in
             for _ in 0..10 {
-                let id = delivery_agent.resolve_canister_id(&email!(email)).await;
-                assert_eq!(id, canister_id);
+                let dest = delivery_agent.resolve_canister_id(&email!(email)).await;
+                assert_eq!(dest, dest_expect);
             }
         }
 
@@ -647,7 +741,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_recipient() {
-        let (delivery_agent, _, _) = create_agent();
+        let (delivery_agent, _, _, _) = create_agent();
 
         assert!(matches!(
             delivery_agent
@@ -688,7 +782,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delivery() {
-        let (delivery_agent, _, executor) = create_agent();
+        let (delivery_agent, _, executor, mut notif_rx) = create_agent();
 
         let message = indoc! {r#"
             From: Some One <someone@example.com>
@@ -725,10 +819,11 @@ mod tests {
             body: message.as_bytes().into(),
         };
 
+        let remote_ip = IpAddr::from_str("1.1.1.1").unwrap();
         let meta = SessionMeta {
             id: Uuid::nil(),
             message_id: Uuid::nil(),
-            remote_ip: IpAddr::from_str("1.1.1.1").unwrap(),
+            remote_ip,
             tls_info: None,
             ehlo_hostname: None,
             counters: SessionCounters::new(),
@@ -806,5 +901,26 @@ mod tests {
             principal!("aaaaa-aa"),
             create_request(vec![email!("foo@dead.beef"),])
         )));
+
+        // Check that 2 notifications arrive - one for each canister
+        let mut notifs = [
+            notif_rx.recv().await.unwrap(),
+            notif_rx.recv().await.unwrap(),
+        ]
+        .into_iter()
+        .collect::<Vec<_>>();
+        notifs.sort_by_key(|x| x.2.smtp);
+
+        let (meta, msg, dest, error) = notifs[0].clone();
+        assert!(error.is_none());
+        assert_eq!(dest.smtp, principal!("aaaaa-aa"));
+        assert_eq!(meta.remote_ip, remote_ip);
+        assert_eq!(msg.mail_from, email!("john@doe.com"));
+
+        let (meta, msg, dest, error) = notifs[1].clone();
+        assert!(error.is_none());
+        assert_eq!(dest.smtp, principal!("qoctq-giaaa-aaaaa-aaaea-cai"));
+        assert_eq!(meta.remote_ip, remote_ip);
+        assert_eq!(msg.mail_from, email!("john@doe.com"));
     }
 }

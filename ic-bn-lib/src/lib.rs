@@ -26,6 +26,7 @@ use anyhow::{Context, anyhow};
 use bytes::Bytes;
 use futures::StreamExt;
 use ic_bn_lib_common::Error;
+use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 
 pub use hickory_proto;
@@ -190,6 +191,37 @@ pub trait BoolYesNo {
 impl BoolYesNo for bool {
     fn yesno(&self) -> &'static str {
         if *self { "yes" } else { "no" }
+    }
+}
+
+pub trait SerializeOption<T> {
+    /// Serializes `Option<T>` as either inner value or provided default
+    fn serialize_or<'t, O>(&'t self, otherwise: O) -> SerializeOr<'t, T, O>;
+}
+
+pub struct SerializeOr<'t, T, O> {
+    option: &'t Option<T>,
+    otherwise: O,
+}
+
+impl<'t, T: Serialize, O: Serialize> Serialize for SerializeOr<'t, T, O> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.option {
+            Some(v) => v.serialize(serializer),
+            None => self.otherwise.serialize(serializer),
+        }
+    }
+}
+
+impl<T> SerializeOption<T> for Option<T> {
+    fn serialize_or<'t, O>(&'t self, otherwise: O) -> SerializeOr<'t, T, O> {
+        SerializeOr {
+            option: self,
+            otherwise,
+        }
     }
 }
 

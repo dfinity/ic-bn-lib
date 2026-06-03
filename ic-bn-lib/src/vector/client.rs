@@ -33,7 +33,7 @@ pub const MB: f64 = 1024.0 * KB;
 
 const CONTENT_ENCODING_ZSTD: HeaderValue = hval!("zstd");
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Metrics {
     sent: IntCounterVec,
     sent_compressed: IntCounterVec,
@@ -210,6 +210,7 @@ pub fn encode_batch(batch: Vec<Value>) -> Result<Bytes, Error> {
     Ok(buf.freeze())
 }
 
+#[derive(Debug)]
 pub struct Vector {
     namespace: String,
     token_batcher: CancellationToken,
@@ -219,6 +220,12 @@ pub struct Vector {
     tracker_flushers: TaskTracker,
     tx: mpsc::Sender<Value>,
     metrics: Metrics,
+}
+
+impl Display for Vector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Vector({})", self.namespace)
+    }
 }
 
 impl Vector {
@@ -242,7 +249,7 @@ impl Vector {
         let (tx_batch, rx_batch) = async_channel::bounded(opts.batch_queue);
 
         // Start batcher
-        warn!("Vector: starting batcher");
+        warn!("Vector({namespace}): starting batcher");
         let token_batcher = CancellationToken::new();
 
         let mut interval = interval(opts.batch_flush_interval);
@@ -272,7 +279,7 @@ impl Vector {
         // Prepare auth header
         let auth = opts.user.map(|x| basic_auth(x, opts.pass));
 
-        warn!("Vector: starting flushers ({})", opts.flushers);
+        warn!("Vector({namespace}): starting flushers ({})", opts.flushers);
         for id in 0..opts.flushers {
             let flusher = Flusher {
                 id,
@@ -328,12 +335,12 @@ impl Vector {
         // Signal the flushers to limit the retries first
         self.token_flushers_drain.cancel();
 
-        warn!("Vector: shutting down batcher");
+        warn!("{self}: shutting down batcher");
         self.token_batcher.cancel();
         self.tracker_batcher.close();
         self.tracker_batcher.wait().await;
 
-        warn!("Vector: shutting down flushers");
+        warn!("{self}: shutting down flushers");
         self.token_flushers.cancel();
         self.tracker_flushers.close();
         self.tracker_flushers.wait().await;
@@ -356,7 +363,7 @@ struct Batcher {
 
 impl Display for Batcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Vector(Batcher)")
+        write!(f, "Vector/Batcher({})", self.namespace)
     }
 }
 
@@ -468,7 +475,7 @@ struct Flusher {
 
 impl Display for Flusher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Vector(Flusher{})", self.id)
+        write!(f, "Vector/Flusher{}({})", self.id, self.namespace)
     }
 }
 

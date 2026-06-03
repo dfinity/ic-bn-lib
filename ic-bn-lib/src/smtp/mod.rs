@@ -1,23 +1,25 @@
 use std::{
     fmt::{Debug, Display},
+    net::IpAddr,
     sync::Arc,
+    time::Instant,
 };
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use fqdn::FQDN;
+use ic_bn_lib_common::types::http::TlsInfo;
 use itertools::Itertools;
 use prometheus::{
     HistogramVec, IntCounterVec, IntGaugeVec, Registry, register_histogram_vec_with_registry,
     register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry,
 };
+use serde_with::SerializeDisplay;
 use strum::{Display, IntoStaticStr};
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::smtp::{
-    address::EmailAddress,
-    inbound::{SessionError, SessionMeta},
-};
+use crate::smtp::{address::EmailAddress, inbound::SessionError};
 
 pub mod address;
 pub mod cli;
@@ -26,7 +28,7 @@ pub mod inbound;
 pub mod server;
 
 /// Recipient resolution policy
-#[derive(Debug, Clone, Eq, PartialEq, Display)]
+#[derive(Debug, Clone, Eq, PartialEq, Display, SerializeDisplay)]
 pub enum RecipientPolicy {
     #[strum(to_string = "Accept")]
     Accept,
@@ -37,7 +39,7 @@ pub enum RecipientPolicy {
 }
 
 /// Recipient resolution error
-#[derive(thiserror::Error, Debug, IntoStaticStr)]
+#[derive(thiserror::Error, Debug, IntoStaticStr, SerializeDisplay)]
 #[strum(serialize_all = "snake_case")]
 pub enum RecipientResolveError {
     #[error("Unknown recipient")]
@@ -51,7 +53,7 @@ pub enum RecipientResolveError {
 }
 
 /// Delivery error
-#[derive(thiserror::Error, Clone, Debug, IntoStaticStr)]
+#[derive(thiserror::Error, Clone, Debug, IntoStaticStr, SerializeDisplay)]
 #[strum(serialize_all = "snake_case")]
 pub enum DeliveryError {
     #[error("{0}")]
@@ -61,7 +63,7 @@ pub enum DeliveryError {
 }
 
 /// Error that might happen during message validation or delivery
-#[derive(thiserror::Error, Clone, Debug, IntoStaticStr)]
+#[derive(thiserror::Error, Clone, Debug, IntoStaticStr, SerializeDisplay)]
 #[strum(serialize_all = "snake_case")]
 pub enum MessageError {
     #[error("Delivery failed: {0}")]
@@ -75,7 +77,7 @@ pub enum MessageError {
 }
 
 /// Error that might happen during SMTP exchange
-#[derive(thiserror::Error, Clone, Debug, IntoStaticStr)]
+#[derive(thiserror::Error, Clone, Debug, IntoStaticStr, SerializeDisplay)]
 #[strum(serialize_all = "snake_case")]
 pub enum ProtocolError {
     #[error("Invalid EHLO hostname: {0}")]
@@ -130,9 +132,9 @@ pub trait ResolvesRecipient: Send + Sync + Debug {
     ) -> Result<RecipientPolicy, RecipientResolveError>;
 }
 
-/// Notifies about events
+/// Gets notifications about events
 #[async_trait]
-pub trait ReceivesNotifications: Send + Sync + Debug {
+pub trait ReceivesSmtpNotifications: Send + Sync + Debug {
     /// Notify when the message is queued or the validation failed
     async fn notify_message(
         &self,
@@ -154,6 +156,44 @@ pub trait DeliversMail: Send + Sync + Debug {
         meta: SessionMeta,
         message: Arc<EmailMessage>,
     ) -> Result<(), DeliveryError>;
+}
+
+/// SMTP session counters
+#[derive(Clone, Debug)]
+pub struct SessionCounters {
+    pub started: Instant,
+    pub bytes_rx: usize,
+    pub bytes_tx: usize,
+    pub commands: usize,
+    pub messages_queued: usize,
+    pub errors: usize,
+}
+
+impl SessionCounters {
+    pub(crate) fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            bytes_rx: 0,
+            bytes_tx: 0,
+            commands: 0,
+            messages_queued: 0,
+            errors: 0,
+        }
+    }
+}
+
+/// Session metadata for logging/notification purposes
+#[derive(Clone, Debug)]
+pub struct SessionMeta {
+    pub id: Uuid,
+    pub message_id: Uuid,
+    pub remote_ip: IpAddr,
+    pub tls_info: Option<TlsInfo>,
+    pub counters: SessionCounters,
+    pub last_error: Option<ProtocolError>,
+    pub ehlo_hostname: Option<FQDN>,
+    pub mail_from: Option<EmailAddress>,
+    pub rcpt_to: Vec<EmailAddress>,
 }
 
 #[derive(Clone)]

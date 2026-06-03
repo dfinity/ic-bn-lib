@@ -5,6 +5,7 @@ use std::{
 
 use derive_new::new;
 use fqdn::{FQDN, Fqdn};
+use serde_with::{DeserializeFromStr, SerializeDisplay};
 
 use crate::smtp::ic::candid;
 
@@ -21,7 +22,9 @@ pub enum EmailAddressError {
 /// Currently we don't validate the local part at all
 /// and just consider everything to the right from the
 /// rightmost @ as a domain part.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, new)]
+#[derive(
+    Clone, Eq, PartialEq, Ord, PartialOrd, Hash, SerializeDisplay, DeserializeFromStr, new,
+)]
 pub struct EmailAddress {
     local: String,
     domain: FQDN,
