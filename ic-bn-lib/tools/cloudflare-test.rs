@@ -1,5 +1,6 @@
 use clap::Parser;
 use ic_bn_lib::tls::acme::dns::cloudflare::Cloudflare;
+use ic_bn_lib_common::traits::acme::DnsManager;
 
 #[derive(Parser)]
 pub struct Cli {
@@ -23,9 +24,18 @@ async fn main() {
     let zone_id = client.find_zone(&cli.zone).await.unwrap();
     println!("Zone {} found with id {zone_id}", cli.zone);
 
-    let records = client
-        .find_records(&zone_id, "boundary.dfinity.network")
+    let records = client.find_records(&zone_id, &cli.zone).await.unwrap();
+    println!("Records: {records:?}");
+
+    client
+        .create(
+            &cli.zone,
+            "_foo_bar",
+            ic_bn_lib_common::types::acme::Record::Txt("blah".into()),
+            60,
+        )
         .await
         .unwrap();
-    println!("Records: {records:?}");
+
+    client.delete(&cli.zone, "_foo_bar").await.unwrap();
 }

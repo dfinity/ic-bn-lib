@@ -162,3 +162,4 @@ max_combination_size = 2
 [[bin]]
 name = "cloudflare-test"
 path = "tools/cloudflare-test.rs"
+required-features = ["acme-dns"]

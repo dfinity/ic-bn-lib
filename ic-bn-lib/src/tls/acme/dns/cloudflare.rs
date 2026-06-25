@@ -155,6 +155,8 @@ impl DnsManager for Cloudflare {
             .join(&format!("client/v4/zones/{zone_id}/dns_records"))
             .context("failed to build create dns_record URL")?;
 
+        debug!("Cloudflare: creating TXT record {name} in zone {zone}: {content}");
+
         let body = CreateDnsRecordBody {
             record_type: "TXT",
             name,
@@ -204,7 +206,7 @@ impl DnsManager for Cloudflare {
             .into_iter()
             .filter(|r| r.record_type.eq_ignore_ascii_case("TXT"))
         {
-            debug!("deleting record {} in Cloudflare", record.name);
+            debug!("Cloudflare: deleting record {} in zone {zone}", record.name);
 
             let url = self
                 .base_url
