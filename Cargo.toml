@@ -20,11 +20,6 @@ async-trait = "0.1.83"
 axum = "0.8.1"
 candid = "0.10.10"
 clap = { version = "4.5.20", features = ["derive", "string", "env"] }
-# Lock it down for now so that our fork (which has 0.14.1)
-# is selected during patching in ic-gateway etc
-cloudflare = { version = ">=0.14.0,<=0.14.1", default-features = false, features = [
-    "rustls-tls",
-] }
 derive-new = "0.7.0"
 fqdn = { version = "0.5.2" }
 hickory-proto = "0.26.1"
@@ -63,6 +58,7 @@ reqwest = { version = "0.13.2", default-features = false, features = [
     "json",
     "stream",
     "gzip",
+    "query",
 ] }
 rcgen = { version = "0.14.3", default-features = false, features = [
     "crypto",

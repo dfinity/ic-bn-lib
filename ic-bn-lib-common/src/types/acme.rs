@@ -1,7 +1,6 @@
 use std::{fmt::Display, str::FromStr};
 
-use anyhow::{Context, anyhow};
-use cloudflare::endpoints::dns::dns::DnsContent;
+use anyhow::Context;
 use instant_acme::{
     AuthorizationStatus, ChallengeType, Error as AcmeError, Identifier, LetsEncrypt, OrderStatus,
 };
@@ -65,17 +64,6 @@ pub enum DnsBackend {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Record {
     Txt(String),
-}
-
-impl TryFrom<DnsContent> for Record {
-    type Error = anyhow::Error;
-
-    fn try_from(value: DnsContent) -> Result<Self, Self::Error> {
-        match value {
-            DnsContent::TXT { content } => Ok(Self::Txt(content)),
-            _ => Err(anyhow!("not supported")),
-        }
-    }
 }
 
 #[cfg(test)]

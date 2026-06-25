@@ -1,149 +1,239 @@
+use super::{DnsManager, Record};
 use anyhow::{Context, Error, anyhow};
 use async_trait::async_trait;
-use cloudflare::{
-    endpoints::{
-        dns::dns::{
-            CreateDnsRecord, CreateDnsRecordParams, DeleteDnsRecord, DnsContent, DnsRecord,
-            ListDnsRecords, ListDnsRecordsParams,
-        },
-        zones::zone::{ListZones, ListZonesParams, Zone},
-    },
-    framework::{
-        Environment,
-        auth::Credentials,
-        client::{ClientConfig, async_api::Client},
-        response::ApiSuccess,
-    },
-};
+use reqwest::{Client, Url};
+use serde::{Deserialize, Serialize};
 use tracing::debug;
-use url::Url;
 
-use super::{DnsManager, Record};
+#[derive(Deserialize)]
+struct ApiResponse<T> {
+    success: bool,
+    errors: Vec<ApiError>,
+    result: T,
+}
+
+impl<T> ApiResponse<T> {
+    fn join_errors(&self) -> String {
+        self.errors
+            .iter()
+            .map(|e| e.message.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+#[allow(unused)]
+#[derive(Deserialize, Debug)]
+struct ApiError {
+    code: u32,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Zone {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DnsRecord {
+    id: String,
+    name: String,
+    #[serde(rename = "type")]
+    record_type: String,
+}
+
+#[derive(Serialize)]
+struct CreateDnsRecordBody<'a> {
+    #[serde(rename = "type")]
+    record_type: &'a str,
+    name: &'a str,
+    content: &'a str,
+    ttl: u32,
+}
 
 pub struct Cloudflare {
     client: Client,
+    base_url: Url,
+    token: String,
 }
 
 impl Cloudflare {
-    pub fn new(url: Url, token: String) -> Result<Self, Error> {
-        let credentials = Credentials::UserAuthToken { token };
+    pub fn new(base_url: Url, token: String) -> Result<Self, Error> {
+        let client = Client::builder()
+            .build()
+            .context("failed to initialize HTTP client")?;
 
-        let client = Client::new(
-            credentials,
-            ClientConfig::default(),
-            Environment::Custom(url.to_string()),
-        )
-        .context("failed to initialize cloudflare api client")?;
-
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            base_url,
+            token,
+        })
     }
 
-    async fn find_zone(&self, zone: &str) -> Result<String, Error> {
-        let resp = self
+    /// GET /client/v4/zones?name=<zone>
+    pub async fn find_zone(&self, zone: &str) -> Result<String, Error> {
+        let url = self
+            .base_url
+            .join("client/v4/zones")
+            .context("failed to build zones URL")?;
+
+        let resp: ApiResponse<Vec<Zone>> = self
             .client
-            .request(&ListZones {
-                params: ListZonesParams {
-                    name: Some(zone.into()),
-                    status: None,
-                    page: None,
-                    per_page: None,
-                    order: None,
-                    direction: None,
-                    search_match: None,
-                },
-            })
-            .await?;
+            .get(url)
+            .bearer_auth(&self.token)
+            .query(&[("name", zone)])
+            .send()
+            .await
+            .context("zones request failed")?
+            .error_for_status()
+            .context("zones request returned error status")?
+            .json()
+            .await
+            .context("failed to deserialize zones response")?;
 
-        let zone_id = match resp.result.first() {
-            Some(Zone { id, .. }) => id.clone(),
-            None => return Err(anyhow!("zone '{zone}' not found")),
-        };
+        if !resp.success {
+            let msgs = resp
+                .errors
+                .iter()
+                .map(|e| e.message.as_str())
+                .collect::<Vec<_>>();
 
-        Ok(zone_id)
+            return Err(anyhow!("zones API error: {}", msgs.join(", ")));
+        }
+
+        resp.result
+            .into_iter()
+            .next()
+            .map(|x| x.id)
+            .ok_or_else(|| anyhow!("zone '{zone}' not found"))
     }
 
-    async fn find_record(
-        &self,
-        zone_id: &str,
-        name: String,
-    ) -> Result<ApiSuccess<Vec<DnsRecord>>, Error> {
-        let resp = self
-            .client
-            .request(&ListDnsRecords {
-                zone_identifier: zone_id,
-                params: ListDnsRecordsParams {
-                    record_type: None,
-                    name: Some(name),
-                    page: None,
-                    per_page: None,
-                    order: None,
-                    direction: None,
-                    search_match: None,
-                },
-            })
-            .await?;
+    /// GET /client/v4/zones/<zone_id>/dns_records?name=<name>
+    pub async fn find_records(&self, zone_id: &str, name: &str) -> Result<Vec<DnsRecord>, Error> {
+        let url = self
+            .base_url
+            .join(&format!("client/v4/zones/{zone_id}/dns_records"))
+            .context("failed to build dns_records URL")?;
 
-        Ok(resp)
+        let resp: ApiResponse<Vec<DnsRecord>> = self
+            .client
+            .get(url)
+            .bearer_auth(&self.token)
+            .query(&[("name", name)])
+            .send()
+            .await
+            .context("list dns_records request failed")?
+            .error_for_status()
+            .context("list dns_records request returned error status")?
+            .json()
+            .await
+            .context("failed to deserialize dns_records response")?;
+
+        if !resp.success {
+            return Err(anyhow!("dns_records API error: {}", resp.join_errors()));
+        }
+
+        Ok(resp.result)
     }
 }
 
 #[async_trait]
 impl DnsManager for Cloudflare {
+    /// POST /client/v4/zones/<zone_id>/dns_records
     async fn create(&self, zone: &str, name: &str, record: Record, ttl: u32) -> Result<(), Error> {
-        // Find zone
         let zone_id = self
             .find_zone(zone)
             .await
-            .context(format!("unable to find zone '{zone}'"))?;
+            .with_context(|| format!("unable to find zone '{zone}'"))?;
 
-        // Create record
         let content = match record {
-            Record::Txt(content) => DnsContent::TXT { content },
+            Record::Txt(ref s) => s.as_str(),
         };
 
-        self.client
-            .request(&CreateDnsRecord {
-                zone_identifier: &zone_id,
-                params: CreateDnsRecordParams {
-                    ttl: Some(ttl),
-                    priority: None,
-                    proxied: None,
-                    name,
-                    content,
-                },
-            })
-            .await?;
+        let url = self
+            .base_url
+            .join(&format!("client/v4/zones/{zone_id}/dns_records"))
+            .context("failed to build create dns_record URL")?;
+
+        let body = CreateDnsRecordBody {
+            record_type: "TXT",
+            name,
+            content,
+            ttl,
+        };
+
+        let resp: ApiResponse<serde_json::Value> = self
+            .client
+            .post(url)
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send()
+            .await
+            .context("create dns_record request failed")?
+            .error_for_status()
+            .context("create dns_record request returned error status")?
+            .json()
+            .await
+            .context("failed to deserialize create dns_record response")?;
+
+        if !resp.success {
+            return Err(anyhow!(
+                "create dns_record API error: {}",
+                resp.join_errors()
+            ));
+        }
 
         Ok(())
     }
 
+    /// DELETE /client/v4/zones/<zone_id>/dns_records/<record_id>  (once per match)
     async fn delete(&self, zone: &str, name: &str) -> Result<(), Error> {
-        // Find zone
         let zone_id = self
             .find_zone(zone)
             .await
-            .context(format!("unable to find zone '{zone}'"))?;
+            .with_context(|| format!("unable to find zone '{zone}'"))?;
 
-        // Find records
-        let resp = self
-            .find_record(&zone_id, format!("{name}.{zone}"))
+        let fqdn = format!("{name}.{zone}");
+
+        let records = self
+            .find_records(&zone_id, &fqdn)
             .await
             .context("unable to find records")?;
 
-        // Delete all matching TXT records
-        for record in resp
-            .result
+        for record in records
             .into_iter()
-            .filter(|r| matches!(&r.content, DnsContent::TXT { .. }))
+            .filter(|r| r.record_type.eq_ignore_ascii_case("TXT"))
         {
             debug!("deleting record {} in Cloudflare", record.name);
 
-            self.client
-                .request(&DeleteDnsRecord {
-                    zone_identifier: &zone_id,
-                    identifier: &record.id,
-                })
-                .await?;
+            let url = self
+                .base_url
+                .join(&format!(
+                    "client/v4/zones/{zone_id}/dns_records/{}",
+                    record.id
+                ))
+                .context("failed to build delete dns_record URL")?;
+
+            let resp: ApiResponse<serde_json::Value> = self
+                .client
+                .delete(url)
+                .bearer_auth(&self.token)
+                .send()
+                .await
+                .context("delete dns_record request failed")?
+                .error_for_status()
+                .context("delete dns_record request returned error status")?
+                .json()
+                .await
+                .context("failed to deserialize delete dns_record response")?;
+
+            if !resp.success {
+                return Err(anyhow!(
+                    "Delete dns_record '{}' API error: {}",
+                    record.id,
+                    resp.join_errors()
+                ));
+            }
         }
 
         Ok(())
