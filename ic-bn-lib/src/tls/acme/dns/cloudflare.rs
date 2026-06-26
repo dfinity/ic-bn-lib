@@ -5,6 +5,8 @@ use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
+pub const DEFAULT_CLOUDFLARE_URL: &str = "https://api.cloudflare.com/";
+
 #[derive(Deserialize)]
 struct ApiResponse<T> {
     success: bool,
