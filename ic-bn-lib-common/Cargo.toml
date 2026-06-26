@@ -5,7 +5,7 @@ license.workspace = true
 readme.workspace = true
 keywords.workspace = true
 description = "A collection of traits & types commonly used by ic-bn-lib and others"
-version = "0.2.1"
+version = "0.2.2"
 documentation = "https://docs.rs/ic-bn-lib-common"
 
 [dependencies]
@@ -14,7 +14,6 @@ async-trait = { workspace = true }
 axum = { workspace = true }
 candid = { workspace = true }
 clap = { workspace = true }
-cloudflare = { workspace = true }
 derive-new = { workspace = true }
 fqdn = { workspace = true }
 hickory-proto = { workspace = true }

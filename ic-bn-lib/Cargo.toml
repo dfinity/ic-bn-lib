@@ -23,7 +23,7 @@ acme = [
     "dep:hex",
     "dep:sha2",
 ]
-acme-dns = ["acme", "dep:cloudflare"]
+acme-dns = ["acme"]
 acme-alpn = ["acme", "dep:rustls-acme"]
 clients-hyper = ["dep:hyper-rustls"]
 custom-domains = []
@@ -46,7 +46,6 @@ bytes = "1.10.0"
 candid = { workspace = true }
 clap = { workspace = true }
 chacha20poly1305 = "0.10.1"
-cloudflare = { workspace = true, optional = true }
 derive-new = { workspace = true }
 flate2 = { version = "1.0", optional = true }
 fqdn = { workspace = true }
@@ -159,3 +158,8 @@ required-features = ["vector"]
 [package.metadata.cargo-all-features]
 # Limit feature combinations to reduce test duration
 max_combination_size = 2
+
+[[bin]]
+name = "cloudflare-test"
+path = "tools/cloudflare-test.rs"
+required-features = ["acme-dns"]
