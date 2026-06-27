@@ -536,7 +536,7 @@ impl Flusher {
             if let Err(e) = self.send_batch(batch.clone(), timeout).await {
                 self.metrics
                     .batch_flushes
-                    .with_label_values(&[&self.namespace, "no"])
+                    .with_label_values(&[self.namespace.as_str(), "no"])
                     .inc();
 
                 warn!(
@@ -555,7 +555,7 @@ impl Flusher {
                     .inc_by(batch.len() as u64);
                 self.metrics
                     .batch_flushes
-                    .with_label_values(&[&self.namespace, "yes"])
+                    .with_label_values(&[self.namespace.as_str(), "yes"])
                     .inc();
 
                 debug!("{self}: batch sent in {}s", start.elapsed().as_secs_f64());
