@@ -19,9 +19,8 @@ use crate::Error;
 /// Flag that signifies that this domain should be passed
 /// through the pre-rendering service.
 pub const FLAG_PRERENDER: DomainFlag = DomainFlag(1 << 0);
-
 /// Used only in tests
-const FLAG_TEST: DomainFlag = DomainFlag(1 << 31);
+pub const FLAG_TEST: DomainFlag = DomainFlag(1 << 31);
 
 const FLAGS: [DomainFlag; 2] = [FLAG_PRERENDER, FLAG_TEST];
 
