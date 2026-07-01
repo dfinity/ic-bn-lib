@@ -20,6 +20,11 @@ use crate::Error;
 /// through the pre-rendering service.
 pub const FLAG_PRERENDER: DomainFlag = DomainFlag(1 << 0);
 
+/// Used only in tests
+const FLAG_TEST: DomainFlag = DomainFlag(1 << 31);
+
+const FLAGS: [DomainFlag; 2] = [FLAG_PRERENDER, FLAG_TEST];
+
 /// Single flag
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DomainFlag(u32);
@@ -30,6 +35,7 @@ impl FromStr for DomainFlag {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s {
             "prerender" => FLAG_PRERENDER,
+            "test" => FLAG_TEST,
             _ => return Err(anyhow!("unknown flag {s}").into()),
         })
     }
@@ -42,6 +48,7 @@ impl Display for DomainFlag {
             "{}",
             match *self {
                 FLAG_PRERENDER => "prerender",
+                FLAG_TEST => "test",
                 _ => "unknown",
             }
         )
@@ -63,7 +70,7 @@ impl DomainFlags {
     }
 
     pub fn has_flag(&self, f: DomainFlag) -> bool {
-        self.0 & f.0 == 1
+        self.0 & f.0 != 0
     }
 
     pub fn set_flag(&mut self, f: DomainFlag) {
@@ -72,6 +79,10 @@ impl DomainFlags {
 
     pub fn unset_flag(&mut self, f: DomainFlag) {
         self.0 &= !f.0;
+    }
+
+    pub fn merge(&mut self, other: DomainFlags) {
+        self.0 |= other.0;
     }
 }
 
@@ -87,10 +98,8 @@ impl FromStr for DomainFlags {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut flags = Self::default();
         for x in s.split('|') {
-            match x {
-                "prerender" => flags |= FLAG_PRERENDER,
-                _ => return Err(anyhow!("unknown flag {x}").into()),
-            }
+            let flag = DomainFlag::from_str(x)?;
+            flags.set_flag(flag);
         }
 
         Ok(flags)
@@ -100,8 +109,11 @@ impl FromStr for DomainFlags {
 impl Display for DomainFlags {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut flags = vec![];
-        if self.0 & FLAG_PRERENDER.0 == 1 {
-            flags.push("prerender");
+
+        for flag in FLAGS {
+            if self.has_flag(flag) {
+                flags.push(flag.to_string());
+            }
         }
 
         write!(f, "{}", flags.join(", "))
@@ -234,5 +246,21 @@ mod tests {
         cd = cd.unset_flag(FLAG_PRERENDER);
         assert_eq!(cd.flags.unwrap().0, 0b10010001000000001001000100000000);
         assert!(!cd.has_flag(FLAG_PRERENDER));
+
+        assert_eq!(
+            DomainFlags::new([FLAG_PRERENDER, FLAG_TEST]).to_string(),
+            "prerender, test"
+        );
+
+        let mut flags = DomainFlags::new([FLAG_TEST]);
+        flags.merge(DomainFlags::new([FLAG_PRERENDER]));
+        assert!(flags.has_flag(FLAG_PRERENDER));
+        assert!(flags.has_flag(FLAG_TEST));
+
+        let flags = DomainFlags::from_str("test|prerender").unwrap();
+        assert!(flags.has_flag(FLAG_PRERENDER));
+        assert!(flags.has_flag(FLAG_TEST));
+
+        assert!(DomainFlags::from_str("test|prerender|foo").is_err());
     }
 }
