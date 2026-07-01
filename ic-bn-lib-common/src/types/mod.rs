@@ -22,7 +22,7 @@ pub const FLAG_PRERENDER: DomainFlag = DomainFlag(1 << 0);
 /// Used only in tests
 pub const FLAG_TEST: DomainFlag = DomainFlag(1 << 31);
 
-const FLAGS: [DomainFlag; 2] = [FLAG_PRERENDER, FLAG_TEST];
+const FLAGS: [(DomainFlag, &str); 2] = [(FLAG_PRERENDER, "prerender"), (FLAG_TEST, "test")];
 
 /// Single flag
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,25 +32,25 @@ impl FromStr for DomainFlag {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(match s {
-            "prerender" => FLAG_PRERENDER,
-            "test" => FLAG_TEST,
-            _ => return Err(anyhow!("unknown flag {s}").into()),
-        })
+        for (flag, name) in FLAGS {
+            if s == name {
+                return Ok(flag);
+            }
+        }
+
+        Err(anyhow!("unknown flag {s}").into())
     }
 }
 
 impl Display for DomainFlag {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match *self {
-                FLAG_PRERENDER => "prerender",
-                FLAG_TEST => "test",
-                _ => "unknown",
+        for (flag, name) in FLAGS {
+            if *self == flag {
+                return write!(f, "{}", name);
             }
-        )
+        }
+
+        write!(f, "unknown")
     }
 }
 
@@ -79,10 +79,6 @@ impl DomainFlags {
     pub fn unset_flag(&mut self, f: DomainFlag) {
         self.0 &= !f.0;
     }
-
-    pub fn merge(&mut self, other: DomainFlags) {
-        self.0 |= other.0;
-    }
 }
 
 impl BitOrAssign<DomainFlag> for DomainFlags {
@@ -107,11 +103,11 @@ impl FromStr for DomainFlags {
 
 impl Display for DomainFlags {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut flags = vec![];
+        let mut flags = Vec::with_capacity(self.0.count_ones() as usize);
 
-        for flag in FLAGS {
+        for (flag, name) in FLAGS {
             if self.has_flag(flag) {
-                flags.push(flag.to_string());
+                flags.push(name);
             }
         }
 
@@ -240,9 +236,8 @@ impl RequestType {
 mod tests {
     use fqdn::fqdn;
 
-    use crate::principal;
-
     use super::*;
+    use crate::principal;
 
     #[test]
     fn test_custom_domain_flags() {
@@ -268,11 +263,6 @@ mod tests {
             DomainFlags::new([FLAG_PRERENDER, FLAG_TEST]).to_string(),
             "prerender, test"
         );
-
-        let mut flags = DomainFlags::new([FLAG_TEST]);
-        flags.merge(DomainFlags::new([FLAG_PRERENDER]));
-        assert!(flags.has_flag(FLAG_PRERENDER));
-        assert!(flags.has_flag(FLAG_TEST));
 
         let flags = DomainFlags::from_str("test|prerender").unwrap();
         assert!(flags.has_flag(FLAG_PRERENDER));
