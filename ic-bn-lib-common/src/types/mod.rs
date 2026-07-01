@@ -126,6 +126,7 @@ pub struct CustomDomain {
     pub canister_id: Principal,
     /// Opaque timestamp to reflect when the domain was created, can be zero
     pub timestamp: u64,
+    pub priority: u8,
     pub flags: Option<DomainFlags>,
 }
 
@@ -135,6 +136,7 @@ impl CustomDomain {
             name,
             canister_id,
             timestamp: 0,
+            priority: 0,
             flags: None,
         }
     }
@@ -143,7 +145,24 @@ impl CustomDomain {
         self.flags.is_some_and(|x| x.0 & flag.0 == 1)
     }
 
-    pub fn set_flag(mut self, flag: DomainFlag) -> Self {
+    pub fn set_flag(&mut self, flag: DomainFlag) {
+        match &mut self.flags {
+            Some(v) => v.set_flag(flag),
+            None => self.flags = Some(DomainFlags::new([flag])),
+        }
+    }
+
+    pub fn unset_flag(&mut self, flag: DomainFlag) {
+        if let Some(v) = &mut self.flags {
+            v.unset_flag(flag)
+        }
+    }
+
+    pub fn set_priority(&mut self, prio: u8) {
+        self.priority = prio;
+    }
+
+    pub fn with_flag(mut self, flag: DomainFlag) -> Self {
         match &mut self.flags {
             Some(v) => v.set_flag(flag),
             None => self.flags = Some(DomainFlags::new([flag])),
@@ -152,10 +171,8 @@ impl CustomDomain {
         self
     }
 
-    pub fn unset_flag(mut self, flag: DomainFlag) -> Self {
-        if let Some(v) = &mut self.flags {
-            v.unset_flag(flag)
-        }
+    pub fn with_priority(mut self, prio: u8) -> Self {
+        self.priority = prio;
         self
     }
 }
@@ -234,15 +251,16 @@ mod tests {
             canister_id: principal!("aaaaa-aa"),
             timestamp: 0,
             flags: Some(DomainFlags(0b10010001000000001001000100000000)),
+            priority: 0,
         };
 
         assert!(!cd.has_flag(FLAG_PRERENDER));
 
-        cd = cd.set_flag(FLAG_PRERENDER);
+        cd.set_flag(FLAG_PRERENDER);
         assert_eq!(cd.flags.unwrap().0, 0b10010001000000001001000100000001);
         assert!(cd.has_flag(FLAG_PRERENDER));
 
-        cd = cd.unset_flag(FLAG_PRERENDER);
+        cd.unset_flag(FLAG_PRERENDER);
         assert_eq!(cd.flags.unwrap().0, 0b10010001000000001001000100000000);
         assert!(!cd.has_flag(FLAG_PRERENDER));
 

@@ -76,6 +76,7 @@ async fn get_custom_domains_from_url(
     cli: &Arc<dyn Client>,
     url: &Url,
     timeout: Duration,
+    priority: u8,
     flags: Option<DomainFlags>,
 ) -> Result<Vec<CustomDomain>, Error> {
     let body = get_url_body(cli, url, timeout)
@@ -99,6 +100,7 @@ async fn get_custom_domains_from_url(
             name: k,
             canister_id: v,
             timestamp: 0,
+            priority,
             flags,
         })
         .collect::<Vec<_>>())
@@ -110,6 +112,7 @@ pub struct GenericProvider {
     http_client: Arc<dyn Client>,
     url: Url,
     timeout: Duration,
+    priority: u8,
     flags: Option<DomainFlags>,
 }
 
@@ -122,7 +125,14 @@ impl Debug for GenericProvider {
 #[async_trait]
 impl ProvidesCustomDomains for GenericProvider {
     async fn get_custom_domains(&self) -> Result<Vec<CustomDomain>, Error> {
-        get_custom_domains_from_url(&self.http_client, &self.url, self.timeout, self.flags).await
+        get_custom_domains_from_url(
+            &self.http_client,
+            &self.url,
+            self.timeout,
+            self.priority,
+            self.flags,
+        )
+        .await
     }
 }
 
@@ -140,6 +150,7 @@ pub struct GenericProviderTimestamped {
     http_client: Arc<dyn Client>,
     url: Url,
     timeout: Duration,
+    priority: u8,
     flags: Option<DomainFlags>,
     #[new(default)]
     timestamp: AtomicU64,
@@ -185,10 +196,15 @@ impl ProvidesCustomDomains for GenericProviderTimestamped {
         };
 
         // Otherwise fetch a fresh version from the provided URL
-        let domains =
-            get_custom_domains_from_url(&self.http_client, &domains_url, self.timeout, self.flags)
-                .await
-                .context("unable to fetch custom domains")?;
+        let domains = get_custom_domains_from_url(
+            &self.http_client,
+            &domains_url,
+            self.timeout,
+            self.priority,
+            self.flags,
+        )
+        .await
+        .context("unable to fetch custom domains")?;
 
         warn!("{self:?}: new timestamp, got {} domains", domains.len());
 
@@ -247,6 +263,7 @@ pub struct GenericProviderDiff {
     http_client: Arc<dyn Client>,
     url: Url,
     timeout: Duration,
+    priority: u8,
     flags: Option<DomainFlags>,
     #[new(default)]
     timestamp: AtomicU64,
@@ -290,6 +307,7 @@ impl GenericProviderDiff {
                 name,
                 canister_id,
                 timestamp: 0,
+                priority: self.priority,
                 flags: self.flags,
             })
             .collect()
@@ -360,6 +378,7 @@ impl ProvidesCustomDomains for GenericProviderDiff {
 #[derive(new)]
 pub struct LocalFileProvider {
     file_path: PathBuf,
+    priority: u8,
     flags: Option<DomainFlags>,
 }
 
@@ -405,6 +424,7 @@ impl ProvidesCustomDomains for LocalFileProvider {
                 name,
                 canister_id,
                 timestamp: 0,
+                priority: self.priority,
                 flags: self.flags,
             });
         }
@@ -566,6 +586,7 @@ mod test {
             cli,
             "http://foo".try_into().unwrap(),
             Duration::ZERO,
+            0,
             Some(DomainFlags::new([FLAG_PRERENDER])),
         );
 
@@ -582,12 +603,12 @@ mod test {
             domains,
             vec![
                 CustomDomain::new(fqdn!("foo.bar2"), principal!("qoctq-giaaa-aaaaa-aaaea-cai"))
-                    .set_flag(FLAG_PRERENDER),
+                    .with_flag(FLAG_PRERENDER),
                 CustomDomain::new(
                     fqdn!("2athis-domain-is-exactly-fifty-one-characters-l.com"),
                     principal!("aaaaa-aa"),
                 )
-                .set_flag(FLAG_PRERENDER)
+                .with_flag(FLAG_PRERENDER)
             ]
         );
 
@@ -604,11 +625,11 @@ mod test {
             domains,
             vec![
                 CustomDomain::new(fqdn!("foo.bar2"), principal!("qoctq-giaaa-aaaaa-aaaea-cai"))
-                    .set_flag(FLAG_PRERENDER),
+                    .with_flag(FLAG_PRERENDER),
                 CustomDomain::new(fqdn!("foo.bar3"), principal!("aaaaa-aa"))
-                    .set_flag(FLAG_PRERENDER),
+                    .with_flag(FLAG_PRERENDER),
                 CustomDomain::new(fqdn!("foo.bar4"), principal!("qoctq-giaaa-aaaaa-aaaea-cai"))
-                    .set_flag(FLAG_PRERENDER),
+                    .with_flag(FLAG_PRERENDER),
             ]
         );
 
@@ -625,7 +646,7 @@ mod test {
             domains,
             vec![
                 CustomDomain::new(fqdn!("foo.bar5"), principal!("qoctq-giaaa-aaaaa-aaaea-cai"))
-                    .set_flag(FLAG_PRERENDER)
+                    .with_flag(FLAG_PRERENDER)
             ]
         );
     }
@@ -637,6 +658,7 @@ mod test {
             cli,
             "http://foo".try_into().unwrap(),
             Duration::ZERO,
+            0,
             Some(DomainFlags::new([FLAG_PRERENDER])),
         );
 
@@ -653,12 +675,12 @@ mod test {
             domains,
             vec![
                 CustomDomain::new(fqdn!("bar.foo"), principal!("qoctq-giaaa-aaaaa-aaaea-cai"))
-                    .set_flag(FLAG_PRERENDER),
+                    .with_flag(FLAG_PRERENDER),
                 CustomDomain::new(
                     fqdn!("2athis-domain-is-exactly-fifty-one-characters-l.com"),
                     principal!("aaaaa-aa")
                 )
-                .set_flag(FLAG_PRERENDER),
+                .with_flag(FLAG_PRERENDER),
             ]
         );
 
@@ -675,12 +697,12 @@ mod test {
             domains,
             vec![
                 CustomDomain::new(fqdn!("bar.foo"), principal!("qoctq-giaaa-aaaaa-aaaea-cai"))
-                    .set_flag(FLAG_PRERENDER),
+                    .with_flag(FLAG_PRERENDER),
                 CustomDomain::new(
                     fqdn!("2athis-domain-is-exactly-fifty-one-characters-l.com"),
                     principal!("aaaaa-aa")
                 )
-                .set_flag(FLAG_PRERENDER)
+                .with_flag(FLAG_PRERENDER)
             ]
         );
 
@@ -697,9 +719,9 @@ mod test {
             domains,
             vec![
                 CustomDomain::new(fqdn!("bar.foos"), principal!("qoctq-giaaa-aaaaa-aaaea-cai"))
-                    .set_flag(FLAG_PRERENDER),
+                    .with_flag(FLAG_PRERENDER),
                 CustomDomain::new(fqdn!("foo.barr"), principal!("aaaaa-aa"))
-                    .set_flag(FLAG_PRERENDER)
+                    .with_flag(FLAG_PRERENDER)
             ]
         );
 
@@ -716,9 +738,9 @@ mod test {
             domains,
             vec![
                 CustomDomain::new(fqdn!("bar.foos"), principal!("qoctq-giaaa-aaaaa-aaaea-cai"))
-                    .set_flag(FLAG_PRERENDER),
+                    .with_flag(FLAG_PRERENDER),
                 CustomDomain::new(fqdn!("foo.barr"), principal!("aaaaa-aa"))
-                    .set_flag(FLAG_PRERENDER),
+                    .with_flag(FLAG_PRERENDER),
             ]
         );
     }
@@ -730,6 +752,7 @@ mod test {
             cli,
             "http://foo:bar@foo/beef".try_into().unwrap(),
             Duration::ZERO,
+            0,
             Some(DomainFlags::new([FLAG_PRERENDER])),
         );
 
@@ -745,23 +768,33 @@ mod test {
             domains,
             vec![
                 CustomDomain::new(fqdn!("foo.bar"), principal!("aaaaa-aa"))
-                    .set_flag(FLAG_PRERENDER),
+                    .with_flag(FLAG_PRERENDER),
                 CustomDomain::new(
                     fqdn!("2athis-domain-is-exactly-fifty-one-characters-l.com"),
                     principal!("qoctq-giaaa-aaaaa-aaaea-cai")
                 )
-                .set_flag(FLAG_PRERENDER),
+                .with_flag(FLAG_PRERENDER),
             ]
         );
 
         let cli = Arc::new(MockClientBadDomain);
-        let prov =
-            GenericProvider::new(cli, "http://foo".try_into().unwrap(), Duration::ZERO, None);
+        let prov = GenericProvider::new(
+            cli,
+            "http://foo".try_into().unwrap(),
+            Duration::ZERO,
+            0,
+            None,
+        );
         assert!(prov.get_custom_domains().await.is_err());
 
         let cli = Arc::new(MockClientBadCanister);
-        let prov =
-            GenericProvider::new(cli, "http://foo".try_into().unwrap(), Duration::ZERO, None);
+        let prov = GenericProvider::new(
+            cli,
+            "http://foo".try_into().unwrap(),
+            Duration::ZERO,
+            0,
+            None,
+        );
         assert!(prov.get_custom_domains().await.is_err());
     }
 
@@ -782,6 +815,7 @@ mod test {
 
         let prov = LocalFileProvider::new(
             temp_file.path().to_path_buf(),
+            0,
             Some(DomainFlags::new([FLAG_PRERENDER])),
         );
         let mut domains: Vec<CustomDomain> = prov.get_custom_domains().await.unwrap();
@@ -792,17 +826,17 @@ mod test {
             domains,
             vec![
                 CustomDomain::new(fqdn!("foo.bar"), principal!("aaaaa-aa"))
-                    .set_flag(FLAG_PRERENDER),
+                    .with_flag(FLAG_PRERENDER),
                 CustomDomain::new(
                     fqdn!("test.example.com"),
                     principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
                 )
-                .set_flag(FLAG_PRERENDER),
+                .with_flag(FLAG_PRERENDER),
                 CustomDomain::new(
                     fqdn!("2athis-domain-is-exactly-fifty-one-characters-l.com"),
                     principal!("ryjl3-tyaaa-aaaaa-aaaba-cai"),
                 )
-                .set_flag(FLAG_PRERENDER),
+                .with_flag(FLAG_PRERENDER),
             ]
         );
     }
@@ -816,7 +850,7 @@ mod test {
         writeln!(temp_file, "foo.bar aaaaa-aa").unwrap();
         temp_file.flush().unwrap();
 
-        let prov = LocalFileProvider::new(temp_file.path().to_path_buf(), None);
+        let prov = LocalFileProvider::new(temp_file.path().to_path_buf(), 0, None);
         let result = prov.get_custom_domains().await;
 
         assert!(result.is_err());
@@ -826,7 +860,7 @@ mod test {
 
     #[tokio::test]
     async fn test_local_file_provider_file_not_found() {
-        let prov = LocalFileProvider::new("/nonexistent/path/to/file.txt".into(), None);
+        let prov = LocalFileProvider::new("/nonexistent/path/to/file.txt".into(), 0, None);
         let result = prov.get_custom_domains().await;
 
         assert!(result.is_err());
