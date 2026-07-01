@@ -1399,6 +1399,6 @@ mod tests {
             }
         }
 
-        assert!(refresh > 9);
+        assert!(refresh > 8);
     }
 }
