@@ -93,7 +93,7 @@ impl FromStr for DomainFlags {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut flags = Self::default();
         for x in s.split('|') {
-            let flag = DomainFlag::from_str(x)?;
+            let flag = DomainFlag::from_str(x.trim())?;
             flags.set_flag(flag);
         }
 
@@ -264,7 +264,7 @@ mod tests {
             "prerender|test"
         );
 
-        let flags = DomainFlags::from_str("test|prerender").unwrap();
+        let flags = DomainFlags::from_str("test | prerender").unwrap();
         assert!(flags.has_flag(FLAG_PRERENDER));
         assert!(flags.has_flag(FLAG_TEST));
 
