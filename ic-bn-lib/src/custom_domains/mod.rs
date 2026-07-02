@@ -6,7 +6,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use ahash::{HashMap, HashMapExt};
@@ -20,7 +20,7 @@ use fqdn::{FQDN, Fqdn};
 use http::header::AUTHORIZATION;
 use ic_bn_lib_common::{
     traits::{custom_domains::ProvidesCustomDomains, http::Client},
-    types::CustomDomain,
+    types::{CustomDomain, DomainFlags},
 };
 use reqwest::{Method, Request, Url};
 use serde::Deserialize;
@@ -76,6 +76,8 @@ async fn get_custom_domains_from_url(
     cli: &Arc<dyn Client>,
     url: &Url,
     timeout: Duration,
+    priority: u8,
+    flags: Option<DomainFlags>,
 ) -> Result<Vec<CustomDomain>, Error> {
     let body = get_url_body(cli, url, timeout)
         .await
@@ -98,6 +100,8 @@ async fn get_custom_domains_from_url(
             name: k,
             canister_id: v,
             timestamp: 0,
+            priority,
+            flags,
         })
         .collect::<Vec<_>>())
 }
@@ -108,6 +112,8 @@ pub struct GenericProvider {
     http_client: Arc<dyn Client>,
     url: Url,
     timeout: Duration,
+    priority: u8,
+    flags: Option<DomainFlags>,
 }
 
 impl Debug for GenericProvider {
@@ -119,7 +125,14 @@ impl Debug for GenericProvider {
 #[async_trait]
 impl ProvidesCustomDomains for GenericProvider {
     async fn get_custom_domains(&self) -> Result<Vec<CustomDomain>, Error> {
-        get_custom_domains_from_url(&self.http_client, &self.url, self.timeout).await
+        get_custom_domains_from_url(
+            &self.http_client,
+            &self.url,
+            self.timeout,
+            self.priority,
+            self.flags,
+        )
+        .await
     }
 }
 
@@ -137,6 +150,8 @@ pub struct GenericProviderTimestamped {
     http_client: Arc<dyn Client>,
     url: Url,
     timeout: Duration,
+    priority: u8,
+    flags: Option<DomainFlags>,
     #[new(default)]
     timestamp: AtomicU64,
     #[new(default)]
@@ -181,9 +196,15 @@ impl ProvidesCustomDomains for GenericProviderTimestamped {
         };
 
         // Otherwise fetch a fresh version from the provided URL
-        let domains = get_custom_domains_from_url(&self.http_client, &domains_url, self.timeout)
-            .await
-            .context("unable to fetch custom domains")?;
+        let domains = get_custom_domains_from_url(
+            &self.http_client,
+            &domains_url,
+            self.timeout,
+            self.priority,
+            self.flags,
+        )
+        .await
+        .context("unable to fetch custom domains")?;
 
         warn!("{self:?}: new timestamp, got {} domains", domains.len());
 
@@ -242,10 +263,15 @@ pub struct GenericProviderDiff {
     http_client: Arc<dyn Client>,
     url: Url,
     timeout: Duration,
+    priority: u8,
+    flags: Option<DomainFlags>,
+    full_refresh_interval: Duration,
     #[new(default)]
     timestamp: AtomicU64,
     #[new(default)]
     cache: Mutex<HashMap<FQDN, Principal>>,
+    #[new(default)]
+    last_full_refresh: Mutex<Option<Instant>>,
 }
 
 impl GenericProviderDiff {
@@ -268,6 +294,7 @@ impl GenericProviderDiff {
             .context("unable to get seed response")?;
 
         *self.cache.lock().unwrap() = resp.created;
+        *self.last_full_refresh.lock().unwrap() = Some(Instant::now());
         self.timestamp.store(resp.timestamp, Ordering::SeqCst);
 
         Ok(())
@@ -284,6 +311,8 @@ impl GenericProviderDiff {
                 name,
                 canister_id,
                 timestamp: 0,
+                priority: self.priority,
+                flags: self.flags,
             })
             .collect()
     }
@@ -300,8 +329,14 @@ impl ProvidesCustomDomains for GenericProviderDiff {
     async fn get_custom_domains(&self) -> Result<Vec<CustomDomain>, Error> {
         let ts = self.timestamp.load(Ordering::SeqCst);
 
+        let time_to_refresh = self
+            .last_full_refresh
+            .lock()
+            .unwrap()
+            .is_none_or(|x| x.elapsed() > self.full_refresh_interval);
+
         // If the timestamp is zero - we need to seed our cache with full snapshot
-        if ts == 0 {
+        if ts == 0 || time_to_refresh {
             self.seed()
                 .await
                 .context("unable to download initial snapshot")?;
@@ -353,6 +388,8 @@ impl ProvidesCustomDomains for GenericProviderDiff {
 #[derive(new)]
 pub struct LocalFileProvider {
     file_path: PathBuf,
+    priority: u8,
+    flags: Option<DomainFlags>,
 }
 
 impl Debug for LocalFileProvider {
@@ -397,6 +434,8 @@ impl ProvidesCustomDomains for LocalFileProvider {
                 name,
                 canister_id,
                 timestamp: 0,
+                priority: self.priority,
+                flags: self.flags,
             });
         }
 
@@ -409,7 +448,7 @@ mod test {
     use ::http::Response as HttpResponse;
     use async_trait::async_trait;
     use fqdn::fqdn;
-    use ic_bn_lib_common::principal;
+    use ic_bn_lib_common::{principal, types::FLAG_PRERENDER};
     use itertools::Itertools;
     use serde_json::json;
 
@@ -553,7 +592,14 @@ mod test {
     #[tokio::test]
     async fn test_generic_provider_diff() {
         let cli = Arc::new(MockClientDiff);
-        let prov = GenericProviderDiff::new(cli, "http://foo".try_into().unwrap(), Duration::ZERO);
+        let prov = GenericProviderDiff::new(
+            cli,
+            "http://foo".try_into().unwrap(),
+            Duration::ZERO,
+            0,
+            Some(DomainFlags::new([FLAG_PRERENDER])),
+            Duration::from_secs(300),
+        );
 
         // Check that 1st call provides the seed set
         let domains: Vec<CustomDomain> = prov
@@ -567,16 +613,13 @@ mod test {
         assert_eq!(
             domains,
             vec![
-                CustomDomain {
-                    name: fqdn!("foo.bar2"),
-                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
-                    timestamp: 0,
-                },
-                CustomDomain {
-                    name: fqdn!("2athis-domain-is-exactly-fifty-one-characters-l.com"),
-                    canister_id: principal!("aaaaa-aa"),
-                    timestamp: 0,
-                },
+                CustomDomain::new(fqdn!("foo.bar2"), principal!("qoctq-giaaa-aaaaa-aaaea-cai"))
+                    .with_flag(FLAG_PRERENDER),
+                CustomDomain::new(
+                    fqdn!("2athis-domain-is-exactly-fifty-one-characters-l.com"),
+                    principal!("aaaaa-aa"),
+                )
+                .with_flag(FLAG_PRERENDER)
             ]
         );
 
@@ -592,21 +635,12 @@ mod test {
         assert_eq!(
             domains,
             vec![
-                CustomDomain {
-                    name: fqdn!("foo.bar2"),
-                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
-                    timestamp: 0,
-                },
-                CustomDomain {
-                    name: fqdn!("foo.bar3"),
-                    canister_id: principal!("aaaaa-aa"),
-                    timestamp: 0,
-                },
-                CustomDomain {
-                    name: fqdn!("foo.bar4"),
-                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
-                    timestamp: 0,
-                },
+                CustomDomain::new(fqdn!("foo.bar2"), principal!("qoctq-giaaa-aaaaa-aaaea-cai"))
+                    .with_flag(FLAG_PRERENDER),
+                CustomDomain::new(fqdn!("foo.bar3"), principal!("aaaaa-aa"))
+                    .with_flag(FLAG_PRERENDER),
+                CustomDomain::new(fqdn!("foo.bar4"), principal!("qoctq-giaaa-aaaaa-aaaea-cai"))
+                    .with_flag(FLAG_PRERENDER),
             ]
         );
 
@@ -621,19 +655,23 @@ mod test {
 
         assert_eq!(
             domains,
-            vec![CustomDomain {
-                name: fqdn!("foo.bar5"),
-                canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
-                timestamp: 0,
-            },]
+            vec![
+                CustomDomain::new(fqdn!("foo.bar5"), principal!("qoctq-giaaa-aaaaa-aaaea-cai"))
+                    .with_flag(FLAG_PRERENDER)
+            ]
         );
     }
 
     #[tokio::test]
     async fn test_generic_provider_timestamped() {
         let cli = Arc::new(MockClientTimestamped(AtomicU64::new(0)));
-        let prov =
-            GenericProviderTimestamped::new(cli, "http://foo".try_into().unwrap(), Duration::ZERO);
+        let prov = GenericProviderTimestamped::new(
+            cli,
+            "http://foo".try_into().unwrap(),
+            Duration::ZERO,
+            0,
+            Some(DomainFlags::new([FLAG_PRERENDER])),
+        );
 
         // Check that 1st call provides the 1st set of domains
         let domains: Vec<CustomDomain> = prov
@@ -647,16 +685,13 @@ mod test {
         assert_eq!(
             domains,
             vec![
-                CustomDomain {
-                    name: fqdn!("bar.foo"),
-                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
-                    timestamp: 0,
-                },
-                CustomDomain {
-                    name: fqdn!("2athis-domain-is-exactly-fifty-one-characters-l.com"),
-                    canister_id: principal!("aaaaa-aa"),
-                    timestamp: 0,
-                },
+                CustomDomain::new(fqdn!("bar.foo"), principal!("qoctq-giaaa-aaaaa-aaaea-cai"))
+                    .with_flag(FLAG_PRERENDER),
+                CustomDomain::new(
+                    fqdn!("2athis-domain-is-exactly-fifty-one-characters-l.com"),
+                    principal!("aaaaa-aa")
+                )
+                .with_flag(FLAG_PRERENDER),
             ]
         );
 
@@ -672,16 +707,13 @@ mod test {
         assert_eq!(
             domains,
             vec![
-                CustomDomain {
-                    name: fqdn!("bar.foo"),
-                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
-                    timestamp: 0,
-                },
-                CustomDomain {
-                    name: fqdn!("2athis-domain-is-exactly-fifty-one-characters-l.com"),
-                    canister_id: principal!("aaaaa-aa"),
-                    timestamp: 0,
-                },
+                CustomDomain::new(fqdn!("bar.foo"), principal!("qoctq-giaaa-aaaaa-aaaea-cai"))
+                    .with_flag(FLAG_PRERENDER),
+                CustomDomain::new(
+                    fqdn!("2athis-domain-is-exactly-fifty-one-characters-l.com"),
+                    principal!("aaaaa-aa")
+                )
+                .with_flag(FLAG_PRERENDER)
             ]
         );
 
@@ -697,16 +729,10 @@ mod test {
         assert_eq!(
             domains,
             vec![
-                CustomDomain {
-                    name: fqdn!("bar.foos"),
-                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
-                    timestamp: 0,
-                },
-                CustomDomain {
-                    name: fqdn!("foo.barr"),
-                    canister_id: principal!("aaaaa-aa"),
-                    timestamp: 0,
-                },
+                CustomDomain::new(fqdn!("bar.foos"), principal!("qoctq-giaaa-aaaaa-aaaea-cai"))
+                    .with_flag(FLAG_PRERENDER),
+                CustomDomain::new(fqdn!("foo.barr"), principal!("aaaaa-aa"))
+                    .with_flag(FLAG_PRERENDER)
             ]
         );
 
@@ -722,16 +748,10 @@ mod test {
         assert_eq!(
             domains,
             vec![
-                CustomDomain {
-                    name: fqdn!("bar.foos"),
-                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
-                    timestamp: 0,
-                },
-                CustomDomain {
-                    name: fqdn!("foo.barr"),
-                    canister_id: principal!("aaaaa-aa"),
-                    timestamp: 0,
-                },
+                CustomDomain::new(fqdn!("bar.foos"), principal!("qoctq-giaaa-aaaaa-aaaea-cai"))
+                    .with_flag(FLAG_PRERENDER),
+                CustomDomain::new(fqdn!("foo.barr"), principal!("aaaaa-aa"))
+                    .with_flag(FLAG_PRERENDER),
             ]
         );
     }
@@ -743,6 +763,8 @@ mod test {
             cli,
             "http://foo:bar@foo/beef".try_into().unwrap(),
             Duration::ZERO,
+            0,
+            Some(DomainFlags::new([FLAG_PRERENDER])),
         );
 
         let domains: Vec<CustomDomain> = prov
@@ -756,25 +778,34 @@ mod test {
         assert_eq!(
             domains,
             vec![
-                CustomDomain {
-                    name: fqdn!("foo.bar"),
-                    canister_id: principal!("aaaaa-aa"),
-                    timestamp: 0,
-                },
-                CustomDomain {
-                    name: fqdn!("2athis-domain-is-exactly-fifty-one-characters-l.com"),
-                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
-                    timestamp: 0,
-                },
+                CustomDomain::new(fqdn!("foo.bar"), principal!("aaaaa-aa"))
+                    .with_flag(FLAG_PRERENDER),
+                CustomDomain::new(
+                    fqdn!("2athis-domain-is-exactly-fifty-one-characters-l.com"),
+                    principal!("qoctq-giaaa-aaaaa-aaaea-cai")
+                )
+                .with_flag(FLAG_PRERENDER),
             ]
         );
 
         let cli = Arc::new(MockClientBadDomain);
-        let prov = GenericProvider::new(cli, "http://foo".try_into().unwrap(), Duration::ZERO);
+        let prov = GenericProvider::new(
+            cli,
+            "http://foo".try_into().unwrap(),
+            Duration::ZERO,
+            0,
+            None,
+        );
         assert!(prov.get_custom_domains().await.is_err());
 
         let cli = Arc::new(MockClientBadCanister);
-        let prov = GenericProvider::new(cli, "http://foo".try_into().unwrap(), Duration::ZERO);
+        let prov = GenericProvider::new(
+            cli,
+            "http://foo".try_into().unwrap(),
+            Duration::ZERO,
+            0,
+            None,
+        );
         assert!(prov.get_custom_domains().await.is_err());
     }
 
@@ -793,7 +824,11 @@ mod test {
         .unwrap();
         temp_file.flush().unwrap();
 
-        let prov = LocalFileProvider::new(temp_file.path().to_path_buf());
+        let prov = LocalFileProvider::new(
+            temp_file.path().to_path_buf(),
+            0,
+            Some(DomainFlags::new([FLAG_PRERENDER])),
+        );
         let mut domains: Vec<CustomDomain> = prov.get_custom_domains().await.unwrap();
         domains.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -801,21 +836,18 @@ mod test {
         assert_eq!(
             domains,
             vec![
-                CustomDomain {
-                    name: fqdn!("foo.bar"),
-                    canister_id: principal!("aaaaa-aa"),
-                    timestamp: 0,
-                },
-                CustomDomain {
-                    name: fqdn!("test.example.com"),
-                    canister_id: principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
-                    timestamp: 0,
-                },
-                CustomDomain {
-                    name: fqdn!("2athis-domain-is-exactly-fifty-one-characters-l.com"),
-                    canister_id: principal!("ryjl3-tyaaa-aaaaa-aaaba-cai"),
-                    timestamp: 0,
-                },
+                CustomDomain::new(fqdn!("foo.bar"), principal!("aaaaa-aa"))
+                    .with_flag(FLAG_PRERENDER),
+                CustomDomain::new(
+                    fqdn!("test.example.com"),
+                    principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
+                )
+                .with_flag(FLAG_PRERENDER),
+                CustomDomain::new(
+                    fqdn!("2athis-domain-is-exactly-fifty-one-characters-l.com"),
+                    principal!("ryjl3-tyaaa-aaaaa-aaaba-cai"),
+                )
+                .with_flag(FLAG_PRERENDER),
             ]
         );
     }
@@ -829,7 +861,7 @@ mod test {
         writeln!(temp_file, "foo.bar aaaaa-aa").unwrap();
         temp_file.flush().unwrap();
 
-        let prov = LocalFileProvider::new(temp_file.path().to_path_buf());
+        let prov = LocalFileProvider::new(temp_file.path().to_path_buf(), 0, None);
         let result = prov.get_custom_domains().await;
 
         assert!(result.is_err());
@@ -839,7 +871,7 @@ mod test {
 
     #[tokio::test]
     async fn test_local_file_provider_file_not_found() {
-        let prov = LocalFileProvider::new("/nonexistent/path/to/file.txt".into());
+        let prov = LocalFileProvider::new("/nonexistent/path/to/file.txt".into(), 0, None);
         let result = prov.get_custom_domains().await;
 
         assert!(result.is_err());
