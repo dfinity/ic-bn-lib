@@ -6,7 +6,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use ahash::{HashMap, HashMapExt};
@@ -265,10 +265,13 @@ pub struct GenericProviderDiff {
     timeout: Duration,
     priority: u8,
     flags: Option<DomainFlags>,
+    full_refresh_interval: Duration,
     #[new(default)]
     timestamp: AtomicU64,
     #[new(default)]
     cache: Mutex<HashMap<FQDN, Principal>>,
+    #[new(default)]
+    last_full_refresh: Mutex<Option<Instant>>,
 }
 
 impl GenericProviderDiff {
@@ -291,6 +294,7 @@ impl GenericProviderDiff {
             .context("unable to get seed response")?;
 
         *self.cache.lock().unwrap() = resp.created;
+        *self.last_full_refresh.lock().unwrap() = Some(Instant::now());
         self.timestamp.store(resp.timestamp, Ordering::SeqCst);
 
         Ok(())
@@ -325,8 +329,14 @@ impl ProvidesCustomDomains for GenericProviderDiff {
     async fn get_custom_domains(&self) -> Result<Vec<CustomDomain>, Error> {
         let ts = self.timestamp.load(Ordering::SeqCst);
 
+        let time_to_refresh = self
+            .last_full_refresh
+            .lock()
+            .unwrap()
+            .is_none_or(|x| x.elapsed() > self.full_refresh_interval);
+
         // If the timestamp is zero - we need to seed our cache with full snapshot
-        if ts == 0 {
+        if ts == 0 || time_to_refresh {
             self.seed()
                 .await
                 .context("unable to download initial snapshot")?;
@@ -588,6 +598,7 @@ mod test {
             Duration::ZERO,
             0,
             Some(DomainFlags::new([FLAG_PRERENDER])),
+            Duration::from_secs(300),
         );
 
         // Check that 1st call provides the seed set
