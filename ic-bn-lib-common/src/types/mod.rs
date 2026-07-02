@@ -111,7 +111,7 @@ impl Display for DomainFlags {
             }
         }
 
-        write!(f, "{}", flags.join(", "))
+        write!(f, "{}", flags.join("|"))
     }
 }
 
@@ -138,7 +138,7 @@ impl CustomDomain {
     }
 
     pub fn has_flag(&self, flag: DomainFlag) -> bool {
-        self.flags.is_some_and(|x| x.0 & flag.0 == 1)
+        self.flags.is_some_and(|x| x.has_flag(flag))
     }
 
     pub fn set_flag(&mut self, flag: DomainFlag) {
@@ -261,7 +261,7 @@ mod tests {
 
         assert_eq!(
             DomainFlags::new([FLAG_PRERENDER, FLAG_TEST]).to_string(),
-            "prerender, test"
+            "prerender|test"
         );
 
         let flags = DomainFlags::from_str("test|prerender").unwrap();
