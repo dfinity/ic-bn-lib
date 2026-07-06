@@ -40,10 +40,11 @@ arrayvec = { workspace = true }
 async-channel = "2.3.1"
 async-trait = { workspace = true }
 axum = { workspace = true }
-axum-extra = "0.12.6"
+axum-extra = { version = "0.12.6", features = ["middleware"] }
 base64 = "0.22.1"
 bytes = "1.10.0"
 candid = { workspace = true }
+chrono = { workspace = true }
 clap = { workspace = true }
 chacha20poly1305 = "0.10.1"
 derive-new = { workspace = true }
@@ -80,6 +81,7 @@ mail-parser = { workspace = true, optional = true }
 moka = { version = "0.12.15", features = ["sync", "future"] }
 nix = { version = "0.30.0", features = ["signal"] }
 ppp = "2.3.0"
+pem = { workspace = true }
 prometheus = { workspace = true }
 prost = { version = "0.14.1", optional = true }
 prost-types = { version = "0.14.1", optional = true }
@@ -127,8 +129,11 @@ tokio-io-timeout = "1.2.0"
 tower = { version = "0.5.1", features = ["util"] }
 tower_governor = { version = "0.8" }
 tower-service = { workspace = true }
+tower-http = { workspace = true }
 tracing = { version = "0.1.40", features = ["attributes"] }
 url = { workspace = true }
+utoipa = { workspace = true }
+utoipa-swagger-ui = { workspace = true }
 # DO NOT upgrade, this breaks monorepo compatibility
 # Read https://github.com/uuid-rs/uuid/releases/tag/1.13.0
 uuid = { version = "=1.12.1", features = ["v7"] }

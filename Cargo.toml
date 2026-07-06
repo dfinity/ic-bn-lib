@@ -19,6 +19,7 @@ arrayvec = "0.7"
 async-trait = "0.1.83"
 axum = "0.8.1"
 candid = "0.10.10"
+chrono = "0.4"
 clap = { version = "4.5.20", features = ["derive", "string", "env"] }
 derive-new = "0.7.0"
 fqdn = { version = "0.5.2" }
@@ -49,6 +50,7 @@ mail-send = { version = "0.6.0", default-features = false, features = [
 ] }
 mockall = "0.13.0"
 parse-size = { version = "1.1.0", features = ["std"] }
+pem = "3.0.5"
 prometheus = "0.14.0"
 reqwest = { version = "0.13.2", default-features = false, features = [
     "blocking",
@@ -83,7 +85,10 @@ strum_macros = "0.28"
 thiserror = "2.0.3"
 tokio-util = { version = "0.7.12", features = ["full"] }
 tower-service = "0.3.3"
+tower-http = { version = "0.6.6", features = ["trace"] }
 url = "2.5.3"
+utoipa = { version = "5.4.0", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 # DO NOT upgrade, this breaks monorepo compatibility
 # Read https://github.com/uuid-rs/uuid/releases/tag/1.13.0
 uuid = { version = "=1.12.1", features = ["v7", "serde"] }
