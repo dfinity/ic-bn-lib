@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: never
+  CARGO_NET_RETRY: 10 # retries fetching Rust crates on network failures
 
 jobs:
   test:
@@ -21,11 +22,8 @@ jobs:
       - name: Install deps
         run: cargo install cargo-all-features
 
-      - name: Run tests (all feature combinations)
-        run: cargo test-all-features
+      - name: Add WASM target
+        run: rustup target add wasm32-unknown-unknown
 
-      - name: Cleanup
-        run: cargo clean
-
-      - name: Run ACME tests
-        run: ./ic-bn-lib/test-acme.sh
+      - name: Run tests
+        run: ./run_tests.sh

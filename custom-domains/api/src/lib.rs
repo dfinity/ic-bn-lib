@@ -216,7 +216,7 @@ pub struct CertificatesPage {
 }
 
 impl CertificatesPage {
-    pub const fn new(items: Vec<RegisteredDomain>, next_key: Option<String>) -> Self {
+    pub fn new(items: Vec<RegisteredDomain>, next_key: Option<String>) -> Self {
         Self { items, next_key }
     }
 }
@@ -230,7 +230,7 @@ pub struct ListCertificatesPageInput {
 }
 
 impl ListCertificatesPageInput {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             start_key: None,
             limit: None,
@@ -260,7 +260,7 @@ pub struct DomainsPage {
 }
 
 impl DomainsPage {
-    pub const fn new(items: Vec<ListedDomainEntry>, next_key: Option<String>) -> Self {
+    pub fn new(items: Vec<ListedDomainEntry>, next_key: Option<String>) -> Self {
         Self { items, next_key }
     }
 }
@@ -275,7 +275,7 @@ pub struct ListDomainsPageInput {
 }
 
 impl ListDomainsPageInput {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             start_key: None,
             limit: None,

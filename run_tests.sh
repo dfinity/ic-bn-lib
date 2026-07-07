@@ -34,5 +34,6 @@ cargo test --all-features --profile dev --workspace --lib || { log "Unit tests f
 log "Unit tests completed successfully"
 
 log "Running integration tests with all features enabled"
-cargo test --all-features --profile dev --workspace --test '*' -- --nocapture || { log "Integration tests failed"; exit 1; }
+# Run with 1 thread to avoid race conditions when multiple tests run Pebble concurrently on the same port
+cargo test --all-features --profile dev --workspace -- --test-threads=1 --ignored --nocapture || { log "Integration tests failed"; exit 1; }
 log "Integration tests completed successfully"

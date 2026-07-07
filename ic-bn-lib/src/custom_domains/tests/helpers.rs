@@ -3,16 +3,14 @@ use std::{fs, path::PathBuf, sync::Once};
 use anyhow::{Context, anyhow};
 use candid::{Decode, Encode};
 use hex::encode;
+use ic_custom_domains_canister_api::{
+    FetchTaskResult, GetDomainEntryResult, GetDomainStatusResult, HasNextTaskResult, InitArg,
+    InputTask, SubmitTaskResult, TaskKind, TaskResult, TryAddTaskResult,
+};
 use pocket_ic::{PocketIcBuilder, nonblocking::PocketIc};
 use tracing::info;
 
-use crate::{
-    custom_domains::canister::api::{
-        FetchTaskResult, GetDomainEntryResult, GetDomainStatusResult, HasNextTaskResult, InitArg,
-        InputTask, SubmitTaskResult, TaskKind, TaskResult, TryAddTaskResult,
-    },
-    ic_agent::export::Principal,
-};
+use crate::ic_agent::export::Principal;
 
 static INIT_LOGGING: Once = Once::new();
 

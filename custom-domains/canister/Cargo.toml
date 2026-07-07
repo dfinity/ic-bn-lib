@@ -17,7 +17,7 @@ candid = { workspace = true }
 fqdn = { workspace = true }
 ic-cdk = { workspace = true }
 ic-cdk-timers = { workspace = true }
-ic-bn-lib = { workspace = true }
+ic-custom-domains-canister-api = { workspace = true }
 ic-http-types = { workspace = true }
 ic-stable-structures = { workspace = true }
 prometheus = { workspace = true }

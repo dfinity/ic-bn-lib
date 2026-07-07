@@ -1,5 +1,5 @@
 use candid::Principal;
-use ic_bn_lib::custom_domains::canister::api::{
+use ic_custom_domains_canister_api::{
     CERT_EXPIRATION_ALERT_THRESHOLD, CERTIFICATE_VALIDITY_FRACTION, CertificatesPage,
     DEFAULT_PAGE_LIMIT, DomainEntry as DomainEntryApi, DomainStatus, DomainsPage,
     EXPIRED_DOMAIN_EXPIRATION_TIME, FetchTaskResult, GetDomainEntryResult, GetDomainStatusResult,
@@ -885,9 +885,7 @@ impl From<DomainEntry> for DomainEntryApi {
 mod tests {
     use super::*;
     use candid::Principal;
-    use ic_bn_lib::custom_domains::canister::api::{
-        IssueCertificateOutput, TaskKind as TaskKindApi,
-    };
+    use ic_custom_domains_canister_api::{IssueCertificateOutput, TaskKind as TaskKindApi};
     use ic_stable_structures::memory_manager::{MemoryId, MemoryManager};
 
     /// Mirrors the `DomainEntry` layout *before* the `wildcard` field was added, so we can

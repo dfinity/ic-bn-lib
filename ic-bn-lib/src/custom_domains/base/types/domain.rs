@@ -1,12 +1,12 @@
 use std::str::FromStr;
 
-use crate::custom_domains::canister::api::{
-    DomainStatus as ApiDomainStatus, RegisteredDomain as ApiRegisteredDomain,
-    RegistrationStatus as ApiRegistrationStatus,
-};
 use candid::Principal;
 use derive_new::new;
 use fqdn::FQDN;
+use ic_custom_domains_canister_api::{
+    DomainStatus as ApiDomainStatus, RegisteredDomain as ApiRegisteredDomain,
+    RegistrationStatus as ApiRegistrationStatus,
+};
 use serde::{Deserialize, Serialize, Serializer};
 
 /// Represents a fully registered domain with encrypted certificate and private key.

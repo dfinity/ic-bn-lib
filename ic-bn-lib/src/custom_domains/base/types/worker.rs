@@ -891,6 +891,21 @@ mod tests {
         tls::acme::instant_acme::RevocationRequest,
     };
 
+    // A self-signed cert generated once and reused by MockAcmeClient, since key generation
+    // and signing are expensive in unoptimized builds and would otherwise dominate the
+    // timing-sensitive worker tests.
+    fn mock_cert_pem() -> &'static str {
+        static CERT_PEM: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        CERT_PEM.get_or_init(|| {
+            let key_pair = KeyPair::generate().unwrap();
+            let mut params = CertificateParams::new(vec!["example.org".to_string()]).unwrap();
+            params
+                .distinguished_name
+                .push(DnType::CommonName, "example.org");
+            params.self_signed(&key_pair).unwrap().pem()
+        })
+    }
+
     // Mock ACME client that simulates certificate issuance and revocation
     struct MockAcmeClient;
 
@@ -898,25 +913,14 @@ mod tests {
     impl AcmeCertificateClient for MockAcmeClient {
         async fn issue(
             &self,
-            names: Vec<String>,
+            _names: Vec<String>,
             _private_key: Option<Vec<u8>>,
         ) -> Result<AcmeCert, AcmeError> {
             // Simulate some delay to make sure executor switching can happen
             sleep(Duration::from_millis(10)).await;
 
-            // Generate cert + key
-            let key_pair = KeyPair::generate().unwrap();
-
-            let mut params = CertificateParams::new(names.clone()).unwrap();
-            params
-                .distinguished_name
-                .push(DnType::CommonName, &names[0]);
-
-            let cert = params.self_signed(&key_pair).unwrap();
-            let cert_pem = cert.pem();
-
             Ok(AcmeCert {
-                cert: cert_pem.into_bytes(),
+                cert: mock_cert_pem().as_bytes().to_vec(),
                 key: vec![],
             })
         }
@@ -930,6 +934,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_worker_run() {
+        // Warm up the cached mock certificate so the one-time generation cost isn't
+        // counted against the timing budget below.
+        mock_cert_pem();
+
         // Arrange
         let mut repository = MockRepository::new();
         repository

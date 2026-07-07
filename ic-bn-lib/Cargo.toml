@@ -73,6 +73,7 @@ hyper-rustls = { version = "0.27.5", optional = true, default-features = false, 
 hyper-util = { workspace = true }
 ic-agent = { workspace = true }
 ic-bn-lib-common = { workspace = true }
+ic-custom-domains-canister-api = { workspace = true }
 indoc = "2.0.6"
 instant-acme = { workspace = true, optional = true }
 itertools = "0.14.0"
@@ -146,6 +147,7 @@ zeroize = { version = "1.8.1", features = ["derive"] }
 zstd = "0.13.2"
 
 [dev-dependencies]
+axum-server = "0.8.0"
 criterion = { version = "0.6", features = ["html_reports", "async_tokio"] }
 mail-send = { workspace = true }
 mockall = { workspace = true }

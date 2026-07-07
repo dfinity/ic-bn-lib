@@ -1,11 +1,6 @@
 use std::str::FromStr;
 
-use crate::custom_domains::canister::api::{
-    FetchTaskError as ApiFetchTaskError, GetDomainStatusError as ApiGetDomainStatusError,
-    GetLastChangeTimeError as ApiGetLastChangeTimeError, HasNextTaskError as ApiHasNextTaskError,
-    ListCertificatesPageError as ApiListCertificatesPageError,
-    SubmitTaskError as ApiSubmitTaskError, TryAddTaskError as ApiTryAddTaskError,
-};
+use anyhow::anyhow;
 use async_trait::async_trait;
 use fqdn::FQDN;
 use strum::IntoStaticStr;
@@ -18,7 +13,12 @@ use super::super::{
         task::{InputTask, ScheduledTask, TaskResult},
     },
 };
-use anyhow::anyhow;
+use ic_custom_domains_canister_api::{
+    FetchTaskError as ApiFetchTaskError, GetDomainStatusError as ApiGetDomainStatusError,
+    GetLastChangeTimeError as ApiGetLastChangeTimeError, HasNextTaskError as ApiHasNextTaskError,
+    ListCertificatesPageError as ApiListCertificatesPageError,
+    SubmitTaskError as ApiSubmitTaskError, TryAddTaskError as ApiTryAddTaskError,
+};
 
 pub type TaskId = UtcTimestamp;
 

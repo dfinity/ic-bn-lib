@@ -1,11 +1,16 @@
 [workspace]
 resolver = "3"
-members = ["ic-bn-lib", "ic-bn-lib-common", "custom-domains-canister"]
+members = [
+    "ic-bn-lib",
+    "ic-bn-lib-common",
+    "custom-domains/canister",
+    "custom-domains/api",
+]
 default-members = [
     "ic-bn-lib",
     "ic-bn-lib-common",
-    "custom-domains-canister",
-    ".",
+    "custom-domains/canister",
+    "custom-domains/api",
 ]
 
 [workspace.package]
@@ -46,6 +51,7 @@ hyper-util = { version = "0.1.10", features = ["full"] }
 ic-agent = { version = "0.47.3", features = ["_internal_dynamic-routing"] }
 ic-cdk = "0.20"
 ic-cdk-timers = "1.0"
+ic-custom-domains-canister-api = { path = "./custom-domains/api" }
 ic-http-types = "0.1.0"
 ic-stable-structures = "0.7.0"
 ic-bn-lib = { path = "./ic-bn-lib", features = [

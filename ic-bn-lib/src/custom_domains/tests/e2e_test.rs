@@ -6,29 +6,10 @@ use async_trait::async_trait;
 use candid::Principal;
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, aead::OsRng};
 use fqdn::FQDN;
-use ic_bn_lib::{
-    ic_agent::{Agent, Identity, identity::BasicIdentity},
-    reqwest::{self, Url},
-    tests::pebble::{Env, dns::TokenManagerPebble},
-    tls::acme::client::ClientBuilder,
-};
 use ic_bn_lib_common::{
     traits::acme::{AcmeCertificateClient, TokenManager},
     types::acme::AcmeUrl,
 };
-use ic_custom_domains_backend::router::{RateLimitConfig, create_router};
-use ic_custom_domains_base::{
-    traits::{
-        repository::Repository,
-        validation::{ValidatesDomains, ValidationError},
-    },
-    types::{
-        cipher::CertificateCipher,
-        domain::RegistrationStatus,
-        worker::{Worker, WorkerConfig, WorkerMetrics},
-    },
-};
-use ic_custom_domains_canister_client::canister_client::CanisterClient;
 use pem::parse_many;
 use prometheus::Registry;
 use tokio::{spawn, time::sleep};
@@ -36,10 +17,29 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 use x509_parser::{parse_x509_certificate, prelude::GeneralName};
 
-mod helpers;
-use helpers::init_logging;
+use super::helpers::{TestEnv, init_logging};
 
-use crate::helpers::TestEnv;
+use crate::{
+    custom_domains::{
+        backend::router::{RateLimitConfig, create_router},
+        base::{
+            traits::{
+                repository::Repository,
+                validation::{ValidatesDomains, ValidationError},
+            },
+            types::{
+                cipher::CertificateCipher,
+                domain::RegistrationStatus,
+                worker::{Worker, WorkerConfig, WorkerMetrics},
+            },
+        },
+        canister::client::CanisterClient,
+    },
+    ic_agent::{Agent, Identity, identity::BasicIdentity},
+    reqwest::{self, Url},
+    tests::pebble::{Env, dns::TokenManagerPebble},
+    tls::acme::client::ClientBuilder,
+};
 
 const INIT_CANISTER_CALL_RETRY_DELAY: Duration = Duration::from_millis(100);
 const MAX_CANISTER_CALL_RETRY_DELAY: Duration = Duration::from_secs(2);
@@ -64,6 +64,7 @@ const WORKERS_COUNT: usize = 4;
 // 6. Get canister metrics and verify the expected stats of domain registrations
 // 7. Get workers metrics and verify they all have processed more than one task each
 
+#[ignore]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_pebble_test() -> anyhow::Result<()> {
     init_logging();

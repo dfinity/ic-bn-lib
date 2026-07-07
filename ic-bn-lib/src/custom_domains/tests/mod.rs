@@ -1,24 +1,26 @@
 use anyhow::anyhow;
 use candid::{Decode, Encode, Principal};
-use pocket_ic::nonblocking::PocketIc;
-use std::time::Duration;
-use tracing::info;
-
-use crate::custom_domains::canister::api::{
+use ic_custom_domains_canister_api::{
     CERTIFICATE_VALIDITY_FRACTION, DomainStatus, HasNextTaskError, HasNextTaskResult,
     IssueCertificateOutput, MAX_TASK_FAILURES, MIN_TASK_RETRY_DELAY, RegistrationStatus,
     STALE_DOMAINS_CLEANUP_INTERVAL, ScheduledTask as ScheduledTaskApi, ScheduledTask,
     SubmitTaskError, TASK_TIMEOUT, TaskFailReason, TaskKind, TaskOutcome, TaskOutput, TaskResult,
     UNREGISTERED_DOMAIN_EXPIRATION_TIME,
 };
+use pocket_ic::nonblocking::PocketIc;
+use std::time::Duration;
+use tracing::info;
+
 use helpers::{TestEnv, init_logging};
 
 const TICKS_AFTER_TIME_ADVANCE: u32 = 5; // make pocket-ic progress by some blocks to ensure time advancement takes place
 const CERTIFICATE_VALIDITY_DURATION_SECS: u64 = 100_000;
 const RATE_LIMIT_MAX_ATTEMPTS: u32 = 25;
 
+mod e2e_test;
 mod helpers;
 
+#[ignore]
 #[tokio::test]
 async fn test_canister_authorization() -> anyhow::Result<()> {
     init_logging();
@@ -37,6 +39,7 @@ async fn test_canister_authorization() -> anyhow::Result<()> {
 }
 
 /// Test that domains with failed registrations are eventually removed after the expiration time
+#[ignore]
 #[tokio::test]
 async fn test_unregistered_domain_deletion() -> anyhow::Result<()> {
     init_logging();
@@ -110,6 +113,7 @@ async fn test_unregistered_domain_deletion() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[ignore]
 #[tokio::test]
 async fn test_comprehensive_registration_scenario() -> anyhow::Result<()> {
     init_logging();

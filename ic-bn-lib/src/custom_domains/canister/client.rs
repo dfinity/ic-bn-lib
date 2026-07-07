@@ -22,6 +22,12 @@ use ic_bn_lib_common::{
     traits::{Run, custom_domains::ProvidesCustomDomains, tls::ProvidesCertificates},
     types::{CustomDomain, DomainFlags, tls::Pem},
 };
+use ic_custom_domains_canister_api::{
+    CertificatesPage, DomainStatus as DomainStatusApi, FetchTaskError, GetDomainStatusError,
+    GetLastChangeTimeError, HasNextTaskError, InputTask as InputTaskApi, ListCertificatesPageError,
+    ListCertificatesPageInput, ScheduledTask as ScheduledTaskApi, SubmitTaskError,
+    TaskResult as TaskResultApi, TryAddTaskError,
+};
 use tokio::{
     select,
     time::{interval, sleep},
@@ -29,23 +35,15 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
-use crate::custom_domains::{
-    base::{
-        traits::{
-            cipher::CiphersCertificates,
-            repository::{Repository, RepositoryError},
-            time::UtcTimestamp,
-        },
-        types::{
-            domain::{DomainStatus, RegisteredDomain},
-            task::{InputTask, ScheduledTask, TaskOutcome, TaskOutput, TaskResult},
-        },
+use crate::custom_domains::base::{
+    traits::{
+        cipher::CiphersCertificates,
+        repository::{Repository, RepositoryError},
+        time::UtcTimestamp,
     },
-    canister::api::{
-        CertificatesPage, DomainStatus as DomainStatusApi, FetchTaskError, GetDomainStatusError,
-        GetLastChangeTimeError, HasNextTaskError, InputTask as InputTaskApi,
-        ListCertificatesPageError, ListCertificatesPageInput, ScheduledTask as ScheduledTaskApi,
-        SubmitTaskError, TaskResult as TaskResultApi, TryAddTaskError,
+    types::{
+        domain::{DomainStatus, RegisteredDomain},
+        task::{InputTask, ScheduledTask, TaskOutcome, TaskOutput, TaskResult},
     },
 };
 use crate::ic_agent::Agent;

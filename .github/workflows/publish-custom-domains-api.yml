@@ -1,0 +1,29 @@
+name: Publish ic-custom-domains-canister-api to crates.io
+
+on:
+  workflow_dispatch:
+
+jobs:
+  publish-ic-custom-domains-canister-api:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write # Required for OIDC token exchange
+
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - uses: rust-lang/crates-io-auth-action@b7e9a28eded4986ec6b1fa40eeee8f8f165559ec # v1
+        id: auth
+
+      - run: cargo publish --package ic-custom-domains-canister-api --allow-dirty
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+      - name: Send Slack message
+        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            text: "New `ic-custom-domains-canister-api` crate has been published to crates.io"

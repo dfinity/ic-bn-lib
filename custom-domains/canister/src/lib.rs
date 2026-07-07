@@ -1,4 +1,9 @@
-use ic_bn_lib::custom_domains::canister::api::{
+use ic_cdk::{
+    api::{accept_message, msg_caller, time},
+    init, inspect_message, post_upgrade, query, trap, update,
+};
+use ic_cdk_timers::set_timer_interval;
+use ic_custom_domains_canister_api::{
     FetchTaskError, FetchTaskResult, GetDomainEntryError, GetDomainEntryResult,
     GetDomainStatusError, GetDomainStatusResult, GetLastChangeTimeError, GetLastChangeTimeResult,
     HasNextTaskError, HasNextTaskResult, InitArg, InputTask, ListCertificatesPageError,
@@ -6,11 +11,6 @@ use ic_bn_lib::custom_domains::canister::api::{
     ListDomainsPageInput, ListDomainsPageResult, STALE_DOMAINS_CLEANUP_INTERVAL, SubmitTaskError,
     SubmitTaskResult, TaskResult, TryAddTaskError, TryAddTaskResult,
 };
-use ic_cdk::{
-    api::{accept_message, msg_caller, time},
-    init, inspect_message, post_upgrade, query, trap, update,
-};
-use ic_cdk_timers::set_timer_interval;
 use ic_http_types::{HttpRequest, HttpResponse, HttpResponseBuilder};
 
 use crate::{
