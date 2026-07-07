@@ -1,7 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["ic-bn-lib", "ic-bn-lib-common"]
-default-members = ["ic-bn-lib", "ic-bn-lib-common"]
+members = ["ic-bn-lib", "ic-bn-lib-common", "custom-domains-canister"]
+default-members = [
+    "ic-bn-lib",
+    "ic-bn-lib-common",
+    "custom-domains-canister",
+    ".",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -19,10 +24,11 @@ arrayvec = "0.7"
 async-trait = "0.1.83"
 axum = "0.8.1"
 candid = "0.10.10"
+candid_parser = "0.3"
 chrono = "0.4"
 clap = { version = "4.5.20", features = ["derive", "string", "env"] }
 derive-new = "0.7.0"
-fqdn = { version = "0.5.2" }
+fqdn = { version = "0.5.2", features = ["punycode"] }
 hickory-proto = "0.26.1"
 hickory-resolver = { version = "0.26.1", default-features = false, features = [
     "tokio",
@@ -38,6 +44,15 @@ humantime = "2.2.0"
 hyper = "1.7.0"
 hyper-util = { version = "0.1.10", features = ["full"] }
 ic-agent = { version = "0.47.3", features = ["_internal_dynamic-routing"] }
+ic-cdk = "0.20"
+ic-cdk-timers = "1.0"
+ic-http-types = "0.1.0"
+ic-stable-structures = "0.7.0"
+ic-bn-lib = { path = "./ic-bn-lib", features = [
+    "custom-domains",
+    "cert-providers",
+    "acme-dns",
+] }
 ic-bn-lib-common = { version = "0.2", path = "./ic-bn-lib-common" }
 instant-acme = { version = "0.8.5", default-features = false, features = [
     "aws-lc-rs",
@@ -78,6 +93,7 @@ rustls-acme = { version = "0.15.1", default-features = false, features = [
     "aws-lc-rs",
 ] }
 serde = { version = "1.0.214", features = ["derive"] }
+serde_cbor = "0.11.2"
 smtp-proto = "0.2.1"
 socket2 = "0.6.0"
 strum = { version = "0.28", features = ["derive"] }

@@ -32,6 +32,9 @@ pub mod backend;
 pub mod base;
 pub mod canister;
 
+#[cfg(test)]
+mod tests;
+
 /// Looks up a custom domain canister id by a hostname
 pub trait LooksUpCustomDomain: Sync + Send + std::fmt::Debug {
     fn lookup_custom_domain(&self, hostname: &Fqdn) -> Option<Principal>;

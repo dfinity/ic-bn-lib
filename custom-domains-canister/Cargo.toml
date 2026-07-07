@@ -1,0 +1,29 @@
+[package]
+name = "ic-custom-domains-canister"
+version.workspace = true
+edition.workspace = true
+description = "Canister that manages custom domains lifecycle"
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+
+documentation = "https://docs.rs/ic-custom-domains-canister"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+candid = { workspace = true }
+fqdn = { workspace = true }
+ic-cdk = { workspace = true }
+ic-cdk-timers = { workspace = true }
+ic-bn-lib = { workspace = true }
+ic-http-types = { workspace = true }
+ic-stable-structures = { workspace = true }
+prometheus = { workspace = true }
+serde = { workspace = true }
+serde_cbor = { workspace = true }
+strum = { workspace = true }
+
+[dev-dependencies]
+candid_parser = { workspace = true }

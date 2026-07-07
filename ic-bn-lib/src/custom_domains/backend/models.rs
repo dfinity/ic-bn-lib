@@ -1,3 +1,5 @@
+#![allow(clippy::option_if_let_else)]
+
 use axum::{Json, http::StatusCode, response::IntoResponse};
 use candid::Principal;
 use derive_new::new;
