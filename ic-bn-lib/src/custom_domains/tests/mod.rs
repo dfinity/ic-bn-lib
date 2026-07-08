@@ -274,7 +274,7 @@ async fn verify_certificate_renewal_tasks_scheduled(env: &TestEnv) -> anyhow::Re
 }
 
 async fn add_task(env: &TestEnv, domain: &str, task_kind: TaskKind) -> anyhow::Result<()> {
-    env.try_add_task(domain.to_string(), TaskKind::Issue)
+    env.try_add_task(domain.to_string(), task_kind)
         .await?
         .map_err(|err| anyhow!("Failed to add task {task_kind:?} for {domain}: {err:?}"))?;
     Ok(())

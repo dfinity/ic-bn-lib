@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::Result;
 use tokio::time::sleep;
-use tracing::{debug, error, info, trace, warn, Level};
+use tracing::{Level, debug, error, info, trace, warn};
 
 /// Error returned when a retry operation times out.
 #[derive(Debug)]
@@ -17,13 +17,13 @@ pub struct RetryTimeoutError<E> {
     pub last_error: E,
 }
 
-/// Retries an async operation with exponential backoff until timeout.
+/// Retries an async operation with an interval until timeout.
 ///
 /// # Arguments
 /// * `operation` - Optional name for logging purposes
 /// * `log_level` - Log level for retry messages (defaults to INFO)
 /// * `timeout` - Maximum duration to keep retrying
-/// * `backoff` - Duration to wait between attempts
+/// * `interval` - Duration to wait between attempts
 /// * `f` - Async function to retry
 ///
 /// # Returns
@@ -33,7 +33,7 @@ pub async fn retry_async<F, Fut, R, E>(
     operation: Option<&str>,
     log_level: Option<Level>,
     timeout: Duration,
-    backoff: Duration,
+    interval: Duration,
     f: F,
 ) -> Result<(usize, R), RetryTimeoutError<E>>
 where
@@ -48,7 +48,7 @@ where
     if let Some(op) = operation {
         trace_msg(
             log_level,
-            format!("Retrying operation \"{op}\" for up to {timeout:?} with {backoff:?} backoff"),
+            format!("Retrying operation \"{op}\" for up to {timeout:?} with {interval:?} interval"),
         );
     }
 
@@ -83,7 +83,7 @@ where
                     );
                 }
 
-                sleep(backoff).await;
+                sleep(interval).await;
                 attempt += 1;
             }
         }

@@ -197,6 +197,14 @@ impl Validator {
     ///
     /// Ensures that any existing ACME challenge records point to the delegation domain
     /// or that no conflicting records exist that would interfere with certificate issuance.
+    ///
+    /// This covers cases when the domain has both TXT and CNAME records, for example:
+    ///
+    /// ;; ANSWER SECTION:
+    /// _acme-challenge.id.ai.         300 IN CNAME acme-challenge.id.ai.icp2.io.
+    /// _acme-challenge.id.ai.icp2.io. 300 IN TXT   "foobar2"
+    ///
+    /// So we check that `_acme-challenge.id.ai.icp2.io` is a subdomain of `icp2.io`
     async fn validate_no_txt_challenge(&self, domain: &FQDN) -> Result<(), ValidationError> {
         let hostname = format!("_acme-challenge.{domain}.");
         debug!("checking there are no conflicting ACME challenge records, resolving '{hostname}'");
