@@ -33,27 +33,27 @@ smtp = ["custom-domains", "dep:mail-auth", "dep:mail-parser", "dep:smtp-proto"]
 vector = ["dep:vrl", "dep:prost", "dep:prost-types"]
 
 [dependencies]
-ahash = "0.8.11"
+ahash = { workspace = true }
 anyhow = { workspace = true }
-arc-swap = "1.7.1"
+arc-swap = { workspace = true }
 arrayvec = { workspace = true }
-async-channel = "2.3.1"
+async-channel = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
-axum-extra = { version = "0.12.6", features = ["middleware"] }
-base64 = "0.22.1"
-bytes = "1.10.0"
+axum-extra = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
 candid = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
-chacha20poly1305 = "0.10.1"
+chacha20poly1305 = { workspace = true }
 derive-new = { workspace = true }
-flate2 = { version = "1.0", optional = true }
+flate2 = { workspace = true, optional = true }
 fqdn = { workspace = true }
-futures = "0.3.31"
-futures-util = "0.3.31"
-governor = "0.10.0" # must match tower-governor deps
-hex = { version = "0.4.3", optional = true }
+futures = { workspace = true }
+futures-util = { workspace = true }
+governor = { workspace = true }
+hex = { workspace = true, optional = true }
 hickory-proto = { workspace = true }
 hickory-resolver = { workspace = true }
 http = { workspace = true }
@@ -61,102 +61,78 @@ http-body = { workspace = true }
 http-body-util = { workspace = true }
 humantime = { workspace = true }
 hyper = { workspace = true }
-hyper-rustls = { version = "0.27.5", optional = true, default-features = false, features = [
-    "http1",
-    "http2",
-    "tls12",
-    "native-tokio",
-    "aws-lc-rs",
-    "logging",
-    "webpki-roots",
-] }
+hyper-rustls = { workspace = true, optional = true }
 hyper-util = { workspace = true }
 ic-agent = { workspace = true }
 ic-bn-lib-common = { workspace = true }
 ic-custom-domains-canister-api = { workspace = true }
-indoc = "2.0.6"
+indoc = { workspace = true }
 instant-acme = { workspace = true, optional = true }
-itertools = "0.14.0"
+itertools = { workspace = true }
 mail-auth = { workspace = true, optional = true }
 mail-parser = { workspace = true, optional = true }
-moka = { version = "0.12.15", features = ["sync", "future"] }
-nix = { version = "0.30.0", features = ["signal"] }
-ppp = "2.3.0"
+moka = { workspace = true }
+nix = { workspace = true }
+ppp = { workspace = true }
 pem = { workspace = true }
 prometheus = { workspace = true }
-prost = { version = "0.14.1", optional = true }
-prost-types = { version = "0.14.1", optional = true }
-rand = { version = "0.8.5", features = ["small_rng"] }
+prost = { workspace = true, optional = true }
+prost-types = { workspace = true, optional = true }
+rand = { workspace = true }
 rcgen = { workspace = true, optional = true }
-regex = "1.11.2"
+regex = { workspace = true }
 reqwest = { workspace = true }
-rustls = { version = "0.23.18", default-features = false, features = [
-    "aws_lc_rs",
-    "std",
-    "brotli",
-] }
+rustls = { workspace = true }
 rustls-acme = { workspace = true, optional = true }
-rustls-pemfile = "2.2.0"
-rustls-platform-verifier = "0.7.0"
-scopeguard = "1.2.0"
+rustls-pemfile = { workspace = true }
+rustls-platform-verifier = { workspace = true }
+scopeguard = { workspace = true }
 serde = { workspace = true }
-serde_json = "1.0.132"
-serde_with = "3.14.0"
-serde_yaml_ng = "0.10"
-sev = { version = "7.1.0", optional = true, default-features = false, features = [
-    "snp",
-    "crypto_nossl",
-] }
-sha1 = "0.11.0"
-sha2 = { version = "0.11.0", optional = true }
-show-option = "0.2"
+serde_json = { workspace = true }
+serde_with = { workspace = true }
+serde_yaml_ng = { workspace = true }
+sev = { workspace = true, optional = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true, optional = true }
+show-option = { workspace = true }
 smtp-proto = { workspace = true, optional = true }
-socket2 = "0.6.0"
+socket2 = { workspace = true }
 strum = { workspace = true }
 strum_macros = { workspace = true }
-systemstat = "0.2.3"
-tar = { version = "0.4.44", optional = true }
-tempfile = "3.23"
+systemstat = { workspace = true }
+tar = { workspace = true, optional = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
-tracing-subscriber = "0.3"
-tokio = { version = "1.47.0", features = ["full"] }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true }
 tokio-util = { workspace = true }
-tokio-rustls = { version = "0.26.0", default-features = false, features = [
-    "tls12",
-    "logging",
-    "aws-lc-rs",
-] }
-tokio-io-timeout = "1.2.0"
-tower = { version = "0.5.1", features = ["util"] }
-tower_governor = { version = "0.8" }
+tokio-rustls = { workspace = true }
+tokio-io-timeout = { workspace = true }
+tower = { workspace = true }
+tower_governor = { workspace = true }
 tower-service = { workspace = true }
 tower-http = { workspace = true }
-tracing = { version = "0.1.40", features = ["attributes"] }
+tracing = { workspace = true }
 url = { workspace = true }
 utoipa = { workspace = true }
 utoipa-swagger-ui = { workspace = true }
-# DO NOT upgrade, this breaks monorepo compatibility
-# Read https://github.com/uuid-rs/uuid/releases/tag/1.13.0
-uuid = { version = "=1.12.1", features = ["v7"] }
-vrl = { version = "0.33.0", default-features = false, features = [
-    "value",
-], optional = true }
-webpki-root-certs = "1.0.1"
-x509-parser = "0.18.1"
-zeroize = { version = "1.8.1", features = ["derive"] }
-zstd = "0.13.2"
+uuid = { workspace = true }
+vrl = { workspace = true, optional = true }
+webpki-root-certs = { workspace = true }
+x509-parser = { workspace = true }
+zeroize = { workspace = true }
+zstd = { workspace = true }
 
 [dev-dependencies]
-axum-server = "0.8.0"
-criterion = { version = "0.6", features = ["html_reports", "async_tokio"] }
+axum-server = { workspace = true }
+criterion = { workspace = true }
 mail-send = { workspace = true }
 mockall = { workspace = true }
-mock-io = { version = "0.3.2", features = ["full"] }
-pocket-ic = "=12.0.0"
-# Do not upgrade unless you want to upgrade `rand` too
-rand_regex = "=0.17.0"
-tempfile = "3.20.0"
-tokio-test = "0.4"
+mock-io = { workspace = true }
+pocket-ic = { workspace = true }
+rand_regex = { workspace = true }
+tempfile = { workspace = true }
+tokio-test = { workspace = true }
 
 [[bench]]
 name = "vector"

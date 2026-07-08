@@ -24,16 +24,30 @@ keywords = ["internet-computer", "icp", "dfinity", "boundary-nodes"]
 categories = []
 
 [workspace.dependencies]
+ahash = "0.8.11"
 anyhow = "1.0.93"
+arc-swap = "1.7.1"
 arrayvec = "0.7"
+async-channel = "2.3.1"
 async-trait = "0.1.83"
 axum = "0.8.1"
+axum-extra = { version = "0.12.6", features = ["middleware"] }
+axum-server = "0.8.0"
+base64 = "0.22.1"
+bytes = "1.10.0"
 candid = "0.10.10"
 candid_parser = "0.3"
+chacha20poly1305 = "0.10.1"
 chrono = "0.4"
 clap = { version = "4.5.20", features = ["derive", "string", "env"] }
+criterion = { version = "0.6", features = ["html_reports", "async_tokio"] }
 derive-new = "0.7.0"
+flate2 = { version = "1.0" }
 fqdn = { version = "0.5.2", features = ["punycode"] }
+futures = "0.3.31"
+futures-util = "0.3.31"
+governor = "0.10.0" # must match tower-governor deps
+hex = { version = "0.4.3" }
 hickory-proto = "0.26.1"
 hickory-resolver = { version = "0.26.1", default-features = false, features = [
     "tokio",
@@ -47,7 +61,17 @@ http-body = "1.0.1"
 http-body-util = "0.1.2"
 humantime = "2.2.0"
 hyper = "1.7.0"
+hyper-rustls = { version = "0.27.5", default-features = false, features = [
+    "http1",
+    "http2",
+    "tls12",
+    "native-tokio",
+    "aws-lc-rs",
+    "logging",
+    "webpki-roots",
+] }
 hyper-util = { version = "0.1.10", features = ["full"] }
+indoc = "2.0.6"
 ic-agent = { version = "0.47.3", features = ["_internal_dynamic-routing"] }
 ic-cdk = "0.20"
 ic-cdk-timers = "1.0"
@@ -64,15 +88,27 @@ instant-acme = { version = "0.8.5", default-features = false, features = [
     "aws-lc-rs",
     "hyper-rustls",
 ] }
+itertools = "0.14.0"
 mail-auth = "0.9.0"
 mail-parser = { version = "0.11.3", features = ["full_encoding"] }
 mail-send = { version = "0.6.0", default-features = false, features = [
     "builder",
 ] }
 mockall = "0.13.0"
+mock-io = { version = "0.3.2", features = ["full"] }
+moka = { version = "0.12.15", features = ["sync", "future"] }
+nix = { version = "0.30.0", features = ["signal"] }
+ppp = "2.3.0"
 parse-size = { version = "1.1.0", features = ["std"] }
 pem = "3.0.5"
+pocket-ic = "=12.0.0"
 prometheus = "0.14.0"
+prost = { version = "0.14.1" }
+prost-types = { version = "0.14.1" }
+rand = { version = "0.8.5", features = ["small_rng"] }
+# Do not upgrade unless you want to upgrade `rand` too
+rand_regex = "=0.17.0"
+regex = "1.11.2"
 reqwest = { version = "0.13.2", default-features = false, features = [
     "blocking",
     "http2",
@@ -98,19 +134,52 @@ rustls-acme = { version = "0.15.1", default-features = false, features = [
     "tls12",
     "aws-lc-rs",
 ] }
+rustls-pemfile = "2.2.0"
+rustls-platform-verifier = "0.7.0"
+scopeguard = "1.2.0"
 serde = { version = "1.0.214", features = ["derive"] }
 serde_cbor = "0.11.2"
+serde_json = "1.0.132"
+serde_with = "3.14.0"
+serde_yaml_ng = "0.10"
+sev = { version = "7.1.0", default-features = false, features = [
+    "snp",
+    "crypto_nossl",
+] }
+sha1 = "0.11.0"
+sha2 = { version = "0.11.0" }
+show-option = "0.2"
 smtp-proto = "0.2.1"
 socket2 = "0.6.0"
 strum = { version = "0.28", features = ["derive"] }
 strum_macros = "0.28"
+systemstat = "0.2.3"
+tar = { version = "0.4.44" }
+tempfile = "3.23"
 thiserror = "2.0.3"
+tracing-subscriber = "0.3"
+tokio = { version = "1.47.0", features = ["full"] }
+tokio-rustls = { version = "0.26.0", default-features = false, features = [
+    "tls12",
+    "logging",
+    "aws-lc-rs",
+] }
+tokio-io-timeout = "1.2.0"
+tokio-test = "0.4"
 tokio-util = { version = "0.7.12", features = ["full"] }
+tower = { version = "0.5.1", features = ["util"] }
+tower_governor = { version = "0.8" }
 tower-service = "0.3.3"
 tower-http = { version = "0.6.6", features = ["trace"] }
+tracing = { version = "0.1.40", features = ["attributes"] }
 url = "2.5.3"
 utoipa = { version = "5.4.0", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 # DO NOT upgrade, this breaks monorepo compatibility
 # Read https://github.com/uuid-rs/uuid/releases/tag/1.13.0
 uuid = { version = "=1.12.1", features = ["v7", "serde"] }
+vrl = { version = "0.33.0", default-features = false, features = ["value"] }
+webpki-root-certs = "1.0.1"
+x509-parser = "0.18.1"
+zeroize = { version = "1.8.1", features = ["derive"] }
+zstd = "0.13.2"
