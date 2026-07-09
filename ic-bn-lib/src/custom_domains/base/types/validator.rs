@@ -131,13 +131,18 @@ impl Validator {
                 .await
             {
                 Ok(_) => return Ok(()),
-                Err(e) => last_error = Some(e),
+                Err(e) => {
+                    info!("got validation error: {e:#}");
+                    last_error = Some(e)
+                }
             }
         }
 
-        Err(last_error.unwrap_or(ValidationError::MissingKnownDomains {
-            id: canister_id.to_string(),
-        }))
+        Err(
+            last_error.unwrap_or_else(|| ValidationError::MissingKnownDomains {
+                id: canister_id.to_string(),
+            }),
+        )
     }
 
     /// Helper to handle the request/parsing logic for a single domain
@@ -163,7 +168,11 @@ impl Validator {
             .await
             .map_err(|e| ValidationError::UnexpectedError(e.into()))?;
 
-        if text.contains(domain_to_check) {
+        // Check if the file contains our domain on one of the lines
+        if text
+            .split('\n')
+            .any(|x| x.trim().eq_ignore_ascii_case(domain_to_check))
+        {
             Ok(())
         } else {
             Err(ValidationError::MissingKnownDomains {
@@ -335,5 +344,739 @@ impl Validator {
             src: hostname,
             id: canister_id,
         })
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use ::http::Response as HttpResponse;
+    use ic_bn_lib_common::principal;
+
+    use crate::hickory_resolver::{
+        net::{NetError, NoRecords},
+        proto::{
+            op::{Query, ResponseCode},
+            rr::{
+                Name, RData, Record,
+                rdata::{A, CNAME, TXT},
+            },
+        },
+    };
+
+    use super::*;
+
+    fn mk_validator(client: Arc<dyn Client>, resolver: Arc<dyn Resolves>) -> Validator {
+        Validator {
+            client,
+            resolver,
+            delegation_domain: fqdn!("icp2.io"),
+            validation_domains: vec![fqdn!("icp0.io")],
+        }
+    }
+
+    /// HTTP client that must not be called (used for DNS-only tests).
+    #[derive(Debug)]
+    struct UnusedClient;
+
+    #[async_trait]
+    impl Client for UnusedClient {
+        async fn execute(&self, _: reqwest::Request) -> Result<reqwest::Response, reqwest::Error> {
+            unreachable!("HTTP client should not be called in this test")
+        }
+    }
+
+    /// DNS resolver that must not be called (used for HTTP-only tests).
+    struct UnusedResolver;
+
+    #[async_trait]
+    impl Resolves for UnusedResolver {
+        async fn resolve(&self, _: RecordType, _: &str) -> Result<Vec<Record>, NetError> {
+            unreachable!("DNS resolver should not be called in this test")
+        }
+
+        fn flush_cache(&self) {}
+    }
+
+    /// DNS resolver backed by a closure, so each test can script its own responses.
+    ///
+    /// A boxed `dyn Fn` is used (rather than a bare generic `F`) because a plain generic
+    /// closure parameter does not get inferred as higher-ranked over the `&str` lifetime,
+    /// which then fails to unify with the per-call lifetime in `Resolves::resolve`.
+    #[allow(clippy::type_complexity)]
+    struct MockResolver(
+        Box<dyn Fn(RecordType, &str) -> Result<Vec<Record>, NetError> + Send + Sync>,
+    );
+
+    impl MockResolver {
+        fn new(
+            f: impl Fn(RecordType, &str) -> Result<Vec<Record>, NetError> + Send + Sync + 'static,
+        ) -> Self {
+            Self(Box::new(f))
+        }
+    }
+
+    #[async_trait]
+    impl Resolves for MockResolver {
+        async fn resolve(
+            &self,
+            record_type: RecordType,
+            name: &str,
+        ) -> Result<Vec<Record>, NetError> {
+            (self.0)(record_type, name)
+        }
+
+        fn flush_cache(&self) {}
+    }
+
+    /// HTTP client backed by a closure, so each test can script its own responses.
+    /// See [`MockResolver`] for why this boxes the closure instead of using a bare generic.
+    #[allow(clippy::type_complexity)]
+    struct MockClient(
+        Box<dyn Fn(&reqwest::Request) -> Result<reqwest::Response, reqwest::Error> + Send + Sync>,
+    );
+
+    impl MockClient {
+        fn new(
+            f: impl Fn(&reqwest::Request) -> Result<reqwest::Response, reqwest::Error>
+            + Send
+            + Sync
+            + 'static,
+        ) -> Self {
+            Self(Box::new(f))
+        }
+    }
+
+    impl std::fmt::Debug for MockClient {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "MockClient")
+        }
+    }
+
+    #[async_trait]
+    impl Client for MockClient {
+        async fn execute(
+            &self,
+            req: reqwest::Request,
+        ) -> Result<reqwest::Response, reqwest::Error> {
+            (self.0)(&req)
+        }
+    }
+
+    fn cname_record(name: &str, target: &str) -> Record {
+        Record::from_rdata(
+            Name::from_ascii(name).unwrap(),
+            300,
+            RData::CNAME(CNAME(Name::from_ascii(target).unwrap())),
+        )
+    }
+
+    fn txt_record(name: &str, value: &str) -> Record {
+        Record::from_rdata(
+            Name::from_ascii(name).unwrap(),
+            300,
+            RData::TXT(TXT::new(vec![value.to_string()])),
+        )
+    }
+
+    fn a_record(name: &str) -> Record {
+        Record::from_rdata(
+            Name::from_ascii(name).unwrap(),
+            300,
+            RData::A(A(Ipv4Addr::new(127, 0, 0, 1))),
+        )
+    }
+
+    /// Builds a resolver error that `is_error_negative_lookup()` recognizes as "no such record".
+    fn negative_lookup_error(name: &str, record_type: RecordType) -> NetError {
+        NoRecords::new(
+            Query::query(Name::from_ascii(name).unwrap(), record_type),
+            ResponseCode::NXDomain,
+        )
+        .into()
+    }
+
+    fn text_response(body: &str) -> reqwest::Response {
+        HttpResponse::new(body.to_string()).into()
+    }
+
+    /// Builds a real `reqwest::Error` (via a non-2xx response) for HTTP-failure tests.
+    fn error_response(status: u16) -> reqwest::Error {
+        let resp: reqwest::Response = HttpResponse::builder()
+            .status(status)
+            .body(String::new())
+            .unwrap()
+            .into();
+        resp.error_for_status().unwrap_err()
+    }
+
+    // ---- validate_cname_delegation ----
+
+    #[tokio::test]
+    async fn cname_delegation_succeeds_when_cname_matches() {
+        let resolver = MockResolver::new(|record_type, name| {
+            assert_eq!(record_type, RecordType::CNAME);
+            assert_eq!(name, "_acme-challenge.example.com.");
+            Ok(vec![cname_record(
+                "_acme-challenge.example.com.",
+                "_acme-challenge.example.com.icp2.io.",
+            )])
+        });
+        let validator = mk_validator(Arc::new(UnusedClient), Arc::new(resolver));
+
+        validator
+            .validate_cname_delegation(&fqdn!("example.com"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cname_delegation_ignores_non_cname_records() {
+        let resolver = MockResolver::new(|_, _| {
+            Ok(vec![
+                a_record("_acme-challenge.example.com."),
+                cname_record(
+                    "_acme-challenge.example.com.",
+                    "_acme-challenge.example.com.icp2.io.",
+                ),
+            ])
+        });
+        let validator = mk_validator(Arc::new(UnusedClient), Arc::new(resolver));
+
+        validator
+            .validate_cname_delegation(&fqdn!("example.com"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cname_delegation_fails_on_missing_record() {
+        let resolver =
+            MockResolver::new(|record_type, name| Err(negative_lookup_error(name, record_type)));
+        let validator = mk_validator(Arc::new(UnusedClient), Arc::new(resolver));
+
+        let err = validator
+            .validate_cname_delegation(&fqdn!("example.com"))
+            .await
+            .unwrap_err();
+
+        match err {
+            ValidationError::MissingDnsCname { src, dst } => {
+                assert_eq!(src, "_acme-challenge.example.com.");
+                assert_eq!(dst, "_acme-challenge.example.com.icp2.io.");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cname_delegation_fails_on_wrong_target() {
+        let resolver = MockResolver::new(|_, _| {
+            Ok(vec![cname_record(
+                "_acme-challenge.example.com.",
+                "somewhere-else.com.",
+            )])
+        });
+        let validator = mk_validator(Arc::new(UnusedClient), Arc::new(resolver));
+
+        let err = validator
+            .validate_cname_delegation(&fqdn!("example.com"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ValidationError::MissingDnsCname { .. }));
+    }
+
+    #[tokio::test]
+    async fn cname_delegation_propagates_unexpected_resolver_error() {
+        let resolver = MockResolver::new(|_, _| Err(NetError::Timeout));
+        let validator = mk_validator(Arc::new(UnusedClient), Arc::new(resolver));
+
+        let err = validator
+            .validate_cname_delegation(&fqdn!("example.com"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ValidationError::UnexpectedError(_)));
+    }
+
+    // ---- validate_no_txt_challenge ----
+
+    #[tokio::test]
+    async fn no_txt_challenge_succeeds_on_missing_record() {
+        let resolver =
+            MockResolver::new(|record_type, name| Err(negative_lookup_error(name, record_type)));
+        let validator = mk_validator(Arc::new(UnusedClient), Arc::new(resolver));
+
+        validator
+            .validate_no_txt_challenge(&fqdn!("id.ai"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_txt_challenge_succeeds_when_record_is_subdomain_of_delegation() {
+        let resolver = MockResolver::new(|_, _| {
+            Ok(vec![txt_record(
+                "_acme-challenge.id.ai.icp2.io.",
+                "foobar2",
+            )])
+        });
+        let validator = mk_validator(Arc::new(UnusedClient), Arc::new(resolver));
+
+        validator
+            .validate_no_txt_challenge(&fqdn!("id.ai"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_txt_challenge_fails_when_record_is_not_subdomain_of_delegation() {
+        let resolver = MockResolver::new(|_, _| {
+            Ok(vec![txt_record(
+                "_acme-challenge.id.ai.evil.io.",
+                "foobar2",
+            )])
+        });
+        let validator = mk_validator(Arc::new(UnusedClient), Arc::new(resolver));
+
+        let err = validator
+            .validate_no_txt_challenge(&fqdn!("id.ai"))
+            .await
+            .unwrap_err();
+
+        match err {
+            ValidationError::ExistingDnsTxtChallenge { src } => {
+                assert_eq!(src, "_acme-challenge.id.ai.");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn no_txt_challenge_propagates_unexpected_resolver_error() {
+        let resolver = MockResolver::new(|_, _| Err(NetError::Timeout));
+        let validator = mk_validator(Arc::new(UnusedClient), Arc::new(resolver));
+
+        let err = validator
+            .validate_no_txt_challenge(&fqdn!("id.ai"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ValidationError::UnexpectedError(_)));
+    }
+
+    // ---- validate_canister_mapping ----
+
+    #[tokio::test]
+    async fn canister_mapping_succeeds_with_single_valid_record() {
+        let resolver = MockResolver::new(|record_type, name| {
+            assert_eq!(record_type, RecordType::TXT);
+            assert_eq!(name, "_canister-id.example.com");
+            Ok(vec![txt_record(
+                "_canister-id.example.com.",
+                "qoctq-giaaa-aaaaa-aaaea-cai",
+            )])
+        });
+        let validator = mk_validator(Arc::new(UnusedClient), Arc::new(resolver));
+
+        let canister_id = validator
+            .validate_canister_mapping(&fqdn!("example.com"))
+            .await
+            .unwrap();
+
+        assert_eq!(canister_id, principal!("qoctq-giaaa-aaaaa-aaaea-cai"));
+    }
+
+    #[tokio::test]
+    async fn canister_mapping_ignores_non_txt_records() {
+        let resolver = MockResolver::new(|_, _| {
+            Ok(vec![
+                a_record("_canister-id.example.com."),
+                txt_record("_canister-id.example.com.", "qoctq-giaaa-aaaaa-aaaea-cai"),
+            ])
+        });
+        let validator = mk_validator(Arc::new(UnusedClient), Arc::new(resolver));
+
+        validator
+            .validate_canister_mapping(&fqdn!("example.com"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn canister_mapping_fails_on_missing_record() {
+        let resolver =
+            MockResolver::new(|record_type, name| Err(negative_lookup_error(name, record_type)));
+        let validator = mk_validator(Arc::new(UnusedClient), Arc::new(resolver));
+
+        let err = validator
+            .validate_canister_mapping(&fqdn!("example.com"))
+            .await
+            .unwrap_err();
+
+        match err {
+            ValidationError::MissingDnsTxtCanisterId { src } => {
+                assert_eq!(src, "_canister-id.example.com");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn canister_mapping_fails_on_no_records_returned() {
+        let resolver = MockResolver::new(|_, _| Ok(vec![]));
+        let validator = mk_validator(Arc::new(UnusedClient), Arc::new(resolver));
+
+        let err = validator
+            .validate_canister_mapping(&fqdn!("example.com"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ValidationError::MissingDnsTxtCanisterId { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn canister_mapping_fails_on_multiple_records() {
+        let resolver = MockResolver::new(|_, _| {
+            Ok(vec![
+                txt_record("_canister-id.example.com.", "aaaaa-aa"),
+                txt_record("_canister-id.example.com.", "qoctq-giaaa-aaaaa-aaaea-cai"),
+            ])
+        });
+        let validator = mk_validator(Arc::new(UnusedClient), Arc::new(resolver));
+
+        let err = validator
+            .validate_canister_mapping(&fqdn!("example.com"))
+            .await
+            .unwrap_err();
+
+        match err {
+            ValidationError::MultipleDnsTxtCanisterId { src, records } => {
+                assert_eq!(src, "_canister-id.example.com");
+                assert_eq!(records.len(), 2);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn canister_mapping_fails_on_invalid_principal() {
+        let resolver = MockResolver::new(|_, _| {
+            Ok(vec![txt_record(
+                "_canister-id.example.com.",
+                "not-a-principal!!!",
+            )])
+        });
+        let validator = mk_validator(Arc::new(UnusedClient), Arc::new(resolver));
+
+        let err = validator
+            .validate_canister_mapping(&fqdn!("example.com"))
+            .await
+            .unwrap_err();
+
+        match err {
+            ValidationError::InvalidDnsTxtCanisterId { src, id } => {
+                assert_eq!(src, "_canister-id.example.com");
+                assert_eq!(id, "not-a-principal!!!");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn canister_mapping_propagates_unexpected_resolver_error() {
+        let resolver = MockResolver::new(|_, _| Err(NetError::Timeout));
+        let validator = mk_validator(Arc::new(UnusedClient), Arc::new(resolver));
+
+        let err = validator
+            .validate_canister_mapping(&fqdn!("example.com"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ValidationError::UnexpectedError(_)));
+    }
+
+    // ---- validate_no_canister_id_record (exercised via validate_deletion) ----
+
+    #[tokio::test]
+    async fn no_canister_id_record_succeeds_on_missing_record() {
+        let resolver =
+            MockResolver::new(|record_type, name| Err(negative_lookup_error(name, record_type)));
+        let validator = mk_validator(Arc::new(UnusedClient), Arc::new(resolver));
+
+        validator
+            .validate_deletion(&fqdn!("example.com"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_canister_id_record_fails_when_record_exists() {
+        let resolver = MockResolver::new(|_, _| {
+            Ok(vec![txt_record(
+                "_canister-id.example.com.",
+                "qoctq-giaaa-aaaaa-aaaea-cai",
+            )])
+        });
+        let validator = mk_validator(Arc::new(UnusedClient), Arc::new(resolver));
+
+        let err = validator
+            .validate_deletion(&fqdn!("example.com"))
+            .await
+            .unwrap_err();
+
+        match err {
+            ValidationError::ExistingDnsTxtCanisterId { src } => {
+                assert_eq!(src, "_canister-id.example.com.");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn no_canister_id_record_fails_even_when_result_is_empty() {
+        // Any `Ok` result (even an empty one) means the query returned an answer,
+        // which is treated as evidence of an existing record.
+        let resolver = MockResolver::new(|_, _| Ok(vec![]));
+        let validator = mk_validator(Arc::new(UnusedClient), Arc::new(resolver));
+
+        let err = validator
+            .validate_deletion(&fqdn!("example.com"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ValidationError::ExistingDnsTxtCanisterId { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn no_canister_id_record_propagates_unexpected_resolver_error() {
+        let resolver = MockResolver::new(|_, _| Err(NetError::Timeout));
+        let validator = mk_validator(Arc::new(UnusedClient), Arc::new(resolver));
+
+        let err = validator
+            .validate_deletion(&fqdn!("example.com"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ValidationError::UnexpectedError(_)));
+    }
+
+    // ---- validate_canister_owner / fetch_and_verify_domain_ownership ----
+
+    #[tokio::test]
+    async fn canister_owner_succeeds_when_domain_listed() {
+        let canister_id = principal!("aaaaa-aa");
+        let client = MockClient::new(|req: &reqwest::Request| {
+            assert_eq!(
+                req.url().as_str(),
+                "https://aaaaa-aa.icp0.io/.well-known/ic-domains"
+            );
+            Ok(text_response("foo.bar\nEXAMPLE.com\nbaz.qux"))
+        });
+        let validator = mk_validator(Arc::new(client), Arc::new(UnusedResolver));
+
+        validator
+            .validate_canister_owner(canister_id, &fqdn!("example.com"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn canister_owner_fails_when_domain_not_listed() {
+        let canister_id = principal!("aaaaa-aa");
+        let client = MockClient::new(|_: &reqwest::Request| Ok(text_response("foo.bar\nbaz.qux")));
+        let validator = mk_validator(Arc::new(client), Arc::new(UnusedResolver));
+
+        let err = validator
+            .validate_canister_owner(canister_id, &fqdn!("example.com"))
+            .await
+            .unwrap_err();
+
+        match err {
+            ValidationError::MissingKnownDomains { id } => {
+                assert_eq!(id, canister_id.to_string());
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn canister_owner_falls_back_to_next_validation_domain() {
+        let canister_id = principal!("aaaaa-aa");
+        let client = MockClient::new(|req: &reqwest::Request| {
+            let body = if req.url().as_str().contains("icp0.io") {
+                "foo.bar"
+            } else {
+                "example.com"
+            };
+            Ok(text_response(body))
+        });
+
+        let validator = Validator {
+            client: Arc::new(client),
+            resolver: Arc::new(UnusedResolver),
+            delegation_domain: fqdn!("icp2.io"),
+            validation_domains: vec![fqdn!("icp0.io"), fqdn!("ic0.app")],
+        };
+
+        validator
+            .validate_canister_owner(canister_id, &fqdn!("example.com"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn canister_owner_fails_when_all_validation_domains_fail() {
+        let canister_id = principal!("aaaaa-aa");
+        let client = MockClient::new(|_: &reqwest::Request| Ok(text_response("foo.bar")));
+
+        let validator = Validator {
+            client: Arc::new(client),
+            resolver: Arc::new(UnusedResolver),
+            delegation_domain: fqdn!("icp2.io"),
+            validation_domains: vec![fqdn!("icp0.io"), fqdn!("ic0.app")],
+        };
+
+        let err = validator
+            .validate_canister_owner(canister_id, &fqdn!("example.com"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ValidationError::MissingKnownDomains { .. }));
+    }
+
+    #[tokio::test]
+    async fn canister_owner_fails_when_http_request_errors() {
+        let canister_id = principal!("aaaaa-aa");
+        let client = MockClient::new(|_: &reqwest::Request| Err(error_response(500)));
+        let validator = mk_validator(Arc::new(client), Arc::new(UnusedResolver));
+
+        let err = validator
+            .validate_canister_owner(canister_id, &fqdn!("example.com"))
+            .await
+            .unwrap_err();
+
+        match err {
+            ValidationError::KnownDomainsUnavailable { id, .. } => {
+                assert_eq!(id, canister_id.to_string());
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    // ---- Validator::new ----
+
+    #[tokio::test]
+    async fn new_rejects_root_delegation_domain() {
+        let err = Validator::new(
+            FQDN::default(),
+            vec![fqdn!("icp0.io")],
+            DnsOptions::default(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ValidationError::UnexpectedError(_)));
+    }
+
+    #[tokio::test]
+    async fn new_rejects_empty_validation_domains() {
+        let err = Validator::new(fqdn!("icp2.io"), vec![], DnsOptions::default()).unwrap_err();
+
+        assert!(matches!(err, ValidationError::UnexpectedError(_)));
+    }
+
+    #[tokio::test]
+    async fn new_succeeds_with_valid_params() {
+        Validator::new(
+            fqdn!("icp2.io"),
+            vec![fqdn!("icp0.io")],
+            DnsOptions::default(),
+        )
+        .unwrap();
+    }
+
+    // ---- full validate() / validate_deletion() integration ----
+
+    #[tokio::test]
+    async fn validate_succeeds_end_to_end() {
+        let canister_id = principal!("qoctq-giaaa-aaaaa-aaaea-cai");
+
+        let resolver = MockResolver::new(move |record_type, name| match (record_type, name) {
+            (RecordType::CNAME, "_acme-challenge.example.com.") => Ok(vec![cname_record(
+                "_acme-challenge.example.com.",
+                "_acme-challenge.example.com.icp2.io.",
+            )]),
+            (RecordType::TXT, "_acme-challenge.example.com.") => {
+                Err(negative_lookup_error(name, record_type))
+            }
+            (RecordType::TXT, "_canister-id.example.com") => Ok(vec![txt_record(
+                "_canister-id.example.com.",
+                "qoctq-giaaa-aaaaa-aaaea-cai",
+            )]),
+            _ => panic!("unexpected resolve call: {record_type:?} {name}"),
+        });
+
+        let client = MockClient::new(|req: &reqwest::Request| {
+            assert_eq!(
+                req.url().as_str(),
+                "https://qoctq-giaaa-aaaaa-aaaea-cai.icp0.io/.well-known/ic-domains"
+            );
+            Ok(text_response("example.com"))
+        });
+
+        let validator = mk_validator(Arc::new(client), Arc::new(resolver));
+
+        let result = validator.validate(&fqdn!("example.com")).await.unwrap();
+        assert_eq!(result, canister_id);
+    }
+
+    #[tokio::test]
+    async fn validate_fails_fast_on_missing_cname() {
+        let resolver =
+            MockResolver::new(|record_type, name| Err(negative_lookup_error(name, record_type)));
+        let validator = mk_validator(Arc::new(UnusedClient), Arc::new(resolver));
+
+        let err = validator.validate(&fqdn!("example.com")).await.unwrap_err();
+
+        assert!(matches!(err, ValidationError::MissingDnsCname { .. }));
+    }
+
+    #[tokio::test]
+    async fn validate_deletion_succeeds_when_no_record() {
+        let resolver =
+            MockResolver::new(|record_type, name| Err(negative_lookup_error(name, record_type)));
+        let validator = mk_validator(Arc::new(UnusedClient), Arc::new(resolver));
+
+        validator
+            .validate_deletion(&fqdn!("example.com"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn validate_deletion_fails_when_record_exists() {
+        let resolver = MockResolver::new(|_, _| {
+            Ok(vec![txt_record(
+                "_canister-id.example.com.",
+                "qoctq-giaaa-aaaaa-aaaea-cai",
+            )])
+        });
+        let validator = mk_validator(Arc::new(UnusedClient), Arc::new(resolver));
+
+        let err = validator
+            .validate_deletion(&fqdn!("example.com"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ValidationError::ExistingDnsTxtCanisterId { .. }
+        ));
     }
 }

@@ -25,7 +25,7 @@ pub enum ValidationError {
     #[error("invalid DNS TXT record from {src} to {id}")]
     InvalidDnsTxtCanisterId { src: String, id: String },
     /// Cannot retrieve known domains from the canister
-    #[error("failed to retrieve known domains from canister {id}: {error}")]
+    #[error("failed to retrieve known domains from the canister {id}: {error}")]
     KnownDomainsUnavailable { id: String, error: String },
     /// Domain is not listed in the canister's known domains
     #[error("domain is missing from canister {id} list of known domains")]
