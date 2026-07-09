@@ -19,9 +19,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
-      - name: Install deps
-        run: cargo install cargo-all-features
-
       - name: Add WASM target
         run: rustup target add wasm32-unknown-unknown
 

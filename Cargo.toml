@@ -40,7 +40,7 @@ candid_parser = "0.3"
 chacha20poly1305 = "0.10.1"
 chrono = "0.4"
 clap = { version = "4.5.20", features = ["derive", "string", "env"] }
-criterion = { version = "0.6", features = ["html_reports", "async_tokio"] }
+criterion = { version = "0.6", features = ["html_reports"] }
 derive-new = "0.7.0"
 flate2 = { version = "1.0" }
 fqdn = { version = "0.5.2", features = ["punycode"] }
@@ -72,17 +72,12 @@ hyper-rustls = { version = "0.27.5", default-features = false, features = [
 ] }
 hyper-util = { version = "0.1.10", features = ["full"] }
 indoc = "2.0.6"
-ic-agent = { version = "0.47.3", features = ["_internal_dynamic-routing"] }
+ic-agent = { version = "0.47.3" }
 ic-cdk = "0.20"
 ic-cdk-timers = "1.0"
 ic-custom-domains-canister-api = { path = "./custom-domains/api" }
 ic-http-types = "0.1.0"
 ic-stable-structures = "0.7.0"
-ic-bn-lib = { path = "./ic-bn-lib", features = [
-    "custom-domains",
-    "cert-providers",
-    "acme-dns",
-] }
 ic-bn-lib-common = { version = "0.2", path = "./ic-bn-lib-common" }
 instant-acme = { version = "0.8.5", default-features = false, features = [
     "aws-lc-rs",
@@ -96,7 +91,7 @@ mail-send = { version = "0.6.0", default-features = false, features = [
 ] }
 mockall = "0.13.0"
 mock-io = { version = "0.3.2", features = ["full"] }
-moka = { version = "0.12.15", features = ["sync", "future"] }
+moka = { version = "0.12.15", features = ["sync"] }
 nix = { version = "0.30.0", features = ["signal"] }
 ppp = "2.3.0"
 parse-size = { version = "1.1.0", features = ["std"] }
