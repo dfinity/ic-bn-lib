@@ -8,24 +8,19 @@ on:
 
 env:
   CARGO_TERM_COLOR: never
+  CARGO_NET_RETRY: 10 # retries fetching Rust crates on network failures
 
 jobs:
   test:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
-      - name: Install deps
-        run: cargo install cargo-all-features
+      - name: Add WASM target
+        run: rustup target add wasm32-unknown-unknown
 
-      - name: Run tests (all feature combinations)
-        run: cargo test-all-features
-
-      - name: Cleanup
-        run: cargo clean
-
-      - name: Run ACME tests
-        run: ./ic-bn-lib/test-acme.sh
+      - name: Run tests
+        run: ./run_tests.sh

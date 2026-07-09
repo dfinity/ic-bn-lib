@@ -1,0 +1,17 @@
+[package]
+name = "ic-custom-domains-canister-api"
+version = "0.2.7"
+edition.workspace = true
+description = "Custom Domains Canister API"
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+
+documentation = "https://docs.rs/ic-custom-domains-canister-api"
+
+[dependencies]
+candid = { workspace = true }
+derive-new = { workspace = true }
+serde = { workspace = true }
+strum = { workspace = true }
+thiserror = { workspace = true }

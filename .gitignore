@@ -5,3 +5,5 @@ Cargo.lock
 pebble
 pebble-challtestsrv
 *.tar.gz
+pocket-ic
+.claude
