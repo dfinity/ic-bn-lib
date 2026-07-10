@@ -65,7 +65,7 @@ indoc = "2.0.6"
 ic-agent = { version = "0.47.3" }
 ic-cdk = "0.20"
 ic-cdk-timers = "1.0"
-ic-custom-domains-canister-api = { path = "./custom-domains/api" }
+ic-custom-domains-canister-api = { version = "0.2", path = "./custom-domains/api" }
 ic-http-types = "0.1.0"
 ic-stable-structures = "0.7.0"
 instant-acme = { version = "0.8.5", default-features = false, features = [
