@@ -9,6 +9,7 @@ pub mod health_check;
 pub mod health_manager;
 #[cfg(all(target_os = "linux", feature = "sev-snp"))]
 pub mod sev_snp;
+pub mod wrr;
 
 /// Target health state for Health Checker
 #[derive(Debug, Clone, Copy, PartialEq, Eq, IntoStaticStr, Display)]
@@ -20,7 +21,7 @@ pub enum TargetState {
 }
 
 /// Trait that executes the requests.
-/// Akin to Tower's Service, but generic over backend.
+/// Akin to Tower's Service, but generic over the backend.
 #[async_trait]
 pub trait ExecutesRequest<T>: Send + Sync + Debug {
     type Request;

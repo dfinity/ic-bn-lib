@@ -1,7 +1,7 @@
 use std::{
     fmt::{Debug, Display},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicU8, AtomicUsize, Ordering},
     },
     time::Instant,
@@ -15,27 +15,7 @@ use scopeguard::defer;
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString};
 
-use crate::utils::ExecutesRequest;
-
-/// Calculates Greatest Common Divisor
-#[allow(clippy::many_single_char_names)]
-const fn calc_gcd(mut x: isize, mut y: isize) -> isize {
-    if x == 0 {
-        return y;
-    }
-
-    if y == 0 {
-        return x;
-    }
-
-    while y != 0 {
-        let t = x % y;
-        x = y;
-        y = t;
-    }
-
-    x
-}
+use crate::utils::{ExecutesRequest, wrr::Wrr};
 
 #[derive(Clone, Debug)]
 pub struct Metrics {
@@ -88,12 +68,12 @@ pub enum Strategy {
 }
 
 /// Backend that represents a target that receives the request
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Backend<T> {
     backend: T,
     name: String,
     weight: usize,
-    inflight: AtomicUsize,
+    inflight: Arc<AtomicUsize>,
 }
 
 impl<T: Display + Send + Sync> Backend<T> {
@@ -102,38 +82,7 @@ impl<T: Display + Send + Sync> Backend<T> {
             name: backend.to_string(),
             backend,
             weight,
-            inflight: AtomicUsize::new(0),
-        }
-    }
-}
-
-#[derive(Debug)]
-struct Wrr {
-    n: isize,
-    i: isize,
-    gcd: isize,
-    max_weight: isize,
-    curr_weight: isize,
-}
-
-impl Wrr {
-    fn new<T>(backends: &[Backend<T>]) -> Self {
-        let mut gcd = 0;
-        let mut max_weight = 0;
-        for v in backends.iter() {
-            gcd = calc_gcd(gcd, v.weight as isize);
-
-            if v.weight > max_weight {
-                max_weight = v.weight;
-            }
-        }
-
-        Self {
-            n: backends.len() as isize,
-            i: -1,
-            gcd,
-            max_weight: max_weight as isize,
-            curr_weight: 0,
+            inflight: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -144,7 +93,7 @@ pub struct Distributor<T, RQ = (), RS = (), E = ()> {
     backends: Vec<Backend<T>>,
     strategy: Strategy,
     executor: Arc<dyn ExecutesRequest<T, Request = RQ, Response = RS, Error = E>>,
-    wrr: Mutex<Wrr>,
+    wrr: Wrr<Backend<T>>,
     metrics: Metrics,
 }
 
@@ -156,7 +105,7 @@ where
     E: Send,
 {
     pub fn new(
-        backends: &[(T, usize)],
+        backends: &[(usize, T)],
         strategy: Strategy,
         executor: Arc<dyn ExecutesRequest<T, Request = RQ, Response = RS, Error = E>>,
         metrics: Metrics,
@@ -167,15 +116,22 @@ where
 
         let backends = backends
             .iter()
-            .map(|(b, w)| Backend::new(b.clone(), *w))
+            .map(|(w, b)| Backend::new(b.clone(), *w))
             .collect::<Vec<_>>();
-        let wrr = Wrr::new(&backends);
+
+        let wrr = Wrr::new(
+            backends
+                .clone()
+                .into_iter()
+                .map(|x| (x.weight, x))
+                .collect(),
+        );
 
         Self {
             backends,
             strategy,
             executor,
-            wrr: Mutex::new(wrr),
+            wrr,
             metrics,
         }
     }
@@ -183,21 +139,7 @@ where
     /// Picks the next backend to execute the request using WRR algorigthm.
     /// Based on http://kb.linuxvirtualserver.org/wiki/Weighted_Round-Robin_Scheduling
     fn next_wrr(&self) -> &Backend<T> {
-        let mut wrr = self.wrr.lock().unwrap();
-
-        loop {
-            wrr.i = (wrr.i + 1) % wrr.n;
-            if wrr.i == 0 {
-                wrr.curr_weight -= wrr.gcd;
-                if wrr.curr_weight <= 0 {
-                    wrr.curr_weight = wrr.max_weight;
-                }
-            }
-
-            if (self.backends[wrr.i as usize].weight as isize) >= wrr.curr_weight {
-                return &self.backends[wrr.i as usize];
-            }
-        }
+        self.wrr.next()
     }
 
     /// Picks the next backend to execute the request using Least Outstanding Requests algorigthm.
@@ -253,7 +195,7 @@ where
 
 #[cfg(test)]
 pub(crate) mod test {
-    use std::{collections::HashMap, time::Duration};
+    use std::{collections::HashMap, sync::Mutex, time::Duration};
 
     use async_trait::async_trait;
     use tokio::task::JoinSet;
@@ -285,9 +227,9 @@ pub(crate) mod test {
     #[tokio::test]
     async fn test_distributor_wrr() {
         let backends = vec![
-            ("foo".to_string(), 2),
-            ("bar".to_string(), 3),
-            ("baz".to_string(), 5),
+            (2, "foo".to_string()),
+            (3, "bar".to_string()),
+            (5, "baz".to_string()),
         ];
 
         let executor = Arc::new(TestExecutor(Duration::ZERO, Mutex::new(HashMap::new())));
@@ -315,9 +257,9 @@ pub(crate) mod test {
     #[tokio::test]
     async fn test_distributor_lor() {
         let backends = vec![
-            ("foo".to_string(), 2),
-            ("bar".to_string(), 3),
-            ("baz".to_string(), 5),
+            (2, "foo".to_string()),
+            (3, "bar".to_string()),
+            (5, "baz".to_string()),
         ];
 
         let executor = Arc::new(TestExecutor(
