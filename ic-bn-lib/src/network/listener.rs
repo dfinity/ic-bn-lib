@@ -93,7 +93,10 @@ pub fn listen_unix(path: PathBuf, opts: ListenerOpts) -> io::Result<UnixListener
 
     socket.bind(&path)?;
     let socket = socket.listen(opts.backlog)?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))?;
+    std::fs::set_permissions(
+        &path,
+        std::fs::Permissions::from_mode(opts.unix_socket_permissions),
+    )?;
 
     Ok(socket)
 }

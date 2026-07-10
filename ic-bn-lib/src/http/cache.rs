@@ -599,11 +599,16 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
             .locks
             .get_with_by_ref(&key, || Arc::new(Mutex::new(())));
 
+        // Holds the guard (if we got one) so that it stays locked across the
+        // backend call & cache insert below, actually serializing concurrent
+        // requests for the same key instead of releasing it immediately.
+        let mut guard = None;
         let mut lock_obtained = false;
         select! {
             // Only one parallel request should execute and populate the cache.
             // Other requests will wait for the lock to be released and get results from the cache.
-            _ = lock.lock() => {
+            g = lock.lock() => {
+                guard = Some(g);
                 lock_obtained = true;
             }
 
@@ -625,7 +630,7 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
 
         // Otherwise pass the request forward
         let now = Instant::now();
-        Ok(match self.pass_request(request, next).await? {
+        let result = match self.pass_request(request, next).await? {
             // If the body was fetched - cache it
             ResponseType::Fetched(v, ttl) => {
                 let delta = now.elapsed();
@@ -640,7 +645,14 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
 
             // Otherwise just pass it up
             ResponseType::Streamed(v, reason) => (CacheStatus::Bypass(reason), v),
-        })
+        };
+
+        // Release the lock only now that the cache has been populated (or the
+        // request has been fully handled), so that other requests waiting on
+        // it actually observe a filled cache instead of racing to the backend.
+        drop(guard);
+
+        Ok(result)
     }
 
     // Passes the request down the line and conditionally fetches the response body
@@ -835,6 +847,14 @@ mod tests {
     async fn handler_proxy_cache_lock(request: Request<Body>) -> impl IntoResponse {
         if request.uri().path().contains("slow_response") {
             sleep(2 * PROXY_LOCK_TIMEOUT).await;
+        } else if request.uri().path().contains("medium_response") {
+            // Slower than an instant response but well within the lock timeout,
+            // so concurrent requests actually have to wait on the lock rather
+            // than falling through via the lock-wait timeout (as "slow_response"
+            // does) or completing so fast that scheduling luck alone produces
+            // a single miss (as "fast_response" does). This is the only case
+            // that actually exercises the lock holding across the backend call.
+            sleep(PROXY_LOCK_TIMEOUT / 4).await;
         }
 
         "test_body"
@@ -1387,10 +1407,13 @@ mod tests {
             .layer(from_fn_with_state(Arc::clone(&cache), middleware));
 
         let req_count = 50;
-        // Expected cache misses/hits for fast/slow responses, respectively.
-        let expected_misses = [1, req_count];
-        let expected_hits = [req_count - 1, 0];
-        for (idx, uri) in ["/fast_response", "/slow_response"].iter().enumerate() {
+        // Expected cache misses/hits for fast/medium/slow responses, respectively.
+        let expected_misses = [1, 1, req_count];
+        let expected_hits = [req_count - 1, req_count - 1, 0];
+        for (idx, uri) in ["/fast_response", "/medium_response", "/slow_response"]
+            .iter()
+            .enumerate()
+        {
             let mut tasks = vec![];
             // Dispatch requests simultaneously.
             for _ in 0..req_count {

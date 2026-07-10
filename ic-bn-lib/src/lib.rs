@@ -234,9 +234,18 @@ macro_rules! retry_async {
         let mut delay = $delay;
 
         let result = loop {
+            // Bound this attempt by the *remaining* budget, not the original
+            // `$timeout` - otherwise a dependency that consistently takes
+            // just under `$timeout` before failing can make the loop's total
+            // wall-clock time run to several multiples of `$timeout`.
+            let attempt_timeout = $timeout.saturating_sub(start.elapsed());
+            if attempt_timeout == std::time::Duration::ZERO {
+                break Err(anyhow::anyhow!("Timed out"));
+            }
+
             // Run the function wrapping it into Tokio timeout future so
             // its execution time doesn't exceed our configured limit
-            let Ok(res) = tokio::time::timeout($timeout, $f).await else {
+            let Ok(res) = tokio::time::timeout(attempt_timeout, $f).await else {
                 break Err(anyhow::anyhow!("Timed out"));
             };
 
@@ -372,5 +381,36 @@ mod test {
         assert_eq!(truncate("foobarbaz", 99), "foobarbaz");
 
         assert_eq!("tättähäärä härkä".truncate_bytes(12), "tättähää");
+    }
+
+    #[tokio::test]
+    async fn test_retry_async_bounds_total_time_to_timeout() {
+        use std::time::Duration;
+
+        let timeout = Duration::from_millis(300);
+        let base_delay = Duration::from_millis(20);
+        let attempt_duration = Duration::from_millis(200);
+
+        let start = std::time::Instant::now();
+        let result: Result<(), anyhow::Error> = retry_async! {
+            async {
+                tokio::time::sleep(attempt_duration).await;
+                Err::<(), _>(RetryError::Transient(anyhow::anyhow!("always fails")))
+            },
+            timeout,
+            base_delay
+        };
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err());
+        // Each attempt (200ms) comfortably fits within the overall timeout
+        // (300ms) on its own, so a per-attempt timeout that isn't shrunk to
+        // the remaining budget lets a second full attempt run past the
+        // deadline (previously observed ~440ms total here instead of
+        // staying close to the configured 300ms).
+        assert!(
+            elapsed < timeout + Duration::from_millis(100),
+            "retry_async! ran for {elapsed:?}, expected to stay close to the {timeout:?} budget"
+        );
     }
 }

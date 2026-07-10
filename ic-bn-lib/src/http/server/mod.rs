@@ -264,6 +264,7 @@ impl Server {
             backlog: self.options.backlog,
             mss: self.options.tcp_mss,
             keepalive: (&self.options).into(),
+            ..Default::default()
         };
 
         let listener =
@@ -387,6 +388,7 @@ mod test {
                 backlog: 128,
                 mss: None,
                 keepalive: (&opts).into(),
+                ..Default::default()
             },
         )
         .unwrap();

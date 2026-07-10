@@ -341,6 +341,10 @@ impl FromStr for RateLimitType {
 
         // We already checked that rate is > 0
         let replenish_period = dur / rate;
+        if replenish_period.is_zero() {
+            return Err(anyhow!("rate is too high for the given duration").into());
+        }
+
         let quota = Quota::with_period(replenish_period)
             .unwrap()
             .allow_burst(NonZeroU32::new(rate).unwrap());
@@ -1104,6 +1108,12 @@ mod test {
         assert!(RequestAction::from_str("limit:0/1s").is_err());
         assert!(RequestAction::from_str("limit:1/0s").is_err());
         assert!(RequestAction::from_str("limit:1/foo").is_err());
+
+        // Rate high enough that `dur / rate` truncates to zero should be a parse
+        // error, not a panic (dur/rate used to be passed unchecked into
+        // `Quota::with_period(..).unwrap()`, which panics on a zero duration).
+        assert!(RequestAction::from_str("limit:global:2000000000/1s").is_err());
+        assert!(RequestAction::from_str("limit:per_ip:2000000000/1s").is_err());
     }
 
     #[test]

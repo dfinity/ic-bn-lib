@@ -57,6 +57,9 @@ pub struct ListenerOpts {
     pub backlog: u32,
     pub mss: Option<u32>,
     pub keepalive: TcpKeepalive,
+    /// Permission bits applied to a Unix domain socket's path after binding.
+    /// Ignored for TCP listeners.
+    pub unix_socket_permissions: u32,
 }
 
 impl Default for ListenerOpts {
@@ -65,6 +68,10 @@ impl Default for ListenerOpts {
             backlog: 1024,
             mss: None,
             keepalive: TcpKeepalive::new(),
+            // Owner+group only by default - any local user/process able to
+            // reach the socket path can otherwise connect regardless of the
+            // intended peer.
+            unix_socket_permissions: 0o660,
         }
     }
 }

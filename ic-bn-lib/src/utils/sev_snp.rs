@@ -52,7 +52,6 @@ impl SevSnpState {
     }
 }
 
-#[allow(clippy::significant_drop_tightening)]
 pub async fn handler(
     State(state): State<SevSnpState>,
     body: Bytes,
@@ -70,8 +69,24 @@ pub async fn handler(
     }
 
     let data: [u8; 64] = body.as_ref().try_into().unwrap();
-    let mut fw = state.fw.lock().unwrap();
-    let report = fw.get_report(None, Some(data), Some(1)).map_err(|e| {
+
+    // `get_report()` performs a blocking ioctl to the SEV-SNP firmware
+    // device. Run it on a blocking thread rather than tying up a tokio
+    // worker thread (and every other concurrent request waiting on the same
+    // `Mutex`) for the duration of the syscall.
+    let fw = state.fw.clone();
+    let report = tokio::task::spawn_blocking(move || {
+        let mut fw = fw.lock().unwrap();
+        fw.get_report(None, Some(data), Some(1))
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Attestation report task failed: {e}"),
+        )
+    })?
+    .map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Unable to create attestation report: {e}"),
