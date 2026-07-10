@@ -28,8 +28,6 @@ struct WrrCounters {
 
 /// Implementation of Weighted Round Robin algorithm.
 /// Based on http://kb.linuxvirtualserver.org/wiki/Weighted_Round-Robin_Scheduling
-///
-/// TODO: move it to `ic-bn-lib` as a generic version and replace one that is used in Distributor there.
 #[derive(Debug)]
 pub struct Wrr<T> {
     items: Vec<(usize, T)>,
