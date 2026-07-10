@@ -1,16 +1,14 @@
 use core::fmt;
 use std::{collections::BTreeMap, str::FromStr, sync::Arc};
 
-use anyhow::{Context, Error};
+use anyhow::Context;
 use arc_swap::ArcSwapOption;
 use derive_new::new;
 use fqdn::{FQDN, Fqdn};
-use ic_bn_lib_common::{
-    traits::tls::{ResolvesServerCert, StoresCertificates},
-    types::tls::Cert,
-};
 use prometheus::{IntGaugeVec, Registry, register_int_gauge_vec_with_registry};
 use rustls::{server::ClientHello, sign::CertifiedKey};
+
+use crate::tls::{Cert, Error, ResolvesServerCert, StoresCertificates};
 
 #[derive(Debug, Clone)]
 pub struct Metrics {

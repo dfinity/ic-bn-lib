@@ -3,21 +3,21 @@ use std::str::FromStr;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use fqdn::FQDN;
-use strum::IntoStaticStr;
-use thiserror::Error;
-
-use super::super::{
-    traits::time::UtcTimestamp,
-    types::{
-        domain::{DomainStatus, RegisteredDomain},
-        task::{InputTask, ScheduledTask, TaskResult},
-    },
-};
 use ic_custom_domains_canister_api::{
     FetchTaskError as ApiFetchTaskError, GetDomainStatusError as ApiGetDomainStatusError,
     GetLastChangeTimeError as ApiGetLastChangeTimeError, HasNextTaskError as ApiHasNextTaskError,
     ListCertificatesPageError as ApiListCertificatesPageError,
     SubmitTaskError as ApiSubmitTaskError, TryAddTaskError as ApiTryAddTaskError,
+};
+use strum::IntoStaticStr;
+use thiserror::Error;
+
+use crate::custom_domains::base::{
+    traits::time::UtcTimestamp,
+    types::{
+        domain::{DomainStatus, RegisteredDomain},
+        task::{InputTask, ScheduledTask, TaskResult},
+    },
 };
 
 pub type TaskId = UtcTimestamp;

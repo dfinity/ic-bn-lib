@@ -1,6 +1,21 @@
-use std::sync::{Arc, RwLock};
+use std::{
+    fmt::Debug,
+    sync::{Arc, RwLock},
+};
 
-use ic_bn_lib_common::traits::Healthy;
+use ic_agent::agent::route_provider::RouteProvider;
+
+/// Generic trait that allows components to signal their health status
+pub trait Healthy: Send + Sync + Debug + 'static {
+    fn healthy(&self) -> bool;
+}
+
+impl Healthy for Arc<dyn RouteProvider> {
+    fn healthy(&self) -> bool {
+        // We're healthy if there's at least one healthy Boundary Node
+        self.routes_stats().healthy.unwrap_or_default() > 0
+    }
+}
 
 /// Aggregates objects that implement Healthy trait.
 /// It is healthy when all inner services are healthy.

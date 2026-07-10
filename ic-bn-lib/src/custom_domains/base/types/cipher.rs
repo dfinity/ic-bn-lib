@@ -1,8 +1,9 @@
-use super::super::traits::cipher::{CipherError, CiphersCertificates};
 use chacha20poly1305::{
     Key, KeyInit, XChaCha20Poly1305, XNonce,
     aead::{Aead, OsRng, rand_core::RngCore},
 };
+
+use crate::custom_domains::base::traits::cipher::{CipherError, CiphersCertificates};
 
 /// The length of the XChaCha20Poly1305 nonce in bytes.
 const NONCE_LEN: usize = 24;

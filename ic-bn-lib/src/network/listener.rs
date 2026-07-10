@@ -1,10 +1,9 @@
 use std::{io, net::SocketAddr, os::unix::fs::PermissionsExt, path::PathBuf};
 
-use ic_bn_lib_common::types::http::{Addr, ListenerOpts};
 use socket2::{Domain, Socket, Type};
 use tokio::net::{TcpListener, UnixListener, UnixSocket};
 
-use crate::network::AsyncReadWrite;
+use crate::network::{Addr, AsyncReadWrite, ListenerOpts};
 
 /// Generic connection listener
 pub enum Listener {
@@ -94,7 +93,10 @@ pub fn listen_unix(path: PathBuf, opts: ListenerOpts) -> io::Result<UnixListener
 
     socket.bind(&path)?;
     let socket = socket.listen(opts.backlog)?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))?;
+    std::fs::set_permissions(
+        &path,
+        std::fs::Permissions::from_mode(opts.unix_socket_permissions),
+    )?;
 
     Ok(socket)
 }

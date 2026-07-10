@@ -5,14 +5,11 @@ use std::{
 };
 
 use arc_swap::{ArcSwap, ArcSwapOption};
-use ic_bn_lib_common::{
-    traits::utils::{ChecksTarget, ExecutesRequest},
-    types::utils::TargetState,
-};
 use tokio::{select, sync::watch::Receiver};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::utils::{
+    ChecksTarget, ExecutesRequest, TargetState,
     distributor::{self, Distributor, Strategy},
     health_check::{self, HealthChecker},
 };
@@ -50,7 +47,7 @@ where
             .iter()
             .zip(&self.weights)
             .filter(|x| x.0.1 == TargetState::Healthy)
-            .map(|x| (x.0.0.clone(), *x.1))
+            .map(|x| (*x.1, x.0.0.clone()))
             .collect::<Vec<_>>();
 
         // If there are no healthy nodes - remove the distributor
@@ -67,7 +64,7 @@ where
         );
         self.distributor.store(Some(Arc::new(distributor)));
         self.healthy
-            .store(Arc::new(healthy.into_iter().map(|x| x.0).collect()));
+            .store(Arc::new(healthy.into_iter().map(|x| x.1).collect()));
     }
 
     async fn run(&self, token: CancellationToken) {

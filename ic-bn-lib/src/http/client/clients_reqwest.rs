@@ -9,10 +9,6 @@ use std::{
 use ahash::RandomState;
 use anyhow::Context;
 use async_trait::async_trait;
-use ic_bn_lib_common::{
-    traits::dns::CloneableDnsResolver,
-    types::http::{ClientOptions, Error, HttpVersion},
-};
 use moka::sync::{Cache, CacheBuilder};
 use prometheus::Registry;
 use reqwest::{Request, Response, dns::Resolve};
@@ -20,6 +16,13 @@ use scopeguard::defer;
 use url::Url;
 
 use super::{Client, ClientStats, ClientWithStats, Metrics, Stats};
+use crate::{
+    dns::resolvers::CloneableDnsResolver,
+    http::{
+        Error,
+        client::{ClientOptions, HttpVersion},
+    },
+};
 
 // Extracts host:port from the URL
 fn extract_host(url: &Url) -> String {

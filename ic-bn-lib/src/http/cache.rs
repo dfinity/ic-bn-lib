@@ -1,5 +1,6 @@
 use std::{
     fmt::Debug,
+    hash::Hash,
     marker::PhantomData,
     mem::size_of,
     sync::Arc,
@@ -15,13 +16,6 @@ use http::{
     header::{CACHE_CONTROL, RANGE},
 };
 use http_body::Body as _;
-use ic_bn_lib_common::{
-    traits::{
-        Run,
-        http::{Bypasser, CustomBypassReason, KeyExtractor},
-    },
-    types::http::{CacheBypassReason, CacheError, Error as HttpError},
-};
 use moka::{
     Expiry,
     sync::{Cache as MokaCache, CacheBuilder as MokaCacheBuilder},
@@ -38,7 +32,76 @@ use tokio::{select, sync::Mutex, time::sleep};
 use tokio_util::sync::CancellationToken;
 
 use super::{body::buffer_body, calc_headers_size, extract_authority};
-use crate::http::headers::X_CACHE_TTL;
+use crate::{
+    http::{Error as HttpError, headers::X_CACHE_TTL},
+    tasks::Run,
+};
+
+/// HTTP Cache error
+#[derive(thiserror::Error, Debug)]
+pub enum CacheError {
+    #[error("unable to extract key from request: {0}")]
+    ExtractKey(String),
+    #[error("unable to execute bypasser: {0}")]
+    ExecuteBypasser(String),
+    #[error("timed out while fetching body")]
+    FetchBodyTimeout,
+    #[error("body is too big")]
+    FetchBodyTooBig,
+    #[error("unable to fetch request body: {0}")]
+    FetchBody(String),
+    #[error("unable to parse content-length header")]
+    ParseContentLength,
+    #[error("{0}")]
+    Other(String),
+}
+
+/// Trait to extract the caching key from the given HTTP request
+pub trait KeyExtractor: Clone + Send + Sync + Debug + 'static {
+    /// The type of the key.
+    type Key: Clone + Send + Sync + Debug + Hash + Eq + 'static;
+
+    /// Extraction method, will return [`Error`] response when the extraction failed
+    fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, CacheError>;
+}
+
+/// Reason for bypassing caching of the request
+pub trait CustomBypassReason:
+    Debug + Clone + std::fmt::Display + Into<&'static str> + PartialEq + Eq + Send + Sync + 'static
+{
+}
+
+/// Trait to decide if we need to bypass caching of the given request
+pub trait Bypasser: Clone + Send + Sync + Debug + 'static {
+    /// Custom bypass reason
+    type BypassReason: CustomBypassReason;
+
+    /// Checks if we should bypass the given request
+    fn bypass<T>(&self, req: &Request<T>) -> Result<Option<Self::BypassReason>, CacheError>;
+}
+
+/// Reason for bypassing the HTTP cache for the particular request
+#[derive(Debug, Clone, Display, PartialEq, Eq, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum CacheBypassReason<R: CustomBypassReason> {
+    MethodNotCacheable,
+    SizeUnknown,
+    BodyTooBig,
+    HTTPError,
+    UnableToExtractKey,
+    UnableToRunBypasser,
+    CacheControl,
+    Custom(R),
+}
+
+impl<R: CustomBypassReason> CacheBypassReason<R> {
+    pub fn into_str(self) -> &'static str {
+        match self {
+            Self::Custom(v) => v.into(),
+            _ => self.into(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Display, PartialEq, Eq, IntoStaticStr)]
 pub enum CustomBypassReasonDummy {}
@@ -536,11 +599,16 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
             .locks
             .get_with_by_ref(&key, || Arc::new(Mutex::new(())));
 
+        // Holds the guard (if we got one) so that it stays locked across the
+        // backend call & cache insert below, actually serializing concurrent
+        // requests for the same key instead of releasing it immediately.
+        let mut guard = None;
         let mut lock_obtained = false;
         select! {
             // Only one parallel request should execute and populate the cache.
             // Other requests will wait for the lock to be released and get results from the cache.
-            _ = lock.lock() => {
+            g = lock.lock() => {
+                guard = Some(g);
                 lock_obtained = true;
             }
 
@@ -562,7 +630,7 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
 
         // Otherwise pass the request forward
         let now = Instant::now();
-        Ok(match self.pass_request(request, next).await? {
+        let result = match self.pass_request(request, next).await? {
             // If the body was fetched - cache it
             ResponseType::Fetched(v, ttl) => {
                 let delta = now.elapsed();
@@ -577,7 +645,14 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
 
             // Otherwise just pass it up
             ResponseType::Streamed(v, reason) => (CacheStatus::Bypass(reason), v),
-        })
+        };
+
+        // Release the lock only now that the cache has been populated (or the
+        // request has been fully handled), so that other requests waiting on
+        // it actually observe a filled cache instead of racing to the backend.
+        drop(guard);
+
+        Ok(result)
     }
 
     // Passes the request down the line and conditionally fetches the response body
@@ -772,6 +847,14 @@ mod tests {
     async fn handler_proxy_cache_lock(request: Request<Body>) -> impl IntoResponse {
         if request.uri().path().contains("slow_response") {
             sleep(2 * PROXY_LOCK_TIMEOUT).await;
+        } else if request.uri().path().contains("medium_response") {
+            // Slower than an instant response but well within the lock timeout,
+            // so concurrent requests actually have to wait on the lock rather
+            // than falling through via the lock-wait timeout (as "slow_response"
+            // does) or completing so fast that scheduling luck alone produces
+            // a single miss (as "fast_response" does). This is the only case
+            // that actually exercises the lock holding across the backend call.
+            sleep(PROXY_LOCK_TIMEOUT / 4).await;
         }
 
         "test_body"
@@ -1324,10 +1407,13 @@ mod tests {
             .layer(from_fn_with_state(Arc::clone(&cache), middleware));
 
         let req_count = 50;
-        // Expected cache misses/hits for fast/slow responses, respectively.
-        let expected_misses = [1, req_count];
-        let expected_hits = [req_count - 1, 0];
-        for (idx, uri) in ["/fast_response", "/slow_response"].iter().enumerate() {
+        // Expected cache misses/hits for fast/medium/slow responses, respectively.
+        let expected_misses = [1, 1, req_count];
+        let expected_hits = [req_count - 1, req_count - 1, 0];
+        for (idx, uri) in ["/fast_response", "/medium_response", "/slow_response"]
+            .iter()
+            .enumerate()
+        {
             let mut tasks = vec![];
             // Dispatch requests simultaneously.
             for _ in 0..req_count {

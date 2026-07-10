@@ -8,10 +8,6 @@ use hyper_util::{
     client::legacy::{Client as HyperClient, connect::HttpConnector},
     rt::TokioExecutor,
 };
-use ic_bn_lib_common::{
-    traits::acme::{AcmeCertificateClient, TokenManager},
-    types::acme::{AcmeCert, AcmeUrl, Error},
-};
 use instant_acme::{
     Account, AccountCredentials, AuthorizationHandle, AuthorizationStatus, BodyWrapper,
     BytesResponse, ChallengeHandle, ChallengeType, Error as AcmeError,
@@ -19,11 +15,15 @@ use instant_acme::{
     RetryPolicy, RevocationRequest,
 };
 use rcgen::{CertificateParams, DistinguishedName, KeyPair};
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 
 use crate::{
     RetryError, retry_async,
-    tls::{prepare_client_config, verify::NoopServerCertVerifier},
+    tls::{
+        acme::{AcmeCert, AcmeCertificateClient, AcmeUrl, Error, TokenManager},
+        prepare_client_config,
+        verify::NoopServerCertVerifier,
+    },
 };
 
 struct HttpClient(HyperClient<hyper_rustls::HttpsConnector<HttpConnector>, BodyWrapper<Bytes>>);
@@ -399,61 +399,81 @@ impl Client {
             order.state().status
         );
 
-        // Process authorizations and fulfill their challenges
-        self.process_authorizations(&mut order).await?;
+        // From this point on, challenges may get set up (DNS-01 TXT record /
+        // ALPN response), so no matter how issuance finishes we must attempt
+        // to clean them up below - otherwise a mid-issuance failure (order
+        // timeout, CSR/finalize failure, cert-poll timeout) leaves a dangling
+        // challenge behind until, if ever, a later `issue()` call for the
+        // exact same domain set happens to clean it up first.
+        let result: Result<AcmeCert, Error> = async move {
+            // Process authorizations and fulfill their challenges
+            self.process_authorizations(&mut order).await?;
 
-        debug!("Authorizations processed, waiting for the order to reach Ready state");
+            debug!("Authorizations processed, waiting for the order to reach Ready state");
 
-        let retry_policy = RetryPolicy::new().timeout(self.opts.order_timeout);
+            let retry_policy = RetryPolicy::new().timeout(self.opts.order_timeout);
 
-        // Wait until the order reaches Ready state or becomes invalid
-        order
-            .poll_ready(&retry_policy)
-            .await
-            .map_err(Error::OrderUnableToReachReadyStatus)?;
+            // Wait until the order reaches Ready state or becomes invalid
+            order
+                .poll_ready(&retry_policy)
+                .await
+                .map_err(Error::OrderUnableToReachReadyStatus)?;
 
-        debug!("Order reached Ready state, creating CSR");
+            debug!("Order reached Ready state, creating CSR");
 
-        // Prepare the signing request
-        let mut params =
-            CertificateParams::new(names).map_err(Error::UnableToGenerateCertificateParams)?;
-        params.distinguished_name = DistinguishedName::new();
+            // Prepare the signing request
+            let mut params =
+                CertificateParams::new(names).map_err(Error::UnableToGenerateCertificateParams)?;
+            params.distinguished_name = DistinguishedName::new();
 
-        // Parse or create the private key
-        let key_pair = if let Some(v) = private_key {
-            KeyPair::from_pem(&String::from_utf8_lossy(&v))
-                .map_err(Error::UnableToParsePrivateKey)?
-        } else {
-            KeyPair::generate().map_err(Error::UnableToGeneratePrivateKey)?
-        };
+            // Parse or create the private key
+            let key_pair = if let Some(v) = private_key {
+                KeyPair::from_pem(&String::from_utf8_lossy(&v))
+                    .map_err(Error::UnableToParsePrivateKey)?
+            } else {
+                KeyPair::generate().map_err(Error::UnableToGeneratePrivateKey)?
+            };
 
-        let csr = params
-            .serialize_request(&key_pair)
-            .map_err(Error::UnableToCreateCSR)?;
+            let csr = params
+                .serialize_request(&key_pair)
+                .map_err(Error::UnableToCreateCSR)?;
 
-        // Issue the certificate
-        debug!("Finalizing the order");
-        order
-            .finalize_csr(csr.der())
-            .await
-            .map_err(Error::UnableToFinalizeOrder)?;
+            // Issue the certificate
+            debug!("Finalizing the order");
+            order
+                .finalize_csr(csr.der())
+                .await
+                .map_err(Error::UnableToFinalizeOrder)?;
 
-        debug!("Order is finalized, polling for the certificate");
+            debug!("Order is finalized, polling for the certificate");
 
-        // Retrieve the certificate.
-        // It polls until the order is Valid, Invalid or times out.
-        let cert = order
-            .poll_certificate(&retry_policy)
-            .await
-            .map_err(Error::UnableToGetCertificate)?;
+            // Retrieve the certificate.
+            // It polls until the order is Valid, Invalid or times out.
+            let cert = order
+                .poll_certificate(&retry_policy)
+                .await
+                .map_err(Error::UnableToGetCertificate)?;
 
-        debug!("Certificate obtained successfully, cleaning up");
-        self.cleanup(&auth_ids).await?;
+            Ok(AcmeCert {
+                cert: cert.as_bytes().to_vec(),
+                key: key_pair.serialize_pem().as_bytes().to_vec(),
+            })
+        }
+        .await;
 
-        Ok(AcmeCert {
-            cert: cert.as_bytes().to_vec(),
-            key: key_pair.serialize_pem().as_bytes().to_vec(),
-        })
+        debug!("Cleaning up the authorization tokens");
+        if let Err(e) = self.cleanup(&auth_ids).await {
+            warn!("Unable to clean up ACME challenge tokens for {auth_ids:?}: {e:#}");
+
+            // Only surface the cleanup error if issuance itself succeeded -
+            // otherwise the original error is the more important one and
+            // shouldn't be masked by a secondary cleanup failure.
+            if result.is_ok() {
+                return Err(e);
+            }
+        }
+
+        result
     }
 }
 

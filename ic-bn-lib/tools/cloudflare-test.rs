@@ -1,6 +1,5 @@
 use clap::Parser;
-use ic_bn_lib::tls::acme::dns::cloudflare::Cloudflare;
-use ic_bn_lib_common::traits::acme::DnsManager;
+use ic_bn_lib::tls::acme::{DnsManager, Record, dns::cloudflare::Cloudflare};
 
 #[derive(Parser)]
 pub struct Cli {
@@ -28,12 +27,7 @@ async fn main() {
     println!("Records: {records:?}");
 
     client
-        .create(
-            &cli.zone,
-            "_foo_bar",
-            ic_bn_lib_common::types::acme::Record::Txt("blah".into()),
-            60,
-        )
+        .create(&cli.zone, "_foo_bar", Record::Txt("blah".into()), 60)
         .await
         .unwrap();
 

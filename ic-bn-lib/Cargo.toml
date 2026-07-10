@@ -64,7 +64,6 @@ hyper = { workspace = true }
 hyper-rustls = { workspace = true, optional = true }
 hyper-util = { workspace = true }
 ic-agent = { workspace = true }
-ic-bn-lib-common = { workspace = true }
 ic-custom-domains-canister-api = { workspace = true }
 indoc = { workspace = true }
 instant-acme = { workspace = true, optional = true }
@@ -73,6 +72,7 @@ mail-auth = { workspace = true, optional = true }
 mail-parser = { workspace = true, optional = true }
 moka = { workspace = true }
 nix = { workspace = true }
+parse-size = { workspace = true }
 ppp = { workspace = true }
 pem = { workspace = true }
 prometheus = { workspace = true }

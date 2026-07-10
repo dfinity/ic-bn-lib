@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use axum::{body::Body, extract::Request, response::Response};
-use ic_bn_lib_common::{
-    traits::http::{Client, ClientHttp},
-    types::http::Error,
-};
 use url::Url;
 
 use super::{body::SyncBody, headers::strip_connection_headers};
+use crate::http::{
+    Error,
+    client::{Client, ClientHttp},
+};
 
 /// Proxies provided Axum request to a given URL using `Client` trait object and returns Axum response
 pub async fn proxy(
@@ -59,9 +59,8 @@ mod test {
 
     use axum::{body::Body, extract::Request};
     use http_body::Body as _;
-    use ic_bn_lib_common::traits::http::Client;
 
-    use crate::http::proxy::proxy;
+    use crate::http::{client::Client, proxy::proxy};
 
     #[derive(Debug)]
     struct HttpClient;

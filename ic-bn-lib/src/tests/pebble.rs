@@ -10,7 +10,6 @@ use std::{
 
 use anyhow::{Context, Error, anyhow};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use ic_bn_lib_common::{traits::dns::Resolves, types::dns::Options};
 use nix::{
     sys::signal::{Signal, kill},
     unistd::Pid,
@@ -21,8 +20,11 @@ use tempfile::{TempDir, tempdir};
 use tokio::fs;
 
 use crate::{
+    dns::{
+        Options as DnsOptions,
+        resolvers::{Resolver, Resolves},
+    },
     download_url_async,
-    http::dns::Resolver,
     tests::{TEST_CERT_1, TEST_KEY_1},
 };
 
@@ -378,7 +380,7 @@ impl Env {
 
     /// Returns a ready-to-use DNS resolver targeting pebble-challtestsrv
     pub fn resolver(&self) -> Arc<dyn Resolves> {
-        let opts = Options::simple(&[self.ip_dns_cleartext()], self.port_dns_cleartext());
+        let opts = DnsOptions::simple(&[self.ip_dns_cleartext()], self.port_dns_cleartext());
         Arc::new(Resolver::new(opts).unwrap())
     }
 
@@ -415,12 +417,12 @@ mod test {
 }
 
 pub mod dns {
+    use crate::tls::acme::TokenManager;
     use anyhow::{Error, anyhow};
     use async_trait::async_trait;
-    use ic_bn_lib_common::traits::acme::TokenManager;
 
     #[cfg(feature = "acme-dns")]
-    use ic_bn_lib_common::{traits::acme::DnsManager, types::acme::Record};
+    use crate::tls::acme::{DnsManager, Record};
     use serde_json::json;
     use url::Url;
 

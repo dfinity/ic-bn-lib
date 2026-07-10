@@ -8,8 +8,27 @@ use anyhow::Error;
 use axum::{extract::State, response::IntoResponse};
 use bytes::Bytes;
 use http::StatusCode;
+use humantime::parse_duration;
 use moka::sync::{Cache, CacheBuilder};
 use sev::firmware::guest::Firmware;
+
+use crate::parse_size;
+
+/// SEV-SNP CLI
+#[derive(clap::Args)]
+pub struct SevSnpCli {
+    /// Enable SEV-SNP measurement reporting
+    #[clap(env, long)]
+    pub sev_snp_enable: bool,
+
+    /// Cache TTL for SEV-SNP reports
+    #[clap(env, long, default_value = "30s", value_parser = parse_duration)]
+    pub sev_snp_cache_ttl: Duration,
+
+    /// Max cache size for SEV-SNP reports
+    #[clap(env, long, default_value = "10m", value_parser = parse_size)]
+    pub sev_snp_cache_size: u64,
+}
 
 #[derive(Clone)]
 pub struct SevSnpState {
@@ -33,7 +52,6 @@ impl SevSnpState {
     }
 }
 
-#[allow(clippy::significant_drop_tightening)]
 pub async fn handler(
     State(state): State<SevSnpState>,
     body: Bytes,
@@ -51,8 +69,24 @@ pub async fn handler(
     }
 
     let data: [u8; 64] = body.as_ref().try_into().unwrap();
-    let mut fw = state.fw.lock().unwrap();
-    let report = fw.get_report(None, Some(data), Some(1)).map_err(|e| {
+
+    // `get_report()` performs a blocking ioctl to the SEV-SNP firmware
+    // device. Run it on a blocking thread rather than tying up a tokio
+    // worker thread (and every other concurrent request waiting on the same
+    // `Mutex`) for the duration of the syscall.
+    let fw = state.fw.clone();
+    let report = tokio::task::spawn_blocking(move || {
+        let mut fw = fw.lock().unwrap();
+        fw.get_report(None, Some(data), Some(1))
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Attestation report task failed: {e}"),
+        )
+    })?
+    .map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Unable to create attestation report: {e}"),

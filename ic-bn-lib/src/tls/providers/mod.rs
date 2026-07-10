@@ -4,23 +4,23 @@ pub mod storage;
 
 pub use dir::Provider as Dir;
 pub use file::Provider as File;
-use ic_bn_lib_common::{
-    traits::{
-        Healthy, Run,
-        tls::{ProvidesCertificates, StoresCertificates},
-    },
-    types::tls::{CertKey, Pem},
-};
 
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Error, anyhow};
+use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use rustls::sign::CertifiedKey;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crate::tls::{extract_sans_der, extract_validity_der, pem_convert_to_rustls_single};
+use crate::{
+    tasks::Run,
+    tls::{
+        CertKey, Error, Pem, ProvidesCertificates, StoresCertificates, extract_sans_der,
+        extract_validity_der, pem_convert_to_rustls_single,
+    },
+    utils::health_manager::Healthy,
+};
 
 /// Converts a PEM-encoded cert+key pair into CertKey
 pub fn pem_convert_to_certkey(pem: &[u8]) -> Result<CertKey, Error> {
@@ -29,9 +29,7 @@ pub fn pem_convert_to_certkey(pem: &[u8]) -> Result<CertKey, Error> {
 
     let san = extract_sans_der(&cert_key.cert[0]).context("unable to extract SANs")?;
     if san.is_empty() {
-        return Err(anyhow!(
-            "no supported names found in SubjectAlternativeName extension"
-        ));
+        return Err(anyhow!("no supported names found in SubjectAlternativeName extension").into());
     }
 
     let (_, not_after) =
@@ -189,7 +187,7 @@ impl Healthy for Aggregator {
 
 #[async_trait]
 impl Run for Aggregator {
-    async fn run(&self, _: CancellationToken) -> Result<(), Error> {
+    async fn run(&self, _: CancellationToken) -> Result<(), anyhow::Error> {
         self.refresh().await;
         Ok(())
     }
@@ -215,7 +213,7 @@ pub mod test {
                 self.1.fetch_add(1, Ordering::SeqCst);
                 Ok(vec![self.0.clone()])
             } else {
-                Err(anyhow!("foo"))
+                Err(anyhow!("foo").into())
             }
         }
     }
@@ -226,7 +224,7 @@ pub mod test {
     #[async_trait]
     impl ProvidesCertificates for TestProviderBroken {
         async fn get_certificates(&self) -> Result<Vec<Pem>, Error> {
-            Err(anyhow!("I'm dead"))
+            Err(anyhow!("I'm dead").into())
         }
     }
 

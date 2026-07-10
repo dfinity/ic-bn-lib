@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 
-use anyhow::{Context, Error};
+use anyhow::Context;
 use async_trait::async_trait;
-use ic_bn_lib_common::{traits::tls::ProvidesCertificates, types::tls::Pem};
 use tokio::fs::read_dir;
 use tracing::debug;
+
+use crate::tls::{Error, Pem, ProvidesCertificates};
 
 // It searches for .pem files in the given directory and tries to find the
 // corresponding .key files with the same base name.

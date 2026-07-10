@@ -2,8 +2,8 @@ use std::cell::RefCell;
 
 use candid::Principal;
 use ic_stable_structures::{
-    memory_manager::{MemoryId, MemoryManager},
     DefaultMemoryImpl, StableBTreeMap, StableCell,
+    memory_manager::{MemoryId, MemoryManager},
 };
 
 use crate::state::CanisterState;

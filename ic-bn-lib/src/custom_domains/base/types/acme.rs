@@ -1,19 +1,20 @@
 use std::{sync::Arc, time::Duration};
 
+use anyhow::Context;
+use instant_acme::AccountCredentials;
+use reqwest::Url;
+
 use crate::{
-    http::dns::Resolver,
-    reqwest::Url,
+    dns::{Options as DnsOptions, resolvers::Resolver},
     tls::acme::{
+        AcmeUrl,
         client::{Client, ClientBuilder},
         dns::{
             TokenManagerDns,
             cloudflare::{Cloudflare, DEFAULT_CLOUDFLARE_URL},
         },
-        instant_acme::AccountCredentials,
     },
 };
-use anyhow::Context;
-use ic_bn_lib_common::types::{acme::AcmeUrl, dns::Options as DnsOptions};
 
 const DEFAULT_POLL_ORDER_TIMEOUT: Duration = Duration::from_secs(140);
 const DEFAULT_POLL_TOKEN_TIMEOUT: Duration = Duration::from_secs(140);

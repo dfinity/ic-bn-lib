@@ -18,10 +18,6 @@ use async_trait::async_trait;
 use candid::{CandidType, Decode, Deserialize, Encode, Principal};
 use derive_new::new;
 use fqdn::FQDN;
-use ic_bn_lib_common::{
-    traits::{Run, custom_domains::ProvidesCustomDomains, tls::ProvidesCertificates},
-    types::{CustomDomain, DomainFlags, tls::Pem},
-};
 use ic_custom_domains_canister_api::{
     CertificatesPage, DomainStatus as DomainStatusApi, FetchTaskError, GetDomainStatusError,
     GetLastChangeTimeError, HasNextTaskError, InputTask as InputTaskApi, ListCertificatesPageError,
@@ -35,18 +31,27 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
-use crate::custom_domains::base::{
-    traits::{
-        cipher::CiphersCertificates,
-        repository::{Repository, RepositoryError},
-        time::UtcTimestamp,
+use crate::{
+    custom_domains::{
+        CustomDomain, ProvidesCustomDomains,
+        base::{
+            traits::{
+                cipher::CiphersCertificates,
+                repository::{Repository, RepositoryError},
+                time::UtcTimestamp,
+            },
+            types::{
+                domain::{DomainStatus, RegisteredDomain},
+                task::{InputTask, ScheduledTask, TaskOutcome, TaskOutput, TaskResult},
+            },
+        },
+        flags::DomainFlags,
     },
-    types::{
-        domain::{DomainStatus, RegisteredDomain},
-        task::{InputTask, ScheduledTask, TaskOutcome, TaskOutput, TaskResult},
-    },
+    ic_agent::Agent,
+    tasks::Run,
+    tls::Pem,
+    tls::ProvidesCertificates,
 };
-use crate::ic_agent::Agent;
 
 #[derive(new)]
 pub struct CanisterClient {
@@ -395,7 +400,7 @@ impl Repository for CanisterClient {
 
 #[async_trait]
 impl ProvidesCertificates for CanisterClient {
-    async fn get_certificates(&self) -> Result<Vec<Pem>, anyhow::Error> {
+    async fn get_certificates(&self) -> Result<Vec<Pem>, crate::tls::Error> {
         Ok(self.certificates.load().as_ref().clone())
     }
 }

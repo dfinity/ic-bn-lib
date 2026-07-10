@@ -1,20 +1,24 @@
+pub mod cli;
+pub mod resolvers;
+
 use std::{
+    fmt::Debug,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     str::FromStr,
     sync::Arc,
-    time::Duration,
 };
 
 use anyhow::{Context, anyhow};
-use clap::Args;
-use hickory_resolver::config::{
-    ConnectionConfig, LookupIpStrategy, NameServerConfig, ResolveHosts, ResolverConfig,
-    ResolverOpts,
+use hickory_resolver::{
+    config::{
+        ConnectionConfig, LookupIpStrategy, NameServerConfig, ResolveHosts, ResolverConfig,
+        ResolverOpts,
+    },
+    net::{DnsError as HickoryDnsError, NetError},
 };
-use humantime::parse_duration;
 use strum::EnumString;
 
-use crate::types::http::Error;
+use crate::dns::cli::DnsCli;
 
 /// Default DNS servers
 pub const DEFAULT_RESOLVERS: &[IpAddr] = &[
@@ -64,7 +68,7 @@ pub enum Protocol {
 }
 
 impl FromStr for Protocol {
-    type Err = Error;
+    type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut iter = s.split(":");
@@ -79,7 +83,7 @@ impl FromStr for Protocol {
             "clear" => Ok(Self::Clear(port.unwrap_or(53))),
             "tls" => Ok(Self::Tls(port.unwrap_or(853))),
             "https" => Ok(Self::Https(port.unwrap_or(443))),
-            _ => Err(anyhow!("unknown DNS protocol: {proto}").into()),
+            _ => Err(anyhow!("unknown DNS protocol: {proto}")),
         }
     }
 }
@@ -93,7 +97,7 @@ pub struct Options {
 
 impl Options {
     /// Creates simple options with cleartext resolving using the given IPs and port
-    pub fn simple(addrs: &[IpAddr], port: u16) -> Options {
+    pub fn simple(addrs: &[IpAddr], port: u16) -> Self {
         let mut opts = ResolverOpts::default();
         opts.use_hosts_file = ResolveHosts::Never;
         opts.preserve_intermediates = false;
@@ -150,44 +154,6 @@ impl Iterator for SocketAddrs {
     }
 }
 
-/// DNS CLI parameters
-#[derive(Args)]
-pub struct DnsCli {
-    /// List of DNS servers to use
-    #[clap(env, long, value_delimiter = ',', default_values_t = DEFAULT_RESOLVERS)]
-    pub dns_servers: Vec<IpAddr>,
-
-    /// DNS protocol to use (clear/tls/https) with an optional port separated by a colon.
-    /// E.g. "clear:8053". If the port is omitted then the default is used.
-    #[clap(env, long, default_value = "clear")]
-    pub dns_protocol: Protocol,
-
-    /// Cache size for the resolver (in number of DNS records)
-    #[clap(env, long, default_value = "2048")]
-    pub dns_cache_size: u64,
-
-    /// Timeout for resolving
-    #[clap(env, long, default_value = "5s", value_parser = parse_duration)]
-    pub dns_timeout: Duration,
-
-    /// Number of resolving attempts to do
-    #[clap(env, long, default_value = "3")]
-    pub dns_attempts: usize,
-
-    /// TLS name to expect for TLS and HTTPS protocols (e.g. "dns.google" or "cloudflare-dns.com")
-    #[clap(env, long, default_value = "cloudflare-dns.com")]
-    pub dns_tls_name: String,
-
-    /// IP Lookup strategy to use. Can be one of `ipv4_only`, `ipv6_only`, `ipv4_and_ipv6`, `ipv4_then_ipv6` or `ipv6_then_ipv4`.
-    /// Default is to look up IPv4 and IPv6 in parallel.
-    #[clap(env, long, default_value = "ipv4_and_ipv6")]
-    pub dns_lookup_strategy: LookupStrategy,
-
-    /// Disable DNSSEC validation for DNS queries (DNSSEC is enabled by default)
-    #[clap(env, long)]
-    pub dns_dnssec_disabled: bool,
-}
-
 impl From<&DnsCli> for Options {
     fn from(c: &DnsCli) -> Self {
         Self {
@@ -199,7 +165,7 @@ impl From<&DnsCli> for Options {
 
 impl From<&DnsCli> for ResolverOpts {
     fn from(c: &DnsCli) -> Self {
-        let mut opts = ResolverOpts::default();
+        let mut opts = Self::default();
         opts.cache_size = c.dns_cache_size;
         opts.timeout = c.dns_timeout;
         opts.attempts = c.dns_attempts;
@@ -215,7 +181,8 @@ impl From<&DnsCli> for ResolverOpts {
 
 impl From<&DnsCli> for ResolverConfig {
     fn from(c: &DnsCli) -> Self {
-        let mut cfg = ResolverConfig::default();
+        let mut cfg = Self::default();
+
         for srv in &c.dns_servers {
             let connections = match c.dns_protocol {
                 Protocol::Clear(port) => vec![
@@ -248,4 +215,19 @@ impl From<&DnsCli> for ResolverConfig {
 
         cfg
     }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum DnsError {
+    #[error("Resolver error: {0}")]
+    Resolver(#[from] NetError),
+    #[error("{0}")]
+    Other(#[from] anyhow::Error),
+}
+
+/// Checks if given Hickory error means there was a negative lookup
+pub fn is_error_negative_lookup(e: &NetError) -> bool {
+    e.is_no_records_found()
+        || e.is_nx_domain()
+        || matches!(e, NetError::Dns(HickoryDnsError::Nsec { .. }))
 }

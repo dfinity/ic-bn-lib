@@ -7,26 +7,54 @@ pub mod sessions;
 pub mod tickets;
 pub mod verify;
 
-use std::{fs::read, path::PathBuf, sync::Arc};
+use std::{fmt::Debug, fs::read, io, ops::Deref, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, anyhow};
+use async_trait::async_trait;
 use fqdn::{FQDN, Fqdn};
-use ic_bn_lib_common::types::{
-    http::{ALPN_H1, ALPN_H2},
-    tls::TlsOptions,
-};
 use prometheus::Registry;
 use rustls::{
     ClientConfig, ServerConfig, SupportedProtocolVersion, TicketRotator,
     client::{ClientSessionMemoryCache, Resumption},
     compress::CompressionCache,
     crypto::aws_lc_rs,
-    server::ResolvesServerCert,
+    server::{ClientHello, ResolvesServerCert as ResolvesServerCertRustls},
     sign::CertifiedKey,
+    version::{TLS12, TLS13},
 };
 use rustls_platform_verifier::Verifier;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use x509_parser::prelude::{FromDer, GeneralName, ParsedExtension, X509Certificate};
+
+pub const ALPN_H1: &[u8] = b"http/1.1";
+pub const ALPN_H2: &[u8] = b"h2";
+pub const ALPN_ACME: &[u8] = b"acme-tls/1";
+
+/// Trait that the certificate providers should implement.
+/// It should return a vector of PEM-encoded cert-keys pairs.
+#[async_trait]
+pub trait ProvidesCertificates: Sync + Send + std::fmt::Debug {
+    /// Returns a list of certificates in PEM format
+    async fn get_certificates(&self) -> Result<Vec<Pem>, Error>;
+}
+
+/// Trait that a certificate storage must implement
+pub trait StoresCertificates<T: Clone + Send + Sync>: Send + Sync {
+    fn store(&self, cert_list: Vec<Cert<T>>) -> Result<(), Error>;
+}
+
+/// Custom `ResolvesServerCert` trait that borrows `ClientHello`.
+/// It's needed because Rustls' `ResolvesServerCert` consumes `ClientHello`
+/// <https://github.com/rustls/rustls/issues/1908>
+pub trait ResolvesServerCert: Debug + Send + Sync {
+    fn resolve(&self, client_hello: &ClientHello) -> Option<Arc<CertifiedKey>>;
+
+    /// Return first available certificate, if any.
+    /// Can be used as a fallback option.
+    fn resolve_any(&self) -> Option<Arc<CertifiedKey>> {
+        None
+    }
+}
 
 /// Generic error for now
 /// TODO improve
@@ -34,6 +62,52 @@ use x509_parser::prelude::{FromDer, GeneralName, ParsedExtension, X509Certificat
 pub enum Error {
     #[error(transparent)]
     Generic(#[from] anyhow::Error),
+    #[error(transparent)]
+    Io(#[from] io::Error),
+}
+
+/// A single, concatenated, PEM-encoded certificate and private key pair
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Pem(pub Vec<u8>);
+
+impl Deref for Pem {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_slice()
+    }
+}
+
+/// Generic certificate and a list of its SANs
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Cert<T: Clone + Send + Sync> {
+    pub san: Vec<String>,
+    pub not_after: i64,
+    pub cert: T,
+}
+
+/// Commonly used concrete type of the `Cert` for Rustls
+pub type CertKey = Cert<Arc<CertifiedKey>>;
+
+/// Options for TLS server
+pub struct TlsOptions {
+    pub additional_alpn: Vec<Vec<u8>>,
+    pub sessions_count: u64,
+    pub sessions_tti: Duration,
+    pub ticket_lifetime: Duration,
+    pub tls_versions: Vec<&'static SupportedProtocolVersion>,
+}
+
+impl Default for TlsOptions {
+    fn default() -> Self {
+        Self {
+            additional_alpn: vec![],
+            sessions_count: 1024,
+            sessions_tti: Duration::from_secs(3600),
+            ticket_lifetime: Duration::from_secs(3600),
+            tls_versions: vec![&TLS13, &TLS12],
+        }
+    }
 }
 
 /// Checks if given host matches any of domains.
@@ -180,7 +254,7 @@ pub fn pem_load_rustls_single(pem: PathBuf) -> Result<CertifiedKey, Error> {
 /// Must be run in Tokio environment since it spawns a task to record metrics
 pub fn prepare_server_config(
     opts: TlsOptions,
-    resolver: Arc<dyn ResolvesServerCert>,
+    resolver: Arc<dyn ResolvesServerCertRustls>,
     registry: &Registry,
 ) -> ServerConfig {
     let mut cfg = ServerConfig::builder_with_protocol_versions(&opts.tls_versions)

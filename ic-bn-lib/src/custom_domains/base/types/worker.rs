@@ -12,15 +12,13 @@ use candid::Principal;
 use chrono::{DateTime, Utc};
 use derive_new::new;
 use fqdn::FQDN;
-use ic_bn_lib_common::{
-    traits::{Run, acme::AcmeCertificateClient},
-    types::acme::Error as AcmeError,
-};
+use instant_acme::{RevocationReason, RevocationRequest};
 use pem::parse_many;
 use prometheus::{
     GaugeVec, HistogramVec, IntCounterVec, Registry, register_gauge_vec_with_registry,
     register_histogram_vec_with_registry, register_int_counter_vec_with_registry,
 };
+use rustls::pki_types::CertificateDer;
 use tokio::{
     select,
     time::{self, sleep},
@@ -38,8 +36,8 @@ use crate::{
             TaskOutput, TaskResult,
         },
     },
-    rustls::pki_types::CertificateDer,
-    tls::acme::instant_acme::{RevocationReason, RevocationRequest},
+    tasks::Run,
+    tls::acme::{AcmeCertificateClient, Error as AcmeError},
 };
 
 pub const TASK_DURATION_BUCKETS: &[f64] = &[5.0, 30.0, 60.0, 90.0, 120.0, 180.0, 300.0, 400.0];
@@ -864,27 +862,27 @@ mod tests {
     use async_trait::async_trait;
     use candid::Principal;
     use fqdn::FQDN;
-    use ic_bn_lib_common::{
-        traits::acme::AcmeCertificateClient,
-        types::acme::{AcmeCert, Error as AcmeError},
-    };
     use prometheus::Registry;
     use std::{str::FromStr, sync::Arc, time::Duration};
     use tokio::{spawn, task, time::sleep};
     use tokio_util::sync::CancellationToken;
 
-    use crate::custom_domains::base::{
-        traits::{
-            repository::{MockRepository, RepositoryError},
-            validation::{MockValidatesDomains, ValidationError},
-        },
-        types::{
-            task::{
-                IssueCertificateOutput, ScheduledTask, TaskFailReason, TaskKind, TaskOutcome,
-                TaskOutput, TaskResult,
+    use crate::tls::acme::Error as AcmeError;
+    use crate::{
+        custom_domains::base::{
+            traits::{
+                repository::{MockRepository, RepositoryError},
+                validation::{MockValidatesDomains, ValidationError},
             },
-            worker::{Worker, WorkerConfig, WorkerMetrics, WorkerStopped},
+            types::{
+                task::{
+                    IssueCertificateOutput, ScheduledTask, TaskFailReason, TaskKind, TaskOutcome,
+                    TaskOutput, TaskResult,
+                },
+                worker::{Worker, WorkerConfig, WorkerMetrics, WorkerStopped},
+            },
         },
+        tls::acme::{AcmeCert, AcmeCertificateClient},
     };
     use crate::{
         rcgen::{CertificateParams, DnType, KeyPair},

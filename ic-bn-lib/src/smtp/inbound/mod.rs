@@ -16,7 +16,6 @@ use anyhow::Context;
 use bytes::Bytes;
 use fqdn::FQDN;
 use hickory_resolver::net::NetError;
-use ic_bn_lib_common::types::http::TlsInfo;
 use mail_auth::MessageAuthenticator;
 use rustls::ServerConfig;
 use serde_with::SerializeDisplay;
@@ -33,7 +32,7 @@ use tokio_util::time::FutureExt;
 use uuid::Uuid;
 
 use crate::{
-    network::AsyncReadWrite,
+    network::{AsyncReadWrite, TlsInfo},
     smtp::{
         DeliversMail, DummyDeliveryAgent, DummyRecipientResolver, EmailMessage, MessageError,
         Metrics, ProtocolError, ReceivesSmtpNotifications, ResolvesRecipient, SessionCounters,

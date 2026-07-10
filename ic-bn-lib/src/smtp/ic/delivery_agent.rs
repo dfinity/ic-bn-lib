@@ -13,7 +13,6 @@ use candid::Principal;
 use futures::future::join_all;
 use http::Method;
 use ic_agent::{Agent, AgentError};
-use ic_bn_lib_common::traits::http::Client;
 use moka::sync::Cache;
 use show_option::ShowOption as _;
 use strum::IntoStaticStr;
@@ -23,6 +22,7 @@ use url::Url;
 use crate::{
     BoolYesNo,
     custom_domains::LooksUpCustomDomain,
+    http::Client,
     smtp::{
         DeliversMail, DeliveryError, EmailMessage, RecipientPolicy, RecipientResolveError,
         ResolvesRecipient, SessionMeta,
@@ -508,7 +508,7 @@ mod tests {
     };
 
     use crate::{
-        email,
+        email, principal,
         smtp::{
             SessionCounters,
             ic::candid::{Header, Message, SmtpOk, SmtpRequestError},
@@ -518,7 +518,6 @@ mod tests {
     use super::*;
     use ahash::HashMap;
     use fqdn::{FQDN, fqdn};
-    use ic_bn_lib_common::principal;
     use indoc::indoc;
     use prometheus::Registry;
     use tokio::sync::mpsc;

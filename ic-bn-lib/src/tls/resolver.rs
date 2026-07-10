@@ -1,7 +1,6 @@
 use std::{fmt::Debug, path::PathBuf, sync::Arc, time::Instant};
 
 use anyhow::{Context as _, Error};
-use ic_bn_lib_common::{traits::tls::ResolvesServerCert, types::http::ALPN_ACME};
 use prometheus::{
     HistogramVec, IntCounterVec, Registry, register_histogram_vec_with_registry,
     register_int_counter_vec_with_registry,
@@ -12,7 +11,9 @@ use rustls::{
 };
 use tracing::debug;
 
-use crate::tls::{pem_convert_to_rustls, pem_load_rustls, pem_load_rustls_single};
+use crate::tls::{
+    ALPN_ACME, ResolvesServerCert, pem_convert_to_rustls, pem_load_rustls, pem_load_rustls_single,
+};
 
 #[derive(Debug, Clone)]
 pub struct Metrics {
@@ -70,13 +71,27 @@ pub struct AggregatingResolver {
     metrics: Metrics,
 }
 
+/// Returns true only if `protocols` contains at least one entry and every
+/// entry is exactly `ALPN_ACME`. `Iterator::all` is vacuously true on an
+/// empty iterator, so this explicitly guards against a ClientHello with a
+/// present-but-empty ALPN extension being misrouted to the ACME resolver.
+fn is_acme_only_alpn<'a>(protocols: impl Iterator<Item = &'a [u8]>) -> bool {
+    let mut has_any = false;
+    let all_acme = protocols.into_iter().all(|x| {
+        has_any = true;
+        x == ALPN_ACME
+    });
+
+    has_any && all_acme
+}
+
 impl AggregatingResolver {
     fn resolve_inner(&self, ch: ClientHello) -> Option<Arc<CertifiedKey>> {
         // Accept missing SNI e.g. for testing cases when we're accessed over IP directly
         let sni = ch.server_name().unwrap_or("").to_string();
 
         // Check if we have an ACME ALPN and pass it to the ACME resolver (if we have one)
-        if ch.alpn().is_some_and(|mut x| x.all(|x| x == ALPN_ACME))
+        if ch.alpn().is_some_and(is_acme_only_alpn)
             && let Some(acme) = &self.acme
         {
             return acme.resolve(ch);
@@ -170,5 +185,30 @@ impl StubResolver {
 impl ResolvesServerCertRustls for StubResolver {
     fn resolve(&self, _client_hello: ClientHello) -> Option<Arc<CertifiedKey>> {
         Some(self.0.clone())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_is_acme_only_alpn() {
+        // Empty ALPN list must not vacuously match.
+        assert!(!is_acme_only_alpn(std::iter::empty()));
+
+        // Single ACME protocol matches.
+        assert!(is_acme_only_alpn([ALPN_ACME].into_iter()));
+
+        // Non-ACME protocol doesn't match.
+        assert!(!is_acme_only_alpn([b"http/1.1".as_slice()].into_iter()));
+
+        // Mixed list doesn't match.
+        assert!(!is_acme_only_alpn(
+            [ALPN_ACME, b"http/1.1".as_slice()].into_iter()
+        ));
+
+        // Multiple ACME entries still match.
+        assert!(is_acme_only_alpn([ALPN_ACME, ALPN_ACME].into_iter()));
     }
 }

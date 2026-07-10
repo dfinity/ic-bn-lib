@@ -24,6 +24,23 @@ pub type GovernorLayerAxum<K> = GovernorLayer<K, NoOpMiddleware<QuantaInstant>, 
 
 const BYPASS_HEADER: HeaderName = hname!("x-ratelimit-bypass-token");
 
+/// Constant-time comparison of the bypass header against the configured
+/// token, so that a network timing side-channel can't be used to recover the
+/// token byte-by-byte.
+fn bypass_token_matches(hdr: &HeaderValue, token: &str) -> bool {
+    let a = hdr.as_bytes();
+    let b = token.as_bytes();
+
+    if a.len() != b.len() {
+        return false;
+    }
+
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
 /// Extracts an IP from the request as a rate-limiting key
 #[derive(Clone)]
 pub struct IpKeyExtractor;
@@ -65,7 +82,7 @@ where
             .headers()
             .get(BYPASS_HEADER)
             .zip(self.bypass_token.as_ref())
-            .map(|(hdr, token)| hdr.as_bytes() == token.as_bytes())
+            .map(|(hdr, token)| bypass_token_matches(hdr, token))
             == Some(true);
 
         // If bypassing - call the wrapped service directly
@@ -193,6 +210,8 @@ pub fn layer<K: KeyExtractor, R: IntoResponse + Clone + Send + Sync + 'static>(
 
 #[cfg(test)]
 mod test {
+    use crate::http::server::conn::ConnInfo;
+
     use super::*;
 
     use axum::{
@@ -203,7 +222,6 @@ mod test {
         routing::post,
     };
     use http::{Method, StatusCode};
-    use ic_bn_lib_common::types::http::ConnInfo;
     use std::{sync::Arc, time::Duration};
     use tokio::time::sleep;
     use tower::Service;
@@ -323,6 +341,25 @@ mod test {
         assert_eq!(result.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = to_bytes(result.into_body(), 1024).await.unwrap().to_vec();
         assert_eq!(body, b"Unable to extract rate limiting key");
+    }
+
+    #[test]
+    fn test_bypass_token_matches() {
+        let token = "top_secret_token";
+        assert!(bypass_token_matches(
+            &HeaderValue::from_static("top_secret_token"),
+            token
+        ));
+        assert!(!bypass_token_matches(
+            &HeaderValue::from_static("not_very_secret"),
+            token
+        ));
+        // Different length must not match either, and must not panic.
+        assert!(!bypass_token_matches(
+            &HeaderValue::from_static("short"),
+            token
+        ));
+        assert!(!bypass_token_matches(&HeaderValue::from_static(""), token));
     }
 
     #[tokio::test]

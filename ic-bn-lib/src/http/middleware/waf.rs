@@ -19,6 +19,7 @@ use axum::{
     routing::post,
 };
 use bytes::Bytes;
+use clap::Args;
 use futures::future::BoxFuture;
 use governor::{
     Quota, RateLimiter,
@@ -30,10 +31,6 @@ use http::{
     header::{HOST, RETRY_AFTER},
 };
 use humantime::parse_duration;
-use ic_bn_lib_common::{
-    traits::{Run, http::Client},
-    types::http::{Error, WafCli},
-};
 use itertools::Itertools;
 use regex::Regex;
 use serde::Deserialize;
@@ -44,7 +41,38 @@ use tower::{Layer, Service};
 use tracing::warn;
 use url::Url;
 
-use crate::http::middleware::extract_ip_from_request;
+use crate::{
+    http::{Error, client::Client, middleware::extract_ip_from_request},
+    tasks::Run,
+};
+
+/// WAF CLI
+#[derive(Args)]
+pub struct WafCli {
+    /// Enables the WAF.
+    /// Requires one of sources to be defined.
+    #[clap(env, long, requires = "waf_input")]
+    pub waf_enable: bool,
+
+    /// Enables the WAF API endpoint.
+    /// Conflicts with `waf_url` and `waf_file`.
+    #[clap(env, long, group = "waf_input")]
+    pub waf_api: bool,
+
+    /// URL where to fetch WAF rules.
+    /// Conflicts with `waf_api` and `waf_file`.
+    #[clap(env, long, group = "waf_input")]
+    pub waf_url: Option<Url>,
+
+    /// File from which to load WAF rules.
+    /// Conflicts with `waf_api` and `waf_url`.
+    #[clap(env, long, group = "waf_input")]
+    pub waf_file: Option<PathBuf>,
+
+    /// Interval at which to fetch the rules from the file or URL.
+    #[clap(env, long, value_parser = parse_duration, default_value = "10s")]
+    pub waf_interval: Duration,
+}
 
 /// Matches HTTP status codes or ranges
 #[derive(Debug, Clone, Copy, Eq, PartialEq, DeserializeFromStr)]
@@ -313,6 +341,10 @@ impl FromStr for RateLimitType {
 
         // We already checked that rate is > 0
         let replenish_period = dur / rate;
+        if replenish_period.is_zero() {
+            return Err(anyhow!("rate is too high for the given duration").into());
+        }
+
         let quota = Quota::with_period(replenish_period)
             .unwrap()
             .allow_burst(NonZeroU32::new(rate).unwrap());
@@ -1076,6 +1108,12 @@ mod test {
         assert!(RequestAction::from_str("limit:0/1s").is_err());
         assert!(RequestAction::from_str("limit:1/0s").is_err());
         assert!(RequestAction::from_str("limit:1/foo").is_err());
+
+        // Rate high enough that `dur / rate` truncates to zero should be a parse
+        // error, not a panic (dur/rate used to be passed unchecked into
+        // `Quota::with_period(..).unwrap()`, which panics on a zero duration).
+        assert!(RequestAction::from_str("limit:global:2000000000/1s").is_err());
+        assert!(RequestAction::from_str("limit:per_ip:2000000000/1s").is_err());
     }
 
     #[test]

@@ -4,15 +4,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{
-    http::{client::basic_auth, headers::CONTENT_TYPE_OCTET_STREAM},
-    hval,
-    vector::{self, VectorOptions},
-};
 use anyhow::{Context, Error, anyhow};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http::header::{AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE};
-use ic_bn_lib_common::traits::http::Client as HttpClient;
 use prometheus::{
     HistogramVec, IntCounterVec, IntGaugeVec, Registry, register_histogram_vec_with_registry,
     register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry,
@@ -27,6 +21,12 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, warn};
 use url::Url;
+
+use crate::{
+    http::{Client as HttpClient, client::basic_auth, headers::CONTENT_TYPE_OCTET_STREAM},
+    hval,
+    vector::{self, VectorOptions},
+};
 
 pub const KB: f64 = 1024.0;
 pub const MB: f64 = 1024.0 * KB;

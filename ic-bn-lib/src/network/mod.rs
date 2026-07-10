@@ -1,16 +1,150 @@
+pub mod listener;
+
 use std::{
+    fmt::Display,
     io,
+    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
+    path::PathBuf,
     pin::{Pin, pin},
-    sync::{Arc, atomic::Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     task::{Context, Poll},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
-use ic_bn_lib_common::types::http::{Stats, TlsInfo};
+use anyhow::anyhow;
+use derive_new::new;
+use rustls::{CipherSuite, ProtocolVersion, ServerConnection};
+use socket2::TcpKeepalive;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 
-pub mod listener;
+/// TLS-related information about the connection
+#[derive(Clone, Debug)]
+pub struct TlsInfo {
+    pub sni: Option<String>,
+    pub alpn: Option<String>,
+    pub protocol: ProtocolVersion,
+    pub cipher: CipherSuite,
+    pub handshake_dur: Duration,
+}
+
+impl TryFrom<&ServerConnection> for TlsInfo {
+    type Error = anyhow::Error;
+
+    fn try_from(c: &ServerConnection) -> Result<Self, Self::Error> {
+        Ok(Self {
+            handshake_dur: Duration::ZERO,
+            sni: c.server_name().map(|x| x.to_string()),
+            alpn: c
+                .alpn_protocol()
+                .map(|x| String::from_utf8_lossy(x).to_string()),
+            protocol: c
+                .protocol_version()
+                .ok_or_else(|| anyhow!("No TLS protocol found"))?,
+            cipher: c
+                .negotiated_cipher_suite()
+                .map(|x| x.suite())
+                .ok_or_else(|| anyhow!("No TLS ciphersuite found"))?,
+        })
+    }
+}
+
+/// Options for a `Listener`
+pub struct ListenerOpts {
+    pub backlog: u32,
+    pub mss: Option<u32>,
+    pub keepalive: TcpKeepalive,
+    /// Permission bits applied to a Unix domain socket's path after binding.
+    /// Ignored for TCP listeners.
+    pub unix_socket_permissions: u32,
+}
+
+impl Default for ListenerOpts {
+    fn default() -> Self {
+        Self {
+            backlog: 1024,
+            mss: None,
+            keepalive: TcpKeepalive::new(),
+            // Owner+group only by default - any local user/process able to
+            // reach the socket path can otherwise connect regardless of the
+            // intended peer.
+            unix_socket_permissions: 0o660,
+        }
+    }
+}
+
+/// Atomic counters for `AsyncCounter`
+#[derive(new, Debug)]
+pub struct Stats {
+    #[new(default)]
+    pub sent: AtomicU64,
+    #[new(default)]
+    pub rcvd: AtomicU64,
+}
+
+impl Stats {
+    pub fn sent(&self) -> u64 {
+        self.sent.load(Ordering::SeqCst)
+    }
+
+    pub fn rcvd(&self) -> u64 {
+        self.rcvd.load(Ordering::SeqCst)
+    }
+}
+
+/// Connection endpoint address
+#[derive(Debug, Clone)]
+pub enum Addr {
+    Tcp(SocketAddr),
+    Unix(PathBuf),
+}
+
+impl Default for Addr {
+    fn default() -> Self {
+        Self::Tcp(SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::UNSPECIFIED,
+            666,
+        )))
+    }
+}
+
+impl Addr {
+    pub const fn family(&self) -> &'static str {
+        match self {
+            Self::Tcp(v) => {
+                if v.ip().to_canonical().is_ipv4() {
+                    "v4"
+                } else {
+                    "v6"
+                }
+            }
+            Self::Unix(_) => "unix",
+        }
+    }
+
+    pub const fn ip(&self) -> IpAddr {
+        match self {
+            Self::Tcp(v) => v.ip().to_canonical(),
+            Self::Unix(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        }
+    }
+}
+
+impl Display for Addr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Tcp(v) => v.ip().to_canonical().to_string(),
+                Self::Unix(v) => v.to_string_lossy().to_string(),
+            }
+        )
+    }
+}
 
 /// Blanket async read+write trait for streams `Box`-ing
 pub trait AsyncReadWrite: AsyncRead + AsyncWrite + Send + Sync + Unpin {}

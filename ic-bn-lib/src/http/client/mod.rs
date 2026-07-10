@@ -1,15 +1,87 @@
+pub mod cli;
 #[cfg(feature = "clients-hyper")]
 pub mod clients_hyper;
 pub mod clients_reqwest;
 
-use std::{fmt, sync::Arc};
+use std::{fmt, net::SocketAddr, sync::Arc, time::Duration};
 
+use async_trait::async_trait;
 use http::HeaderValue;
-use ic_bn_lib_common::traits::http::Client;
 use prometheus::{
     HistogramVec, IntCounterVec, IntGaugeVec, Registry, register_histogram_vec_with_registry,
     register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry,
 };
+use strum::{Display, EnumString};
+
+use crate::http::Error;
+
+/// Generic HTTP client trait that is using Reqwest types
+#[cfg_attr(test, mockall::automock)]
+#[async_trait]
+pub trait Client: Send + Sync + fmt::Debug {
+    async fn execute(&self, req: reqwest::Request) -> Result<reqwest::Response, reqwest::Error>;
+}
+
+/// Generic HTTP client trait that is using `http` crate types
+#[async_trait]
+pub trait ClientHttp<B1, B2 = axum::body::Body>: Send + Sync + fmt::Debug {
+    async fn execute(&self, req: http::Request<B1>) -> Result<http::Response<B2>, Error>;
+}
+
+/// HTTP versions to use
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Display, EnumString)]
+#[strum(serialize_all = "snake_case")]
+pub enum HttpVersion {
+    Http1,
+    Http2,
+    All,
+}
+
+/// HTTP client options
+#[derive(Debug, Clone)]
+pub struct ClientOptions {
+    pub timeout_connect: Duration,
+    pub timeout_read: Duration,
+    pub timeout: Duration,
+    pub pool_idle_timeout: Option<Duration>,
+    pub pool_idle_max: Option<usize>,
+    pub tcp_keepalive_delay: Option<Duration>,
+    pub tcp_keepalive_interval: Option<Duration>,
+    pub tcp_keepalive_retries: Option<u32>,
+    pub http2_keepalive: Option<Duration>,
+    pub http2_keepalive_timeout: Option<Duration>,
+    pub http2_keepalive_idle: bool,
+    pub happy_eyeballs_timeout: Duration,
+    pub http_version: HttpVersion,
+    pub user_agent: String,
+    pub tls_config: Option<rustls::ClientConfig>,
+    pub tls_fixed_name: Option<String>,
+    pub dns_overrides: Vec<(String, SocketAddr)>,
+}
+
+impl Default for ClientOptions {
+    fn default() -> Self {
+        Self {
+            timeout_connect: Duration::from_secs(10),
+            timeout_read: Duration::from_secs(60),
+            timeout: Duration::from_secs(120),
+            pool_idle_timeout: None,
+            pool_idle_max: None,
+            tcp_keepalive_delay: None,
+            tcp_keepalive_interval: None,
+            tcp_keepalive_retries: None,
+            http2_keepalive: None,
+            http2_keepalive_timeout: None,
+            http2_keepalive_idle: false,
+            happy_eyeballs_timeout: Duration::from_millis(500),
+            http_version: HttpVersion::All,
+            user_agent: "Crab".into(),
+            tls_config: None,
+            tls_fixed_name: None,
+            dns_overrides: vec![],
+        }
+    }
+}
 
 /// HTTP Client stats
 #[derive(Debug, Clone)]

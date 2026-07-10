@@ -778,18 +778,38 @@ fn next_pending_task(entry: &DomainEntry, now: UtcTimestamp) -> Option<TaskKind>
         return Some(task);
     }
 
-    // Check if a renewal task should be scheduled
+    // Check if a renewal task should be scheduled. This must respect the same
+    // failure back-off/cap as an existing task's retry (see `retry_allowed`):
+    // `submit_task_result` clears `entry.task` back to `None` once
+    // `failures_count` hits `MAX_TASK_FAILURES`, and without this check we'd
+    // recreate a fresh `Renew` task here on the very next call, ignoring both
+    // `MIN_TASK_RETRY_DELAY` and the failure cap that was just enforced.
     if let (None, Some(_cert), Some(not_before), Some(not_after)) = (
         entry.task,
         entry.enc_cert.as_ref(),
         entry.not_before,
         entry.not_after,
     ) && renewal_needed(not_before, not_after, now)
+        && retry_allowed(entry, now)
     {
         return Some(TaskKind::Renew);
     }
 
     None
+}
+
+/// Whether a domain entry's failure history currently permits starting/retrying a task.
+fn retry_allowed(entry: &DomainEntry, now: UtcTimestamp) -> bool {
+    if entry.failures_count >= MAX_TASK_FAILURES {
+        return false;
+    }
+
+    match entry.last_fail_time {
+        Some(last_fail_time) => {
+            now >= last_fail_time.saturating_add(MIN_TASK_RETRY_DELAY.as_secs())
+        }
+        None => true,
+    }
 }
 
 fn handle_existing_task(
@@ -809,12 +829,8 @@ fn handle_existing_task(
     }
 
     // Case 2: Task has previously failed and probably needs to be retried
-    if let Some(last_fail_time) = entry.last_fail_time {
-        let next_allowed = last_fail_time.saturating_add(MIN_TASK_RETRY_DELAY.as_secs());
-        if entry.failures_count < MAX_TASK_FAILURES && now >= next_allowed {
-            return Some(task);
-        }
-        return None;
+    if entry.last_fail_time.is_some() {
+        return retry_allowed(entry, now).then_some(task);
     }
 
     // Case 3: Task is new and has never been taken or failed
@@ -1924,6 +1940,61 @@ mod tests {
             Some(false),
         ));
         assert_eq!(result, expected_task);
+    }
+
+    #[test]
+    fn test_renewal_respects_failure_backoff_after_task_reset() {
+        // A domain whose cert is expiring right now (so renewal is always
+        // needed) and whose `Renew` task has already failed
+        // `MAX_TASK_FAILURES - 1` times.
+        let mut state = create_test_empty_state();
+        let now = 100_000u64;
+        let task_id = 7u64;
+        let canister_id = Principal::from_text("rdmx6-jaaaa-aaaaa-aaadq-cai").unwrap();
+
+        let mut domain = DomainEntry::new(Some(TaskKind::Renew), now - 5000);
+        domain.taken_at = Some(task_id);
+        domain.canister_id = Some(canister_id);
+        domain.enc_cert = Some(b"cert_data".to_vec());
+        domain.not_before = Some(0);
+        domain.not_after = Some(now);
+        domain.failures_count = MAX_TASK_FAILURES - 1;
+        state.domains.insert("flaky.com".to_string(), domain);
+
+        // One more failure pushes `failures_count` to `MAX_TASK_FAILURES`,
+        // which resets `task` back to `None` (see `submit_task_result`).
+        let task_result = TaskResult {
+            domain: "flaky.com".to_string(),
+            task_id,
+            task_kind: TaskKind::Renew,
+            outcome: TaskOutcome::Failure(TaskFailReason::GenericFailure("boom".to_string())),
+            duration_secs: 1,
+        };
+        state.submit_task_result(task_result, now).unwrap();
+
+        let domain_entry = state.domains.get(&"flaky.com".to_string()).unwrap();
+        assert_eq!(domain_entry.task, None);
+        assert_eq!(domain_entry.failures_count, MAX_TASK_FAILURES);
+        assert_eq!(domain_entry.last_fail_time, Some(now));
+
+        // A worker fetching again immediately (no sleep in between, as
+        // `base/types/worker.rs` does after submitting a result) must not get
+        // a freshly-recreated `Renew` task for this domain.
+        let result = state.fetch_next_task(now).unwrap();
+        assert!(
+            result.is_none(),
+            "must not immediately recreate a Renew task after hitting MAX_TASK_FAILURES"
+        );
+
+        // Even well past `MIN_TASK_RETRY_DELAY`, a domain that has exhausted
+        // its failure cap must stay untouched (only an explicit reset of
+        // `failures_count`, not elapsed time, should ever unblock it again).
+        let later = now + MIN_TASK_RETRY_DELAY.as_secs() + 10_000;
+        let result = state.fetch_next_task(later).unwrap();
+        assert!(
+            result.is_none(),
+            "must not retry a domain that has exhausted MAX_TASK_FAILURES, regardless of elapsed time"
+        );
     }
 
     #[test]

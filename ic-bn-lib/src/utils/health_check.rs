@@ -5,7 +5,6 @@ use std::{
 };
 
 use arc_swap::ArcSwapOption;
-use ic_bn_lib_common::{traits::utils::ChecksTarget, types::utils::TargetState};
 use prometheus::{
     HistogramVec, IntCounterVec, IntGaugeVec, Registry, register_histogram_vec_with_registry,
     register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry,
@@ -16,6 +15,8 @@ use tokio::{
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::warn;
+
+use crate::utils::{ChecksTarget, TargetState};
 
 #[derive(Clone, Debug)]
 pub struct Metrics {

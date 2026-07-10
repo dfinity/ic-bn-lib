@@ -10,7 +10,7 @@ use std::{
 };
 
 use ahash::{HashMap, HashMapExt};
-use anyhow::{Context as AnyhowContext, Error, anyhow};
+use anyhow::{Context as _, Error, anyhow};
 use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -18,22 +18,85 @@ use candid::Principal;
 use derive_new::new;
 use fqdn::{FQDN, Fqdn};
 use http::header::AUTHORIZATION;
-use ic_bn_lib_common::{
-    traits::{custom_domains::ProvidesCustomDomains, http::Client},
-    types::{CustomDomain, DomainFlags},
-};
 use reqwest::{Method, Request, Url};
 use serde::Deserialize;
 use tracing::{info, warn};
 
-use crate::http::client::basic_auth;
+use crate::{
+    custom_domains::flags::{DomainFlag, DomainFlags},
+    http::{Client, client::basic_auth},
+};
 
 pub mod backend;
 pub mod base;
-pub mod canister;
-
+pub mod client;
+pub mod flags;
 #[cfg(test)]
 mod tests;
+
+/// Represents a custom domain with a corresponding canister ID
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CustomDomain {
+    pub name: FQDN,
+    pub canister_id: Principal,
+    /// Opaque timestamp to reflect when the domain was created, can be zero
+    pub timestamp: u64,
+    pub priority: u8,
+    pub flags: Option<DomainFlags>,
+}
+
+impl CustomDomain {
+    pub const fn new(name: FQDN, canister_id: Principal) -> Self {
+        Self {
+            name,
+            canister_id,
+            timestamp: 0,
+            priority: 0,
+            flags: None,
+        }
+    }
+
+    pub fn has_flag(&self, flag: DomainFlag) -> bool {
+        self.flags.is_some_and(|x| x.has_flag(flag))
+    }
+
+    pub fn set_flag(&mut self, flag: DomainFlag) {
+        match &mut self.flags {
+            Some(v) => v.set_flag(flag),
+            None => self.flags = Some(DomainFlags::new([flag])),
+        }
+    }
+
+    pub const fn unset_flag(&mut self, flag: DomainFlag) {
+        if let Some(v) = &mut self.flags {
+            v.unset_flag(flag)
+        }
+    }
+
+    pub const fn set_priority(&mut self, prio: u8) {
+        self.priority = prio;
+    }
+
+    pub fn with_flag(mut self, flag: DomainFlag) -> Self {
+        match &mut self.flags {
+            Some(v) => v.set_flag(flag),
+            None => self.flags = Some(DomainFlags::new([flag])),
+        }
+
+        self
+    }
+
+    pub const fn with_priority(mut self, prio: u8) -> Self {
+        self.priority = prio;
+        self
+    }
+}
+
+/// Provides a list of custom domains
+#[async_trait]
+pub trait ProvidesCustomDomains: Sync + Send + std::fmt::Debug {
+    async fn get_custom_domains(&self) -> Result<Vec<CustomDomain>, Error>;
+}
 
 /// Looks up a custom domain canister id by a hostname
 pub trait LooksUpCustomDomain: Sync + Send + std::fmt::Debug {
@@ -455,11 +518,10 @@ mod test {
     use ::http::Response as HttpResponse;
     use async_trait::async_trait;
     use fqdn::fqdn;
-    use ic_bn_lib_common::{principal, types::FLAG_PRERENDER};
     use itertools::Itertools;
     use serde_json::json;
 
-    use crate::hval;
+    use crate::{custom_domains::flags::FLAG_PRERENDER, hval, principal};
 
     use super::*;
 

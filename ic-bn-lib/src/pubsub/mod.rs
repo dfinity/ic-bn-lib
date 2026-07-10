@@ -1,13 +1,20 @@
-use std::{marker::PhantomData, sync::Arc, time::Duration};
+use std::{hash::Hash, marker::PhantomData, sync::Arc, time::Duration};
 
 use ahash::RandomState;
-use ic_bn_lib_common::traits::pubsub::{Message, TopicId};
 use moka::sync::{Cache, CacheBuilder};
 use prometheus::{
     IntCounter, IntGauge, Registry, register_int_counter_with_registry,
     register_int_gauge_with_registry,
 };
 use tokio::sync::broadcast::{Receiver, Sender, error::RecvError};
+
+/// Trait that a topic ID should implement
+pub trait TopicId: Hash + Eq + Clone + Send + Sync + 'static {}
+impl<T: Hash + Eq + Clone + Send + Sync + 'static> TopicId for T {}
+
+/// Trait that a message should implement
+pub trait Message: Clone + Send + Sync + 'static {}
+impl<T: Clone + Send + Sync + 'static> Message for T {}
 
 /// Broker options
 #[derive(Clone, Debug)]

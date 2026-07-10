@@ -15,13 +15,27 @@ pub enum EmailAddressError {
     AtMissing,
     #[error("Domain incorrect: {0}")]
     DomainIncorrect(String),
+    #[error("Local part contains a disallowed character: {0:?}")]
+    LocalPartIncorrect(char),
+}
+
+/// Whether `c` is allowed in the local part of an address.
+///
+/// This rejects ASCII control characters (in particular CR/LF, which could
+/// otherwise enable header injection if this value is ever reconstructed
+/// into a raw mail header downstream) and non-ASCII bytes. Everything else -
+/// including characters used by RFC 5321 quoted-string local parts like `"`,
+/// an `@` within quotes, `+`, `.` - is left as-is, since this type does not
+/// otherwise validate local-part syntax.
+const fn is_valid_local_part_char(c: char) -> bool {
+    c.is_ascii() && !c.is_ascii_control()
 }
 
 /// E-Mail address representation.
 ///
-/// Currently we don't validate the local part at all
-/// and just consider everything to the right from the
-/// rightmost @ as a domain part.
+/// Currently we don't validate the local part's syntax at all (beyond
+/// rejecting control/non-ASCII characters) and just consider everything to
+/// the right from the rightmost @ as a domain part.
 #[derive(
     Clone, Eq, PartialEq, Ord, PartialOrd, Hash, SerializeDisplay, DeserializeFromStr, new,
 )]
@@ -35,6 +49,10 @@ impl EmailAddress {
         let (local, domain) = s.rsplit_once('@').ok_or(EmailAddressError::AtMissing)?;
         if domain.is_empty() {
             return Err(EmailAddressError::DomainIncorrect("Empty domain".into()));
+        }
+
+        if let Some(c) = local.chars().find(|c| !is_valid_local_part_char(*c)) {
+            return Err(EmailAddressError::LocalPartIncorrect(c));
         }
 
         let domain = FQDN::from_ascii_str(domain)
@@ -133,5 +151,20 @@ mod tests {
                 EmailAddressError::DomainIncorrect(_)
             ));
         }
+
+        // control characters (e.g. CR/LF) in the local part must be rejected,
+        // since this value can end up forwarded downstream verbatim.
+        for v in ["foo\r\nbar@baz", "foo\nbar@baz", "foo\0bar@baz"] {
+            assert!(matches!(
+                EmailAddress::from_str(v).unwrap_err(),
+                EmailAddressError::LocalPartIncorrect(_)
+            ));
+        }
+
+        // non-ASCII in the local part is also rejected
+        assert!(matches!(
+            EmailAddress::from_str("föö@bar").unwrap_err(),
+            EmailAddressError::LocalPartIncorrect(_)
+        ));
     }
 }

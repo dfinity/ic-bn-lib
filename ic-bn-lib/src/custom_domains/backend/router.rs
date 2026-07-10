@@ -23,8 +23,11 @@ use super::{
     metrics::{HttpMetrics, metrics_handler, metrics_middleware},
     openapi::get_openapi_json,
 };
-use crate::custom_domains::base::traits::{repository::Repository, validation::ValidatesDomains};
-use crate::{http::middleware::rate_limiter::layer_by_ip, reqwest::StatusCode};
+use crate::{
+    custom_domains::base::traits::{repository::Repository, validation::ValidatesDomains},
+    http::middleware::rate_limiter::layer_by_ip,
+    reqwest::StatusCode,
+};
 
 /// Options for configuring rate limits on various endpoints.
 #[derive(Clone, Debug, Default)]
