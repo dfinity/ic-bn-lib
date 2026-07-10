@@ -6,42 +6,48 @@ use std::{
 use anyhow::Context;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use candid::Principal;
 use hickory_proto::rr::{Record, RecordType};
 use hickory_resolver::{
     TokioResolver,
-    net::{DnsError as HickoryDnsError, NetError, runtime::TokioRuntimeProvider},
+    net::{NetError, runtime::TokioRuntimeProvider},
 };
 use hyper_util::client::legacy::connect::dns::Name as HyperName;
 use ic_agent::Agent;
-use ic_bn_lib_common::{
-    principal,
-    traits::{
-        Run,
-        dns::{CloneableDnsResolver, CloneableHyperDnsResolver, HyperDnsResolver, Resolves},
-    },
-    types::{
-        dns::{Options, SocketAddrs},
-        http::Error,
-    },
-};
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use tokio_util::sync::CancellationToken;
 use tower::Service;
 
-#[derive(thiserror::Error, Debug)]
-pub enum DnsError {
-    #[error("Resolver error: {0}")]
-    Resolver(#[from] NetError),
-    #[error("{0}")]
-    Other(#[from] anyhow::Error),
+use crate::{
+    MAINNET_ROOT_SUBNET_ID,
+    dns::{DnsError, Options, SocketAddrs},
+    tasks::Run,
+};
+
+/// Generic trait to resolve a DNS record
+#[async_trait]
+pub trait Resolves: Send + Sync {
+    async fn resolve(&self, record_type: RecordType, name: &str) -> Result<Vec<Record>, NetError>;
+    fn flush_cache(&self);
 }
 
-/// Checks if given Hickory error means there was a negative lookup
-pub fn is_error_negative_lookup(e: &NetError) -> bool {
-    e.is_no_records_found()
-        || e.is_nx_domain()
-        || matches!(e, NetError::Dns(HickoryDnsError::Nsec { .. }))
+/// Cloneable version of `reqwest::dns::resolve``
+pub trait CloneableDnsResolver: Resolve + Clone + Debug + 'static {}
+
+/// Trait that satisfies Hyper's DNS resolver constraints
+pub trait HyperDnsResolver:
+    Service<
+        HyperName,
+        Response = SocketAddrs,
+        Error = DnsError,
+        Future = Pin<Box<dyn Future<Output = Result<SocketAddrs, DnsError>> + Send>>,
+    >
+{
+}
+
+/// Cloneable version of `HyperDnsResolver``
+pub trait CloneableHyperDnsResolver:
+    HyperDnsResolver + Clone + Debug + Send + Sync + 'static
+{
 }
 
 /// DNS-resolver based on Hickory
@@ -105,7 +111,7 @@ impl Resolves for Resolver {
 #[allow(clippy::needless_collect)]
 impl Service<HyperName> for Resolver {
     type Response = SocketAddrs;
-    type Error = Error;
+    type Error = DnsError;
     #[allow(clippy::type_complexity)]
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
@@ -117,10 +123,7 @@ impl Service<HyperName> for Resolver {
         let resolver = self.0.clone();
 
         Box::pin(async move {
-            let lookup = resolver
-                .lookup_ip(name.as_str())
-                .await
-                .map_err(|e: NetError| Error::DnsError(e.to_string()))?;
+            let lookup = resolver.lookup_ip(name.as_str()).await?;
             let addresses: Vec<IpAddr> = lookup.iter().collect();
 
             Ok(SocketAddrs {
@@ -160,7 +163,7 @@ impl Resolve for FixedResolver {
 /// Implement resolving for Hyper
 impl Service<HyperName> for FixedResolver {
     type Response = SocketAddrs;
-    type Error = Error;
+    type Error = DnsError;
     #[allow(clippy::type_complexity)]
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
@@ -206,7 +209,7 @@ impl Resolve for StaticResolver {
 /// Implement resolving for Hyper
 impl Service<HyperName> for StaticResolver {
     type Response = SocketAddrs;
-    type Error = Error;
+    type Error = DnsError;
     #[allow(clippy::type_complexity)]
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
@@ -231,7 +234,6 @@ impl Service<HyperName> for StaticResolver {
 #[derive(Debug, Clone)]
 pub struct ApiBnResolver {
     agent: Agent,
-    subnet: Principal,
     resolver_static: Arc<ArcSwap<StaticResolver>>,
     resolver_fallback: Resolver,
 }
@@ -242,21 +244,19 @@ impl CloneableHyperDnsResolver for ApiBnResolver {}
 impl ApiBnResolver {
     pub fn new(resolver_fallback: Resolver, agent: Agent) -> Self {
         let resolver_static = Arc::new(ArcSwap::new(Arc::new(StaticResolver::new(vec![]))));
-        let subnet = principal!("tdb26-jop6k-aogll-7ltgs-eruif-6kk7m-qpktf-gdiqx-mxtrf-vb5e6-eqe");
 
         Self {
             agent,
-            subnet,
             resolver_static,
             resolver_fallback,
         }
     }
 
     /// Gets a list of API BN domains and their IP addresses from the registry
-    async fn get_api_bns(&self) -> Result<Vec<(String, Vec<IpAddr>)>, Error> {
+    async fn get_api_bns(&self) -> Result<Vec<(String, Vec<IpAddr>)>, DnsError> {
         let api_bns = self
             .agent
-            .fetch_api_boundary_nodes_by_subnet_id(self.subnet)
+            .fetch_api_boundary_nodes_by_subnet_id(MAINNET_ROOT_SUBNET_ID)
             .await
             .context("unable to get API BNs from IC")?;
 
@@ -294,8 +294,7 @@ impl Resolve for ApiBnResolver {
                     resolver_fallback
                         .0
                         .lookup_ip(name.as_str())
-                        .await
-                        .map_err(|e| Error::DnsError(e.to_string()))?
+                        .await?
                         .iter()
                         .collect()
                 }
@@ -311,7 +310,7 @@ impl Resolve for ApiBnResolver {
 /// Implement resolving for Hyper
 impl Service<HyperName> for ApiBnResolver {
     type Response = SocketAddrs;
-    type Error = Error;
+    type Error = DnsError;
     #[allow(clippy::type_complexity)]
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
@@ -331,8 +330,7 @@ impl Service<HyperName> for ApiBnResolver {
                     resolver_fallback
                         .0
                         .lookup_ip(name.as_str())
-                        .await
-                        .map_err(|e| Error::DnsError(e.to_string()))?
+                        .await?
                         .iter()
                         .collect()
                 }
@@ -384,7 +382,7 @@ impl Resolve for SingleResolver {
 mod test {
     use std::net::{Ipv4Addr, SocketAddr};
 
-    use ic_bn_lib_common::types::dns::Protocol;
+    use crate::dns::Protocol;
 
     use super::*;
 

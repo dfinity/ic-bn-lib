@@ -10,7 +10,7 @@ use smtp_proto::{MAIL_BY_NOTIFY, MAIL_BY_RETURN, MailFrom};
 use tracing::{debug, info};
 
 use crate::{
-    http::dns::is_error_negative_lookup,
+    dns::is_error_negative_lookup,
     network::AsyncReadWrite,
     smtp::{
         ProtocolError,

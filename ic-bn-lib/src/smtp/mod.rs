@@ -8,7 +8,6 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use fqdn::FQDN;
-use ic_bn_lib_common::types::http::TlsInfo;
 use itertools::Itertools;
 use prometheus::{
     HistogramVec, IntCounterVec, IntGaugeVec, Registry, register_histogram_vec_with_registry,
@@ -19,7 +18,10 @@ use strum::{Display, IntoStaticStr};
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::smtp::{address::EmailAddress, inbound::SessionError};
+use crate::{
+    network::TlsInfo,
+    smtp::{address::EmailAddress, inbound::SessionError},
+};
 
 pub mod address;
 pub mod cli;

@@ -2,9 +2,14 @@ use std::{fmt::Display, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use derive_new::new;
-use ic_bn_lib_common::traits::Run;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{error, warn};
+
+// A runnable task that can be cancelled by a token
+#[async_trait]
+pub trait Run: Send + Sync {
+    async fn run(&self, token: CancellationToken) -> Result<(), anyhow::Error>;
+}
 
 #[derive(Clone)]
 struct Task(String, Arc<dyn Run>);

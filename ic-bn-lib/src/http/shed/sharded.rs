@@ -5,16 +5,13 @@ use std::{
     task::{Context, Poll},
 };
 
-use ic_bn_lib_common::{
-    traits::shed::TypeExtractor,
-    types::shed::{ShardedOptions, ShedReason, ShedResponse},
-};
 use tower::{Layer, Service, ServiceExt};
 
 use super::{
     BoxFuture,
     little::{LoadShedLayer, LoadShedResponse},
 };
+use crate::http::shed::{ShardedOptions, ShedReason, ShedResponse, TypeExtractor};
 
 /// Sharded version of `LoadShedLayer`
 #[derive(Debug, Clone)]
@@ -122,11 +119,10 @@ mod test {
         time::Duration,
     };
 
-    use ic_bn_lib_common::types::shed::TypeLatency;
     use tokio_util::task::TaskTracker;
 
     use super::*;
-    use crate::Error;
+    use crate::{Error, http::shed::TypeLatency};
 
     #[derive(Debug, Clone)]
     struct StubService;

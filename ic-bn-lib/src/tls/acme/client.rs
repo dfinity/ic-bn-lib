@@ -8,10 +8,6 @@ use hyper_util::{
     client::legacy::{Client as HyperClient, connect::HttpConnector},
     rt::TokioExecutor,
 };
-use ic_bn_lib_common::{
-    traits::acme::{AcmeCertificateClient, TokenManager},
-    types::acme::{AcmeCert, AcmeUrl, Error},
-};
 use instant_acme::{
     Account, AccountCredentials, AuthorizationHandle, AuthorizationStatus, BodyWrapper,
     BytesResponse, ChallengeHandle, ChallengeType, Error as AcmeError,
@@ -23,7 +19,11 @@ use tracing::{debug, instrument};
 
 use crate::{
     RetryError, retry_async,
-    tls::{prepare_client_config, verify::NoopServerCertVerifier},
+    tls::{
+        acme::{AcmeCert, AcmeCertificateClient, AcmeUrl, Error, TokenManager},
+        prepare_client_config,
+        verify::NoopServerCertVerifier,
+    },
 };
 
 struct HttpClient(HyperClient<hyper_rustls::HttpsConnector<HttpConnector>, BodyWrapper<Bytes>>);

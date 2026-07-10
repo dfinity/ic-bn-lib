@@ -6,10 +6,6 @@ use async_trait::async_trait;
 use candid::Principal;
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, aead::OsRng};
 use fqdn::FQDN;
-use ic_bn_lib_common::{
-    traits::acme::{AcmeCertificateClient, TokenManager},
-    types::acme::AcmeUrl,
-};
 use pem::parse_many;
 use prometheus::Registry;
 use tokio::{spawn, time::sleep};
@@ -19,6 +15,7 @@ use x509_parser::{parse_x509_certificate, prelude::GeneralName};
 
 use super::helpers::{TestEnv, init_logging};
 
+use crate::tls::acme::{AcmeCertificateClient, AcmeUrl, TokenManager};
 use crate::{
     custom_domains::{
         backend::router::{RateLimitConfig, create_router},
@@ -33,7 +30,7 @@ use crate::{
                 worker::{Worker, WorkerConfig, WorkerMetrics},
             },
         },
-        canister::client::CanisterClient,
+        client::CanisterClient,
     },
     ic_agent::{Agent, Identity, identity::BasicIdentity},
     reqwest::{self, Url},

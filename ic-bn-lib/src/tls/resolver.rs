@@ -1,7 +1,6 @@
 use std::{fmt::Debug, path::PathBuf, sync::Arc, time::Instant};
 
 use anyhow::{Context as _, Error};
-use ic_bn_lib_common::{traits::tls::ResolvesServerCert, types::http::ALPN_ACME};
 use prometheus::{
     HistogramVec, IntCounterVec, Registry, register_histogram_vec_with_registry,
     register_int_counter_vec_with_registry,
@@ -12,7 +11,9 @@ use rustls::{
 };
 use tracing::debug;
 
-use crate::tls::{pem_convert_to_rustls, pem_load_rustls, pem_load_rustls_single};
+use crate::tls::{
+    ALPN_ACME, ResolvesServerCert, pem_convert_to_rustls, pem_load_rustls, pem_load_rustls_single,
+};
 
 #[derive(Debug, Clone)]
 pub struct Metrics {

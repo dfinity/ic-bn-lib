@@ -1,7 +1,6 @@
 pub mod body;
 pub mod cache;
 pub mod client;
-pub mod dns;
 pub mod headers;
 pub mod middleware;
 pub mod proxy;
@@ -10,16 +9,42 @@ pub mod shed;
 
 use axum::response::{IntoResponse, Redirect};
 use http::{HeaderMap, Method, Request, StatusCode, Uri, Version, header::HOST, uri::PathAndQuery};
+use url::Url;
 
 #[cfg(feature = "clients-hyper")]
 pub use client::clients_hyper::{HyperClient, HyperClientLeastLoaded};
 pub use client::clients_reqwest::{
     ReqwestClient, ReqwestClientLeastLoaded, ReqwestClientRoundRobin,
 };
+pub use client::{Client, ClientHttp};
 pub use server::{Server, ServerBuilder};
-use url::Url;
 
 use crate::{http::headers::X_FORWARDED_HOST, network::AsyncReadWrite};
+
+/// HTTP error
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error("HTTP body reading timed out")]
+    BodyTimedOut,
+    #[error("HTTP body is too big")]
+    BodyTooBig,
+    #[error("HTTP body reading failed: {0}")]
+    BodyReadingFailed(String),
+    #[error("HTTP request failed: {0}")]
+    RequestFailed(#[from] reqwest::Error),
+    #[error("No Proxy Protocol v2 detected")]
+    NoProxyProtocolDetected,
+    #[error("DNS resolving failed: {0}")]
+    DnsError(String),
+    #[error("Generic HTTP failure: {0}")]
+    HttpError(#[from] http::Error),
+    #[error("{0}")]
+    HyperClientError(#[from] hyper_util::client::legacy::Error),
+    #[error("{0}")]
+    HyperError(#[from] hyper::Error),
+    #[error(transparent)]
+    Generic(#[from] anyhow::Error),
+}
 
 /// Calculate very approximate HTTP request/response headers size in bytes.
 /// More or less accurate only for http/1.1 since in h2 headers are in HPACK-compressed.

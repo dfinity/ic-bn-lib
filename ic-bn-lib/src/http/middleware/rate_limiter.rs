@@ -193,6 +193,8 @@ pub fn layer<K: KeyExtractor, R: IntoResponse + Clone + Send + Sync + 'static>(
 
 #[cfg(test)]
 mod test {
+    use crate::http::server::conn::ConnInfo;
+
     use super::*;
 
     use axum::{
@@ -203,7 +205,6 @@ mod test {
         routing::post,
     };
     use http::{Method, StatusCode};
-    use ic_bn_lib_common::types::http::ConnInfo;
     use std::{sync::Arc, time::Duration};
     use tokio::time::sleep;
     use tower::Service;

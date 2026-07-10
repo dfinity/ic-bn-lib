@@ -1,5 +1,6 @@
 use std::{
     fmt::Debug,
+    hash::Hash,
     marker::PhantomData,
     mem::size_of,
     sync::Arc,
@@ -15,13 +16,6 @@ use http::{
     header::{CACHE_CONTROL, RANGE},
 };
 use http_body::Body as _;
-use ic_bn_lib_common::{
-    traits::{
-        Run,
-        http::{Bypasser, CustomBypassReason, KeyExtractor},
-    },
-    types::http::{CacheBypassReason, CacheError, Error as HttpError},
-};
 use moka::{
     Expiry,
     sync::{Cache as MokaCache, CacheBuilder as MokaCacheBuilder},
@@ -38,7 +32,76 @@ use tokio::{select, sync::Mutex, time::sleep};
 use tokio_util::sync::CancellationToken;
 
 use super::{body::buffer_body, calc_headers_size, extract_authority};
-use crate::http::headers::X_CACHE_TTL;
+use crate::{
+    http::{Error as HttpError, headers::X_CACHE_TTL},
+    tasks::Run,
+};
+
+/// HTTP Cache error
+#[derive(thiserror::Error, Debug)]
+pub enum CacheError {
+    #[error("unable to extract key from request: {0}")]
+    ExtractKey(String),
+    #[error("unable to execute bypasser: {0}")]
+    ExecuteBypasser(String),
+    #[error("timed out while fetching body")]
+    FetchBodyTimeout,
+    #[error("body is too big")]
+    FetchBodyTooBig,
+    #[error("unable to fetch request body: {0}")]
+    FetchBody(String),
+    #[error("unable to parse content-length header")]
+    ParseContentLength,
+    #[error("{0}")]
+    Other(String),
+}
+
+/// Trait to extract the caching key from the given HTTP request
+pub trait KeyExtractor: Clone + Send + Sync + Debug + 'static {
+    /// The type of the key.
+    type Key: Clone + Send + Sync + Debug + Hash + Eq + 'static;
+
+    /// Extraction method, will return [`Error`] response when the extraction failed
+    fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, CacheError>;
+}
+
+/// Reason for bypassing caching of the request
+pub trait CustomBypassReason:
+    Debug + Clone + std::fmt::Display + Into<&'static str> + PartialEq + Eq + Send + Sync + 'static
+{
+}
+
+/// Trait to decide if we need to bypass caching of the given request
+pub trait Bypasser: Clone + Send + Sync + Debug + 'static {
+    /// Custom bypass reason
+    type BypassReason: CustomBypassReason;
+
+    /// Checks if we should bypass the given request
+    fn bypass<T>(&self, req: &Request<T>) -> Result<Option<Self::BypassReason>, CacheError>;
+}
+
+/// Reason for bypassing the HTTP cache for the particular request
+#[derive(Debug, Clone, Display, PartialEq, Eq, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum CacheBypassReason<R: CustomBypassReason> {
+    MethodNotCacheable,
+    SizeUnknown,
+    BodyTooBig,
+    HTTPError,
+    UnableToExtractKey,
+    UnableToRunBypasser,
+    CacheControl,
+    Custom(R),
+}
+
+impl<R: CustomBypassReason> CacheBypassReason<R> {
+    pub fn into_str(self) -> &'static str {
+        match self {
+            Self::Custom(v) => v.into(),
+            _ => self.into(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Display, PartialEq, Eq, IntoStaticStr)]
 pub enum CustomBypassReasonDummy {}

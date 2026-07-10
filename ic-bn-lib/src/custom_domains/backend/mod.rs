@@ -10,30 +10,32 @@ use std::{
     sync::Arc,
 };
 
-use crate::custom_domains::base::{
-    cli::CustomDomainsCli,
-    types::{
-        acme::AcmeClientConfig,
-        cipher::CertificateCipher,
-        validator::Validator,
-        worker::{Worker, WorkerConfig, WorkerMetrics},
-    },
-};
-use crate::custom_domains::canister::client::CanisterClient;
-use crate::{
-    ic_agent::{Agent, identity::Secp256k1Identity},
-    reqwest,
-    tls::acme::instant_acme::AccountCredentials,
-};
 use anyhow::{Context, anyhow};
 use axum::Router;
 use base64::{Engine, prelude::BASE64_STANDARD};
 use chacha20poly1305::Key;
-use ic_bn_lib_common::types::dns::Options as DnsOptions;
 use prometheus::Registry;
 use tokio::fs;
 use tokio_util::sync::CancellationToken;
 
+use crate::{
+    custom_domains::{
+        base::{
+            cli::CustomDomainsCli,
+            types::{
+                acme::AcmeClientConfig,
+                cipher::CertificateCipher,
+                validator::Validator,
+                worker::{Worker, WorkerConfig, WorkerMetrics},
+            },
+        },
+        client::CanisterClient,
+    },
+    dns::Options as DnsOptions,
+    ic_agent::{Agent, identity::Secp256k1Identity},
+    reqwest,
+    tls::acme::instant_acme::AccountCredentials,
+};
 use router::{RateLimitConfig, create_router};
 
 /// Sets up everything required to run Custom Domains.

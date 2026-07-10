@@ -1,12 +1,11 @@
+pub mod rate_limiter;
+pub mod waf;
+
 use std::{net::IpAddr, str::FromStr, sync::Arc};
 
 use http::Request;
-use ic_bn_lib_common::types::http::ConnInfo;
 
-use crate::http::headers::X_REAL_IP;
-
-pub mod rate_limiter;
-pub mod waf;
+use crate::http::{headers::X_REAL_IP, server::conn::ConnInfo};
 
 /// Extracts IP address from `x-real-ip` header or `ConnInfo` extension
 pub fn extract_ip_from_request<B>(req: &Request<B>) -> Option<IpAddr> {
@@ -27,7 +26,7 @@ pub fn extract_ip_from_request<B>(req: &Request<B>) -> Option<IpAddr> {
 mod test {
     use std::net::SocketAddr;
 
-    use ic_bn_lib_common::types::http::Addr;
+    use crate::network::Addr;
 
     use super::*;
 

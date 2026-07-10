@@ -8,6 +8,7 @@
 
 #[cfg(feature = "custom-domains")]
 pub mod custom_domains;
+pub mod dns;
 pub mod http;
 pub mod network;
 pub mod pubsub;
@@ -24,9 +25,10 @@ use std::{fs::File, net::IpAddr, path::Path};
 
 use anyhow::{Context, anyhow};
 use bytes::Bytes;
+use candid::Principal;
 use futures::StreamExt;
-use ic_bn_lib_common::Error;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use strum::{Display, EnumString, IntoStaticStr};
 use tokio::io::AsyncWriteExt;
 
 pub use hickory_proto;
@@ -34,7 +36,6 @@ pub use hickory_resolver;
 pub use hyper;
 pub use hyper_util;
 pub use ic_agent;
-pub use ic_bn_lib_common;
 #[cfg(feature = "smtp")]
 pub use mail_auth;
 pub use prometheus;
@@ -52,6 +53,25 @@ macro_rules! email {
     ($email:expr) => {{ $crate::smtp::address::EmailAddress::from_text($email).unwrap() }};
 }
 
+/// Converts a string representation to a `candid::Principal`. Panics when an error occurs.
+#[macro_export]
+macro_rules! principal {
+    ($id:expr) => {{ candid::Principal::from_text($id).unwrap() }};
+}
+
+/// tdb26-jop6k-aogll-7ltgs-eruif-6kk7m-qpktf-gdiqx-mxtrf-vb5e6-eqe
+pub const MAINNET_ROOT_SUBNET_ID: Principal = Principal::from_slice(&[
+    207, 242, 128, 227, 45, 127, 92, 205, 34, 70, 136, 47, 148, 175, 178, 15, 84, 202, 97, 162, 23,
+    101, 231, 18, 212, 61, 39, 137, 2,
+]);
+
+/// Generic error
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error(transparent)]
+    Generic(#[from] anyhow::Error),
+}
+
 /// Error to be used with `retry_async` macro
 /// which indicates whether it should be retried or not.
 #[derive(thiserror::Error, Debug)]
@@ -60,6 +80,85 @@ pub enum RetryError {
     Permanent(anyhow::Error),
     #[error("Transient error: {0:?}")]
     Transient(anyhow::Error),
+}
+
+/// Type of IC API request
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    Display,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    IntoStaticStr,
+    EnumString,
+    Serialize,
+    Deserialize,
+)]
+#[strum(serialize_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum RequestType {
+    #[default]
+    Unknown,
+    Status,
+    QueryV2,
+    QueryV3,
+    QuerySubnetV3,
+    CallV2,
+    CallV3,
+    CallV4,
+    CallSubnetV4,
+    ReadStateV2,
+    ReadStateV3,
+    ReadStateSubnetV2,
+    ReadStateSubnetV3,
+}
+
+impl RequestType {
+    pub const fn is_query(&self) -> bool {
+        matches!(self, Self::QueryV2 | Self::QueryV3 | Self::QuerySubnetV3)
+    }
+
+    pub const fn is_call(&self) -> bool {
+        matches!(
+            self,
+            Self::CallV2 | Self::CallV3 | Self::CallV4 | Self::CallSubnetV4
+        )
+    }
+
+    pub const fn is_read_state(&self) -> bool {
+        matches!(
+            self,
+            Self::ReadStateV2
+                | Self::ReadStateV3
+                | Self::ReadStateSubnetV2
+                | Self::ReadStateSubnetV3
+        )
+    }
+}
+
+/// Parses size string as a binary (1k = 1024 etc) in u64
+pub fn parse_size(s: &str) -> Result<u64, parse_size::Error> {
+    parse_size::Config::new().with_binary().parse_size(s)
+}
+
+/// Parses size string as a binary (1k = 1024 etc) in usize
+pub fn parse_size_usize(s: &str) -> Result<usize, parse_size::Error> {
+    parse_size(s).map(|x| x as usize)
+}
+
+/// Parses size string as a decimal (1k = 1000 etc) in u64
+pub fn parse_size_decimal(s: &str) -> Result<u64, parse_size::Error> {
+    parse_size::Config::new().parse_size(s)
+}
+
+/// Parses size string as a decimal (1k = 1000 etc) in usize
+pub fn parse_size_decimal_usize(s: &str) -> Result<usize, parse_size::Error> {
+    parse_size(s).map(|x| x as usize)
 }
 
 /// Downloads the given url to given path.
@@ -238,6 +337,18 @@ macro_rules! dyn_event {
     };
 }
 
+pub trait TruncatesString {
+    /// Truncates the given string to around n *bytes*,
+    /// on the closest UTF-8 code point boundary.
+    fn truncate_bytes(&self, n: usize) -> &str;
+}
+
+impl TruncatesString for &str {
+    fn truncate_bytes(&self, n: usize) -> &str {
+        truncate(self, n)
+    }
+}
+
 /// Truncates the given string to around n *bytes*,
 /// on the closest UTF-8 code point boundary.
 pub fn truncate(s: &str, n: usize) -> &str {
@@ -259,5 +370,7 @@ mod test {
         assert_eq!(truncate("", 99), "");
         assert_eq!(truncate("🏁", 2), "");
         assert_eq!(truncate("foobarbaz", 99), "foobarbaz");
+
+        assert_eq!("tättähäärä härkä".truncate_bytes(12), "tättähää");
     }
 }

@@ -1,10 +1,9 @@
 use std::{io, net::SocketAddr, os::unix::fs::PermissionsExt, path::PathBuf};
 
-use ic_bn_lib_common::types::http::{Addr, ListenerOpts};
 use socket2::{Domain, Socket, Type};
 use tokio::net::{TcpListener, UnixListener, UnixSocket};
 
-use crate::network::AsyncReadWrite;
+use crate::network::{Addr, AsyncReadWrite, ListenerOpts};
 
 /// Generic connection listener
 pub enum Listener {

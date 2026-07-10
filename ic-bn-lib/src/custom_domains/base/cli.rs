@@ -1,11 +1,12 @@
 use std::{path::PathBuf, time::Duration};
 
-use crate::{reqwest::Url, tls::acme::dns::cloudflare::DEFAULT_CLOUDFLARE_URL};
 use candid::Principal;
 use clap::Args;
 use fqdn::FQDN;
 use humantime::parse_duration;
-use ic_bn_lib_common::types::acme::AcmeUrl;
+use reqwest::Url;
+
+use crate::tls::acme::{AcmeUrl, dns::cloudflare::DEFAULT_CLOUDFLARE_URL};
 
 #[derive(Debug, Args)]
 pub struct CustomDomainsCli {

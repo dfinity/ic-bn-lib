@@ -3,10 +3,9 @@ use std::{net::SocketAddr, time::Duration};
 use anyhow::anyhow;
 use clap::Args;
 use humantime::parse_duration;
-use ic_bn_lib_common::parse_size;
 use url::Url;
 
-use crate::smtp::inbound::SessionConfig;
+use crate::{parse_size, smtp::inbound::SessionConfig};
 
 /// SMTP Server CLI
 #[derive(Args, Clone, Debug, Eq, PartialEq)]

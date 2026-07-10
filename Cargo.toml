@@ -1,17 +1,7 @@
 [workspace]
 resolver = "3"
-members = [
-    "ic-bn-lib",
-    "ic-bn-lib-common",
-    "custom-domains/canister",
-    "custom-domains/api",
-]
-default-members = [
-    "ic-bn-lib",
-    "ic-bn-lib-common",
-    "custom-domains/canister",
-    "custom-domains/api",
-]
+members = ["ic-bn-lib", "custom-domains/canister", "custom-domains/api"]
+default-members = ["ic-bn-lib", "custom-domains/canister", "custom-domains/api"]
 
 [workspace.package]
 version = "0.1.0"
@@ -78,7 +68,6 @@ ic-cdk-timers = "1.0"
 ic-custom-domains-canister-api = { path = "./custom-domains/api" }
 ic-http-types = "0.1.0"
 ic-stable-structures = "0.7.0"
-ic-bn-lib-common = { version = "0.2", path = "./ic-bn-lib-common" }
 instant-acme = { version = "0.8.5", default-features = false, features = [
     "aws-lc-rs",
     "hyper-rustls",

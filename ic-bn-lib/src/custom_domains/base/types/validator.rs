@@ -7,20 +7,18 @@ use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use candid::Principal;
 use fqdn::{FQDN, fqdn};
-use ic_bn_lib_common::{
-    traits::{dns::Resolves, http::Client},
-    types::{dns::Options as DnsOptions, http::ClientOptions},
-};
+use hickory_resolver::proto::rr::RecordType;
+use reqwest::{Method, Request, Url};
 use tracing::{Span, debug, info, instrument};
 
 use crate::{
     custom_domains::base::traits::validation::{ValidatesDomains, ValidationError},
-    hickory_resolver::proto::rr::RecordType,
-    http::{
-        ReqwestClient,
-        dns::{Resolver, SingleResolver, is_error_negative_lookup},
+    dns::{
+        Options as DnsOptions, is_error_negative_lookup,
+        resolvers::Resolves,
+        resolvers::{Resolver, SingleResolver},
     },
-    reqwest::{Method, Request, Url},
+    http::{ReqwestClient, client::Client, client::ClientOptions},
 };
 
 /// DNS validator for custom domain registration.
@@ -350,17 +348,19 @@ impl Validator {
 #[cfg(test)]
 mod test {
     use ::http::Response as HttpResponse;
-    use ic_bn_lib_common::principal;
 
-    use crate::hickory_resolver::{
-        net::{NetError, NoRecords},
-        proto::{
-            op::{Query, ResponseCode},
-            rr::{
-                Name, RData, Record,
-                rdata::{A, CNAME, TXT},
+    use crate::{
+        hickory_resolver::{
+            net::{NetError, NoRecords},
+            proto::{
+                op::{Query, ResponseCode},
+                rr::{
+                    Name, RData, Record,
+                    rdata::{A, CNAME, TXT},
+                },
             },
         },
+        principal,
     };
 
     use super::*;

@@ -1,7 +1,6 @@
 use std::{fmt::Display, io, net::SocketAddr, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use ic_bn_lib_common::{traits::Run, types::http::ListenerOpts};
 use tokio::{
     net::{TcpListener, TcpStream},
     select,
@@ -10,11 +9,12 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker, time::FutureExt};
 use tracing::{info, warn};
 
 use crate::{
-    network::listener::listen_tcp,
+    network::{ListenerOpts, listener::listen_tcp},
     smtp::{
         Metrics,
         inbound::{SessionConfig, manager::SessionManager},
     },
+    tasks::Run,
 };
 
 /// Listens for new SMTP connections and creates sessions

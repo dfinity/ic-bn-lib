@@ -17,18 +17,19 @@ use hyper_util::{
     client::legacy::{Client as ClientHyper, connect::HttpConnector},
     rt::{TokioExecutor, TokioTimer},
 };
-use ic_bn_lib_common::{
-    traits::{dns::CloneableHyperDnsResolver, http::ClientHttp},
-    types::http::{ClientOptions, Error, HttpVersion},
-};
 use moka::sync::{Cache, CacheBuilder};
 use prometheus::Registry;
 use rustls::pki_types::DnsName;
 use scopeguard::defer;
 
-use crate::http::dns::Resolver;
-
 use super::Metrics;
+use crate::{
+    dns::{resolvers::CloneableHyperDnsResolver, resolvers::Resolver},
+    http::{
+        Error,
+        client::{ClientHttp, ClientOptions, HttpVersion},
+    },
+};
 
 /// Hyper-based client with a generic body and resolver
 #[derive(Debug, Clone)]

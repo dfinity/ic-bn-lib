@@ -5,14 +5,11 @@ use std::{
 };
 
 use arc_swap::{ArcSwap, ArcSwapOption};
-use ic_bn_lib_common::{
-    traits::utils::{ChecksTarget, ExecutesRequest},
-    types::utils::TargetState,
-};
 use tokio::{select, sync::watch::Receiver};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::utils::{
+    ChecksTarget, ExecutesRequest, TargetState,
     distributor::{self, Distributor, Strategy},
     health_check::{self, HealthChecker},
 };

@@ -7,16 +7,15 @@ use std::{
 
 use anyhow::{Context as _, anyhow};
 use async_trait::async_trait;
-use ic_bn_lib_common::{
-    traits::shed::GetsSystemInfo,
-    types::shed::{ShedReason, ShedResponse, SystemOptions},
-};
 use systemstat::{Platform, System};
 use tower::{Layer, Service, ServiceExt};
 use tracing::{debug, error};
 
 use super::{BoxFuture, ewma::EWMA};
-use crate::Error;
+use crate::http::{
+    Error,
+    shed::{GetsSystemInfo, ShedReason, ShedResponse, SystemOptions},
+};
 
 #[derive(Clone)]
 pub struct SystemInfo(Arc<System>);
@@ -265,6 +264,8 @@ impl<S: GetsSystemInfo, I: Clone + Send + Sync + 'static> Layer<I> for SystemLoa
 #[cfg(test)]
 mod test {
     use std::sync::Mutex;
+
+    use crate::http::Error;
 
     use super::*;
 

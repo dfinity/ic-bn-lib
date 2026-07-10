@@ -2,11 +2,13 @@ use std::{collections::BTreeMap, time::Duration};
 
 use anyhow::{Context, anyhow};
 use bytes::BytesMut;
-use ic_bn_lib_common::types::vector::VectorCli;
 use prost::Message;
 use url::Url;
 use vrl::value::{ObjectMap, Value};
 
+use crate::vector::cli::VectorCli;
+
+pub mod cli;
 pub mod client;
 #[allow(warnings, clippy::all, clippy::pedantic)]
 mod event;

@@ -1,7 +1,6 @@
 use std::{net::SocketAddr, str::FromStr, sync::Mutex};
 
 use async_trait::async_trait;
-use ic_bn_lib_common::types::http::ListenerOpts;
 use mail_parser::{Addr, Address, MessageParser};
 use mail_send::{SmtpClientBuilder, mail_builder::MessageBuilder};
 use prometheus::Registry;
@@ -12,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     email,
-    network::listener::listen_tcp,
+    network::{ListenerOpts, listener::listen_tcp},
     smtp::{
         DeliveryError, EmailMessage, MessageError, RecipientPolicy, RecipientResolveError,
         inbound::manager::SessionManager, server::Server,

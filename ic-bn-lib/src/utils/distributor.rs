@@ -7,7 +7,6 @@ use std::{
     time::Instant,
 };
 
-use ic_bn_lib_common::traits::utils::ExecutesRequest;
 use prometheus::{
     HistogramVec, IntCounterVec, IntGaugeVec, Registry, register_histogram_vec_with_registry,
     register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry,
@@ -16,21 +15,26 @@ use scopeguard::defer;
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString};
 
-/// Calculates Greatest Common Denominator
-const fn calc_gcd(x: isize, y: isize) -> isize {
-    let mut t: isize;
-    let mut a = x;
-    let mut b = y;
+use crate::utils::ExecutesRequest;
 
-    loop {
-        t = a % b;
-        if t > 0 {
-            a = b;
-            b = t;
-        } else {
-            return b;
-        }
+/// Calculates Greatest Common Divisor
+#[allow(clippy::many_single_char_names)]
+const fn calc_gcd(mut x: isize, mut y: isize) -> isize {
+    if x == 0 {
+        return y;
     }
+
+    if y == 0 {
+        return x;
+    }
+
+    while y != 0 {
+        let t = x % y;
+        x = y;
+        y = t;
+    }
+
+    x
 }
 
 #[derive(Clone, Debug)]

@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
-use anyhow::{Context, Error};
+use anyhow::Context;
 use async_trait::async_trait;
-use ic_bn_lib_common::{traits::tls::ProvidesCertificates, types::tls::Pem};
+
+use crate::tls::{Error, Pem, ProvidesCertificates};
 
 /// Loads the certificate chain & private key from provided PEM-encoded file
 #[derive(derive_new::new)]

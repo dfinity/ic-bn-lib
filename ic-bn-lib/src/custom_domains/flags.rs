@@ -1,18 +1,6 @@
-pub mod acme;
-pub mod dns;
-pub mod http;
-pub mod shed;
-pub mod tls;
-pub mod utils;
-pub mod vector;
-
 use std::{fmt::Display, ops::BitOrAssign, str::FromStr};
 
 use anyhow::anyhow;
-use candid::Principal;
-use fqdn::FQDN;
-use serde::{Deserialize, Serialize};
-use strum::{Display, EnumString, IntoStaticStr};
 
 use crate::Error;
 
@@ -68,7 +56,7 @@ impl DomainFlags {
         flags
     }
 
-    pub fn has_flag(&self, f: DomainFlag) -> bool {
+    pub const fn has_flag(&self, f: DomainFlag) -> bool {
         self.0 & f.0 != 0
     }
 
@@ -76,7 +64,7 @@ impl DomainFlags {
         *self |= f
     }
 
-    pub fn unset_flag(&mut self, f: DomainFlag) {
+    pub const fn unset_flag(&mut self, f: DomainFlag) {
         self.0 &= !f.0;
     }
 }
@@ -115,129 +103,12 @@ impl Display for DomainFlags {
     }
 }
 
-/// Represents a custom domain with a corresponding canister ID
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CustomDomain {
-    pub name: FQDN,
-    pub canister_id: Principal,
-    /// Opaque timestamp to reflect when the domain was created, can be zero
-    pub timestamp: u64,
-    pub priority: u8,
-    pub flags: Option<DomainFlags>,
-}
-
-impl CustomDomain {
-    pub fn new(name: FQDN, canister_id: Principal) -> Self {
-        Self {
-            name,
-            canister_id,
-            timestamp: 0,
-            priority: 0,
-            flags: None,
-        }
-    }
-
-    pub fn has_flag(&self, flag: DomainFlag) -> bool {
-        self.flags.is_some_and(|x| x.has_flag(flag))
-    }
-
-    pub fn set_flag(&mut self, flag: DomainFlag) {
-        match &mut self.flags {
-            Some(v) => v.set_flag(flag),
-            None => self.flags = Some(DomainFlags::new([flag])),
-        }
-    }
-
-    pub fn unset_flag(&mut self, flag: DomainFlag) {
-        if let Some(v) = &mut self.flags {
-            v.unset_flag(flag)
-        }
-    }
-
-    pub fn set_priority(&mut self, prio: u8) {
-        self.priority = prio;
-    }
-
-    pub fn with_flag(mut self, flag: DomainFlag) -> Self {
-        match &mut self.flags {
-            Some(v) => v.set_flag(flag),
-            None => self.flags = Some(DomainFlags::new([flag])),
-        }
-
-        self
-    }
-
-    pub fn with_priority(mut self, prio: u8) -> Self {
-        self.priority = prio;
-        self
-    }
-}
-
-/// Type of IC API request
-#[derive(
-    Debug,
-    Default,
-    Clone,
-    Copy,
-    Display,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    IntoStaticStr,
-    EnumString,
-    Serialize,
-    Deserialize,
-)]
-#[strum(serialize_all = "snake_case")]
-#[serde(rename_all = "snake_case")]
-pub enum RequestType {
-    #[default]
-    Unknown,
-    Status,
-    QueryV2,
-    QueryV3,
-    QuerySubnetV3,
-    CallV2,
-    CallV3,
-    CallV4,
-    CallSubnetV4,
-    ReadStateV2,
-    ReadStateV3,
-    ReadStateSubnetV2,
-    ReadStateSubnetV3,
-}
-
-impl RequestType {
-    pub const fn is_query(&self) -> bool {
-        matches!(self, Self::QueryV2 | Self::QueryV3 | Self::QuerySubnetV3)
-    }
-
-    pub const fn is_call(&self) -> bool {
-        matches!(
-            self,
-            Self::CallV2 | Self::CallV3 | Self::CallV4 | Self::CallSubnetV4
-        )
-    }
-
-    pub const fn is_read_state(&self) -> bool {
-        matches!(
-            self,
-            Self::ReadStateV2
-                | Self::ReadStateV3
-                | Self::ReadStateSubnetV2
-                | Self::ReadStateSubnetV3
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use fqdn::fqdn;
 
     use super::*;
-    use crate::principal;
+    use crate::{custom_domains::CustomDomain, principal};
 
     #[test]
     fn test_custom_domain_flags() {

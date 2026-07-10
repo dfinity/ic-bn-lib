@@ -14,14 +14,6 @@ use core::fmt;
 use derive_new::new;
 use fqdn::FQDN;
 use hickory_proto::rr::RecordType;
-use ic_bn_lib_common::{
-    traits::{
-        Run,
-        acme::{AcmeCertificateClient, DnsManager, TokenManager},
-        dns::Resolves,
-    },
-    types::acme::{AcmeUrl, Record},
-};
 use instant_acme::AccountCredentials;
 use rustls::{
     server::{ClientHello, ResolvesServerCert},
@@ -34,9 +26,15 @@ use tracing::debug;
 use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::{
-    RetryError, retry_async,
+    RetryError,
+    dns::resolvers::Resolves,
+    retry_async,
+    tasks::Run,
     tls::{
-        acme::client::{Client, ClientBuilder},
+        acme::{
+            AcmeCertificateClient as _, AcmeUrl, DnsManager, Record, TokenManager,
+            client::{Client, ClientBuilder},
+        },
         extract_sans, pem_convert_to_rustls_single, sni_matches,
     },
 };

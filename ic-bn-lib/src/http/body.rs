@@ -11,13 +11,13 @@ use bytes::{Buf, Bytes};
 use futures_util::ready;
 use http_body::{Body as HttpBody, Frame, SizeHint};
 use http_body_util::{BodyExt, LengthLimitError, Limited};
-use ic_bn_lib_common::types::http::Error;
 use tokio::sync::{
     mpsc,
     oneshot::{self, Receiver, Sender},
 };
 
 use super::calc_headers_size;
+use crate::http::Error;
 
 /// Read the given body enforcing a size & time limit
 pub async fn buffer_body<H: HttpBody + Send>(

@@ -3,7 +3,6 @@ use std::{io, path::PathBuf, sync::Arc};
 use anyhow::Error;
 use async_trait::async_trait;
 use futures::StreamExt;
-use ic_bn_lib_common::{traits::Run, types::acme::AcmeUrl};
 use rustls::{
     server::{ClientHello, ResolvesServerCert},
     sign::CertifiedKey,
@@ -15,6 +14,8 @@ use rustls_acme::{
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
+
+use crate::{tasks::Run, tls::acme::AcmeUrl};
 
 #[derive(derive_new::new)]
 pub struct Opts {
