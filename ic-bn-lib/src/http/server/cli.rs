@@ -5,6 +5,7 @@ use humantime::parse_duration;
 use crate::{
     http::server::{ProxyProtocolMode, ServerOptions},
     parse_size,
+    tls::TlsOptions,
 };
 
 /// HTTP Server CLI
@@ -132,6 +133,18 @@ impl From<&HttpServerCli> for ServerOptions {
             grace_period: c.http_server_grace_period,
             max_requests_per_conn: c.http_server_max_requests_per_conn,
             proxy_protocol_mode: c.http_server_proxy_protocol_mode,
+        }
+    }
+}
+
+impl From<&HttpServerCli> for TlsOptions {
+    fn from(c: &HttpServerCli) -> Self {
+        Self {
+            additional_alpn: vec![],
+            sessions_count: c.http_server_tls_session_cache_size,
+            sessions_tti: c.http_server_tls_session_cache_tti,
+            ticket_lifetime: c.http_server_tls_ticket_lifetime,
+            tls_versions: vec![],
         }
     }
 }
