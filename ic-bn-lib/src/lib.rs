@@ -158,7 +158,7 @@ pub fn parse_size_decimal(s: &str) -> Result<u64, parse_size::Error> {
 
 /// Parses size string as a decimal (1k = 1000 etc) in usize
 pub fn parse_size_decimal_usize(s: &str) -> Result<usize, parse_size::Error> {
-    parse_size(s).map(|x| x as usize)
+    parse_size_decimal(s).map(|x| x as usize)
 }
 
 /// Downloads the given url to given path.
