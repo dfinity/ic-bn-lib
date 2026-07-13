@@ -38,3 +38,52 @@ impl Healthy for HealthManager {
         self.services.read().unwrap().iter().all(|x| x.healthy())
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[derive(Debug)]
+    struct MockHealthy(bool);
+
+    impl Healthy for MockHealthy {
+        fn healthy(&self) -> bool {
+            self.0
+        }
+    }
+
+    #[test]
+    fn test_empty_manager_is_healthy() {
+        let mgr = HealthManager::default();
+        assert!(mgr.healthy());
+    }
+
+    #[test]
+    fn test_all_healthy() {
+        let mgr = HealthManager::default();
+        mgr.add(Arc::new(MockHealthy(true)));
+        mgr.add(Arc::new(MockHealthy(true)));
+        assert!(mgr.healthy());
+    }
+
+    #[test]
+    fn test_one_unhealthy_makes_manager_unhealthy() {
+        let mgr = HealthManager::default();
+        mgr.add(Arc::new(MockHealthy(true)));
+        mgr.add(Arc::new(MockHealthy(false)));
+        assert!(!mgr.healthy());
+    }
+
+    #[test]
+    fn test_managers_can_be_nested() {
+        let inner = Arc::new(HealthManager::default());
+        inner.add(Arc::new(MockHealthy(true)));
+
+        let outer = HealthManager::default();
+        outer.add(inner.clone());
+        assert!(outer.healthy());
+
+        inner.add(Arc::new(MockHealthy(false)));
+        assert!(!outer.healthy());
+    }
+}

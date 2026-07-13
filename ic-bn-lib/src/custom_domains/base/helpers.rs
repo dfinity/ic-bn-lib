@@ -111,3 +111,111 @@ pub fn format_error_chain(err: &anyhow::Error) -> String {
     }
     s
 }
+
+#[cfg(test)]
+mod test {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use anyhow::anyhow;
+
+    use super::*;
+
+    #[test]
+    fn test_format_error_chain_single_error() {
+        let err = anyhow!("root cause");
+        assert_eq!(format_error_chain(&err), "root cause");
+    }
+
+    #[test]
+    fn test_format_error_chain_with_context() {
+        let err = anyhow!("root cause").context("middle").context("top");
+        assert_eq!(
+            format_error_chain(&err),
+            "top\nCaused by: middle\nCaused by: root cause"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_async_succeeds_immediately() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let a = attempts.clone();
+
+        let result = retry_async(
+            None,
+            None,
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+            move || {
+                let a = a.clone();
+                async move {
+                    a.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, anyhow::Error>(42)
+                }
+            },
+        )
+        .await;
+
+        let (attempt_no, value) = result.unwrap();
+        assert_eq!(attempt_no, 1);
+        assert_eq!(value, 42);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_retry_async_succeeds_after_failures() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let a = attempts.clone();
+
+        let result = retry_async(
+            Some("flaky_op"),
+            None,
+            Duration::from_secs(5),
+            Duration::from_millis(5),
+            move || {
+                let a = a.clone();
+                async move {
+                    let n = a.fetch_add(1, Ordering::SeqCst) + 1;
+                    if n < 3 {
+                        Err(anyhow!("not yet"))
+                    } else {
+                        Ok(n)
+                    }
+                }
+            },
+        )
+        .await;
+
+        let (attempt_no, value) = result.unwrap();
+        assert_eq!(attempt_no, 3);
+        assert_eq!(value, 3);
+    }
+
+    #[tokio::test]
+    async fn test_retry_async_times_out_on_persistent_failure() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let a = attempts.clone();
+
+        let result = retry_async(
+            None,
+            None,
+            Duration::from_millis(60),
+            Duration::from_millis(10),
+            move || {
+                let a = a.clone();
+                async move {
+                    a.fetch_add(1, Ordering::SeqCst);
+                    Err::<(), _>(anyhow!("always fails"))
+                }
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(err.attempts >= 1);
+        assert!(attempts.load(Ordering::SeqCst) >= 1);
+    }
+}

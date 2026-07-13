@@ -100,3 +100,47 @@ pub fn listen_unix(path: PathBuf, opts: ListenerOpts) -> io::Result<UnixListener
 
     Ok(socket)
 }
+
+#[cfg(test)]
+mod test {
+    use std::net::{Ipv4Addr, SocketAddrV4};
+
+    use super::*;
+
+    fn opts() -> ListenerOpts {
+        ListenerOpts::default()
+    }
+
+    #[tokio::test]
+    async fn test_listen_tcp_binds_ephemeral_port() {
+        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+        let listener = listen_tcp(addr, opts()).unwrap();
+        assert!(listener.local_addr().unwrap().port() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_listen_unix_applies_permission_bits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.sock");
+
+        let mut opts = opts();
+        opts.unix_socket_permissions = 0o600;
+        listen_unix(path.clone(), opts).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[tokio::test]
+    async fn test_listen_unix_removes_stale_socket_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.sock");
+
+        // Create a stale file at the socket path
+        std::fs::write(&path, b"stale").unwrap();
+        assert!(path.exists());
+
+        listen_unix(path.clone(), opts()).unwrap();
+        assert!(path.exists());
+    }
+}
