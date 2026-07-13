@@ -14,12 +14,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::{
+    health::Healthy,
     tasks::Run,
     tls::{
         CertKey, Error, Pem, ProvidesCertificates, StoresCertificates, extract_sans_der,
         extract_validity_der, pem_convert_to_rustls_single,
     },
-    utils::health_manager::Healthy,
 };
 
 /// Converts a PEM-encoded cert+key pair into CertKey

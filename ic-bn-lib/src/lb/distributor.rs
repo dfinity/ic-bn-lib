@@ -15,7 +15,7 @@ use scopeguard::defer;
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString};
 
-use crate::utils::{ExecutesRequest, wrr::Wrr};
+use super::{ExecutesRequest, wrr::Wrr};
 
 #[derive(Clone, Debug)]
 pub struct Metrics {

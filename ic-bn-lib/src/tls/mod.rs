@@ -57,7 +57,6 @@ pub trait ResolvesServerCert: Debug + Send + Sync {
 }
 
 /// Generic error for now
-/// TODO improve
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error(transparent)]

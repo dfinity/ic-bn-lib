@@ -9,18 +9,22 @@
 #[cfg(feature = "custom-domains")]
 pub mod custom_domains;
 pub mod dns;
+pub mod health;
 pub mod http;
+#[cfg(feature = "lb")]
+pub mod lb;
 pub mod network;
+#[cfg(feature = "pubsub")]
 pub mod pubsub;
+#[cfg(all(target_os = "linux", feature = "sev-snp"))]
+pub mod sev_snp;
 #[cfg(feature = "smtp")]
 pub mod smtp;
 pub mod tasks;
 pub mod tests;
 pub mod tls;
-pub mod utils;
 #[cfg(feature = "vector")]
 pub mod vector;
-
 use std::{fs::File, net::IpAddr, path::Path};
 
 use anyhow::{Context, anyhow};

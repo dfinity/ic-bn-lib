@@ -63,11 +63,12 @@ pub async fn handler(
         ));
     }
 
-    // Check if we have the report in cache
+    // Check if we have the report in the cache
     if let Some(v) = state.cache.get(&body) {
         return Ok(v);
     }
 
+    // SAFETY: We already made sure body is 64 bytes
     let data: [u8; 64] = body.as_ref().try_into().unwrap();
 
     // `get_report()` performs a blocking ioctl to the SEV-SNP firmware
