@@ -19,6 +19,8 @@ use crate::{
     storage::AUTHORIZED_PRINCIPAL,
 };
 
+#[cfg(feature = "bench")]
+mod bench;
 pub mod metrics;
 pub mod state;
 pub mod storage;
@@ -141,7 +143,9 @@ fn http_request(request: HttpRequest) -> HttpResponse {
     }
 }
 
-#[cfg(test)]
+// The `bench` feature adds extra test-only endpoints that intentionally aren't part of
+// the public candid interface, so this check doesn't apply to that build configuration.
+#[cfg(all(test, not(feature = "bench")))]
 mod tests {
     use std::{env, fs::read_to_string, path::PathBuf};
 
