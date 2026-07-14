@@ -47,7 +47,7 @@ pub const DEFAULT_PAGE_LIMIT: u32 = 100;
 pub const MAX_PAGE_LIMIT: u32 = 400;
 
 // Interval for purging stale, unregistered domains
-pub const STALE_DOMAINS_CLEANUP_INTERVAL: Duration = Duration::from_secs(3 * 60 * 60);
+pub const STALE_DOMAINS_CLEANUP_INTERVAL: Duration = Duration::from_hours(3);
 
 pub type FetchTaskResult = Result<Option<ScheduledTask>, FetchTaskError>;
 pub type SubmitTaskResult = Result<(), SubmitTaskError>;

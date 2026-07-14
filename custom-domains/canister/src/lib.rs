@@ -12,6 +12,7 @@ use ic_custom_domains_canister_api::{
     SubmitTaskResult, TaskResult, TryAddTaskError, TryAddTaskResult,
 };
 use ic_http_types::{HttpRequest, HttpResponse, HttpResponseBuilder};
+use ic_stable_structures::memory_manager::MemoryId;
 
 use crate::{
     metrics::{METRICS, export_metrics_as_http_response},
@@ -68,6 +69,13 @@ fn init(init_arg: InitArg) {
 // Run every time a canister is upgraded
 #[post_upgrade]
 fn post_upgrade(init_arg: InitArg) {
+    // One-time move of enc_cert/enc_priv_key out of DomainEntry into the certificates map;
+    // a no-op after the first run (see `migrate_certificates_out_of_domains`).
+    with_state_mut(|state| {
+        let domains_memory = storage::MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(0)));
+        state.migrate_certificates_out_of_domains(domains_memory);
+    });
+
     // Run the same initialization logic
     init(init_arg);
 }
