@@ -233,3 +233,81 @@ impl<T: AsyncReadWrite> AsyncWrite for AsyncCounter<T> {
         pin!(&mut self.inner).poll_flush(cx)
     }
 }
+
+#[cfg(test)]
+mod test {
+    use std::net::{Ipv6Addr, SocketAddrV6};
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
+
+    use super::*;
+
+    #[test]
+    fn test_addr_family() {
+        let v4 = Addr::Tcp(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)));
+        assert_eq!(v4.family(), "v4");
+
+        let v6 = Addr::Tcp(SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::LOCALHOST,
+            80,
+            0,
+            0,
+        )));
+        assert_eq!(v6.family(), "v6");
+
+        // A v4-mapped v6 address should be reported as v4
+        let mapped = Addr::Tcp(SocketAddr::V6(SocketAddrV6::new(
+            Ipv4Addr::LOCALHOST.to_ipv6_mapped(),
+            80,
+            0,
+            0,
+        )));
+        assert_eq!(mapped.family(), "v4");
+
+        let unix = Addr::Unix(PathBuf::from("/tmp/foo.sock"));
+        assert_eq!(unix.family(), "unix");
+    }
+
+    #[test]
+    fn test_addr_ip() {
+        let v4 = Addr::Tcp(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)));
+        assert_eq!(v4.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+
+        let unix = Addr::Unix(PathBuf::from("/tmp/foo.sock"));
+        assert_eq!(unix.ip(), IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn test_addr_display() {
+        let v4 = Addr::Tcp(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80)));
+        assert_eq!(v4.to_string(), "127.0.0.1");
+
+        let unix = Addr::Unix(PathBuf::from("/tmp/foo.sock"));
+        assert_eq!(unix.to_string(), "/tmp/foo.sock");
+    }
+
+    #[test]
+    fn test_addr_default() {
+        assert_eq!(Addr::default().family(), "v4");
+    }
+
+    #[tokio::test]
+    async fn test_async_counter_tracks_bytes() {
+        let (a, mut b) = duplex(64);
+        let (mut a, stats) = AsyncCounter::new(a);
+
+        a.write_all(b"hello").await.unwrap();
+        let mut buf = [0u8; 5];
+        b.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hello");
+        assert_eq!(stats.sent(), 5);
+        assert_eq!(stats.rcvd(), 0);
+
+        b.write_all(b"world!").await.unwrap();
+        let mut buf = [0u8; 6];
+        a.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"world!");
+        assert_eq!(stats.sent(), 5);
+        assert_eq!(stats.rcvd(), 6);
+    }
+}

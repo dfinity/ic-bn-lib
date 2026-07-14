@@ -134,7 +134,7 @@ fn stream_send_message(b: &mut tokio_test::io::Builder) {
         .write(b"354 Start mail input; end with <CRLF>.<CRLF>\r\n")
         .read(b"foobarmessage\r\n.\r\n")
         .write(
-            b"250 2.0.0 Message (13 bytes) queued with id 00000000-0000-0000-0000-000000000000\r\n",
+            b"250 2.0.0 Message (15 bytes) queued with id 00000000-0000-0000-0000-000000000000\r\n",
         );
 }
 
@@ -164,7 +164,7 @@ async fn test_pipelining() {
         .write(b"250 2.1.0 OK\r\n250 2.1.5 OK\r\n354 Start mail input; end with <CRLF>.<CRLF>\r\n")
         .read(b"foobarmessage\r\n.\r\n")
         .write(
-            b"250 2.0.0 Message (13 bytes) queued with id 00000000-0000-0000-0000-000000000000\r\n",
+            b"250 2.0.0 Message (15 bytes) queued with id 00000000-0000-0000-0000-000000000000\r\n",
         )
         .read(b"QUIT\r\n")
         .write(b"221 2.0.0 Bye.\r\n")
@@ -330,7 +330,7 @@ async fn test_data() {
             id: Uuid::nil(),
             mail_from: email!("foo@bar"),
             rcpt_to: vec![email!("bar@baz")],
-            body: "foobarmessage".into(),
+            body: "foobarmessage\r\n".into(),
         }
     )
 }
@@ -379,7 +379,7 @@ async fn test_expand() {
             id: Uuid::nil(),
             mail_from: email!("foo@bar"),
             rcpt_to: vec![email!("dead@beef"), email!("dead@dead"), email!("bar@bax"),],
-            body: "foobarmessage".into(),
+            body: "foobarmessage\r\n".into(),
         }
     )
 }
@@ -687,7 +687,7 @@ async fn test_with_smtp_client() {
         *parsed.to().unwrap(),
         Address::List(vec![Addr::new(Some("Jane Doe"), "jane@doe.com")])
     );
-    assert_eq!(parsed.body_text(0).unwrap(), "Blah");
+    assert_eq!(parsed.body_text(0).unwrap(), "Blah\r\n");
 
     // Shutdown the server
     token.cancel();

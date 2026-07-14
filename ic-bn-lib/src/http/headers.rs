@@ -82,3 +82,106 @@ pub fn strip_connection_headers(headers: &mut HeaderMap) {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use http::HeaderValue;
+
+    use super::*;
+
+    #[test]
+    fn test_strips_hop_by_hop_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("keep-alive"),
+            HeaderValue::from_static("timeout=5"),
+        );
+        headers.insert(
+            HeaderName::from_static("proxy-connection"),
+            HeaderValue::from_static("keep-alive"),
+        );
+        headers.insert(
+            HeaderName::from_static("http2-settings"),
+            HeaderValue::from_static("foo"),
+        );
+        headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+        headers.insert(UPGRADE, HeaderValue::from_static("websocket"));
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("text/plain"),
+        );
+
+        strip_connection_headers(&mut headers);
+
+        assert!(headers.get("keep-alive").is_none());
+        assert!(headers.get("proxy-connection").is_none());
+        assert!(headers.get("http2-settings").is_none());
+        assert!(headers.get(TRANSFER_ENCODING).is_none());
+        assert!(headers.get(UPGRADE).is_none());
+        assert_eq!(
+            headers.get(http::header::CONTENT_TYPE).unwrap(),
+            "text/plain"
+        );
+    }
+
+    #[test]
+    fn test_te_trailers_is_kept() {
+        let mut headers = HeaderMap::new();
+        headers.insert(TE, HeaderValue::from_static("trailers"));
+
+        strip_connection_headers(&mut headers);
+
+        assert_eq!(headers.get(TE).unwrap(), "trailers");
+    }
+
+    #[test]
+    fn test_te_non_trailers_is_removed() {
+        let mut headers = HeaderMap::new();
+        headers.insert(TE, HeaderValue::from_static("gzip"));
+
+        strip_connection_headers(&mut headers);
+
+        assert!(headers.get(TE).is_none());
+    }
+
+    #[test]
+    fn test_headers_listed_in_connection_are_removed() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONNECTION, HeaderValue::from_static("x-foo, x-bar"));
+        headers.insert(
+            HeaderName::from_static("x-foo"),
+            HeaderValue::from_static("1"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-bar"),
+            HeaderValue::from_static("2"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-baz"),
+            HeaderValue::from_static("3"),
+        );
+
+        strip_connection_headers(&mut headers);
+
+        assert!(headers.get(CONNECTION).is_none());
+        assert!(headers.get("x-foo").is_none());
+        assert!(headers.get("x-bar").is_none());
+        assert_eq!(headers.get("x-baz").unwrap(), "3");
+    }
+
+    #[test]
+    fn test_unrelated_headers_are_untouched() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+
+        strip_connection_headers(&mut headers);
+
+        assert_eq!(
+            headers.get(http::header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+    }
+}

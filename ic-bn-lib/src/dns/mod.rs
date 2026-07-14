@@ -231,3 +231,75 @@ pub fn is_error_negative_lookup(e: &NetError) -> bool {
         || e.is_nx_domain()
         || matches!(e, NetError::Dns(HickoryDnsError::Nsec { .. }))
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_protocol_from_str_defaults() {
+        assert_eq!(Protocol::from_str("clear").unwrap(), Protocol::Clear(53));
+        assert_eq!(Protocol::from_str("tls").unwrap(), Protocol::Tls(853));
+        assert_eq!(Protocol::from_str("https").unwrap(), Protocol::Https(443));
+    }
+
+    #[test]
+    fn test_protocol_from_str_custom_port() {
+        assert_eq!(
+            Protocol::from_str("clear:5353").unwrap(),
+            Protocol::Clear(5353)
+        );
+        assert_eq!(Protocol::from_str("tls:8853").unwrap(), Protocol::Tls(8853));
+        assert_eq!(
+            Protocol::from_str("https:8443").unwrap(),
+            Protocol::Https(8443)
+        );
+    }
+
+    #[test]
+    fn test_protocol_from_str_unknown_protocol() {
+        assert!(Protocol::from_str("quic").is_err());
+    }
+
+    #[test]
+    fn test_protocol_from_str_invalid_port() {
+        assert!(Protocol::from_str("clear:notaport").is_err());
+    }
+
+    #[test]
+    fn test_lookup_strategy_conversion() {
+        assert_eq!(
+            LookupIpStrategy::from(LookupStrategy::Ipv4Only),
+            LookupIpStrategy::Ipv4Only
+        );
+        assert_eq!(
+            LookupIpStrategy::from(LookupStrategy::Ipv6Only),
+            LookupIpStrategy::Ipv6Only
+        );
+        assert_eq!(
+            LookupIpStrategy::from(LookupStrategy::Ipv4AndIpv6),
+            LookupIpStrategy::Ipv4AndIpv6
+        );
+        assert_eq!(
+            LookupIpStrategy::from(LookupStrategy::Ipv6ThenIpv4),
+            LookupIpStrategy::Ipv6thenIpv4
+        );
+        assert_eq!(
+            LookupIpStrategy::from(LookupStrategy::Ipv4ThenIpv6),
+            LookupIpStrategy::Ipv4thenIpv6
+        );
+    }
+
+    #[test]
+    fn test_socket_addrs_iterator() {
+        let mut addrs = SocketAddrs {
+            iter: Box::new(vec![IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))].into_iter()),
+        };
+
+        assert_eq!(
+            addrs.next(),
+            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0))
+        );
+        assert_eq!(addrs.next(), None);
+    }
+}

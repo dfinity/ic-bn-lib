@@ -8,7 +8,7 @@ use arc_swap::{ArcSwap, ArcSwapOption};
 use tokio::{select, sync::watch::Receiver};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::utils::{
+use super::{
     ChecksTarget, ExecutesRequest, TargetState,
     distributor::{self, Distributor, Strategy},
     health_check::{self, HealthChecker},
@@ -200,7 +200,7 @@ mod test {
     use async_trait::async_trait;
     use prometheus::Registry;
 
-    use crate::utils::distributor::test::TestExecutor;
+    use super::distributor::test::TestExecutor;
 
     use super::*;
 

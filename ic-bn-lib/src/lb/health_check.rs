@@ -16,7 +16,7 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::warn;
 
-use crate::utils::{ChecksTarget, TargetState};
+use super::{ChecksTarget, TargetState};
 
 #[derive(Clone, Debug)]
 pub struct Metrics {

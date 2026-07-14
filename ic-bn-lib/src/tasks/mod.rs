@@ -107,3 +107,95 @@ impl TaskManager {
         self.token.child_token()
     }
 }
+
+#[cfg(test)]
+mod test {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    struct CountingTask(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl Run for CountingTask {
+        async fn run(&self, _token: CancellationToken) -> Result<(), anyhow::Error> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct WaitsForCancellation(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl Run for WaitsForCancellation {
+        async fn run(&self, token: CancellationToken) -> Result<(), anyhow::Error> {
+            token.cancelled().await;
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_add_runs_task_once() {
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let mut mgr = TaskManager::new();
+        mgr.add("counter", Arc::new(CountingTask(count.clone())));
+        mgr.start();
+
+        // Give the spawned task a chance to run
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        mgr.stop().await;
+
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_add_interval_runs_task_repeatedly() {
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let mut mgr = TaskManager::new();
+        mgr.add_interval(
+            "interval",
+            Arc::new(CountingTask(count.clone())),
+            Duration::from_millis(20),
+        );
+        mgr.start();
+
+        tokio::time::sleep(Duration::from_millis(110)).await;
+        mgr.stop().await;
+
+        assert!(
+            count.load(Ordering::SeqCst) >= 2,
+            "expected at least 2 ticks, got {}",
+            count.load(Ordering::SeqCst)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stop_cancels_running_tasks() {
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let mut mgr = TaskManager::new();
+        mgr.add("waiter", Arc::new(WaitsForCancellation(count.clone())));
+        mgr.start();
+
+        // Task should still be waiting on cancellation
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+
+        // stop() cancels the token and awaits task completion
+        mgr.stop().await;
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_token_is_child_of_manager_token() {
+        let mgr = TaskManager::new();
+        let child = mgr.token();
+        assert!(!child.is_cancelled());
+
+        mgr.stop().await;
+        assert!(child.is_cancelled());
+    }
+}
