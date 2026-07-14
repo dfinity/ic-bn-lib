@@ -1,5 +1,4 @@
-use std::hash::Hash;
-use std::{borrow::Cow, collections::HashMap, ops::Bound as RangeBound};
+use std::{borrow::Cow, collections::HashMap, hash::Hash, ops::Bound as RangeBound};
 
 use candid::Principal;
 use ic_custom_domains_canister_api::{
@@ -35,40 +34,40 @@ pub type UtcTimestamp = u64;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DomainEntry {
-    // Current task being processed for the domain, if any
+    /// Current task being processed for the domain, if any
     pub task: Option<TaskKind>,
-    // Timestamp when the task failed last time, if any
+    /// Timestamp when the task failed last time, if any
     pub last_fail_time: Option<UtcTimestamp>,
-    // Reason for the last failure, if any
+    /// Reason for the last failure, if any
     pub last_failure_reason: Option<TaskFailReason>,
-    // Number of consecutive failures for the current task (excluding rate limit failures)
+    /// Number of consecutive failures for the current task (excluding rate limit failures)
     pub failures_count: u32,
-    // Number of rate limit failures for the current task
+    /// Number of rate limit failures for the current task
     pub rate_limit_failures_count: u32,
-    // Canister ID associated with the domain
+    /// Canister ID associated with the domain
     pub canister_id: Option<Principal>,
-    // Timestamp when the domain entry was created (set once and never updated)
+    /// Timestamp when the domain entry was created (set once and never updated)
     pub created_at: UtcTimestamp,
-    // Timestamp when the current task was taken by a worker
+    /// Timestamp when the current task was taken by a worker
     pub taken_at: Option<UtcTimestamp>,
-    // Timestamp when the current task was created
+    /// Timestamp when the current task was created
     pub task_created_at: Option<UtcTimestamp>,
-    // Certificate validity period start (as UNIX timestamp)
+    /// Certificate validity period start (as UNIX timestamp)
     pub not_before: Option<UtcTimestamp>,
-    // Certificate validity period end (as UNIX timestamp)
+    /// Certificate validity period end (as UNIX timestamp)
     pub not_after: Option<UtcTimestamp>,
-    // Whether to also issue a `*.domain` wildcard SAN in the certificate.
-    // `#[serde(default)]` keeps existing stable-storage entries deserializable
-    // after upgrade (they predate this field and default to `false`).
+    /// Whether to also issue a `*.domain` wildcard SAN in the certificate.
+    /// `#[serde(default)]` keeps existing stable-storage entries deserializable
+    /// after upgrade (they predate this field and default to `false`).
     #[serde(default)]
     pub wildcard: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CertificateEntry {
-    // PEM-encoded certificate data (encrypted)
+    /// PEM-encoded certificate data (encrypted)
     pub enc_cert: Vec<u8>,
-    // PEM-encoded private key data (encrypted)
+    /// PEM-encoded private key data (encrypted)
     pub enc_priv_key: Vec<u8>,
 }
 
@@ -88,54 +87,12 @@ impl Storable for CertificateEntry {
     }
 }
 
-/// Mirrors `DomainEntry`'s on-disk shape from before `enc_cert`/`enc_priv_key` were split
-/// out into `CertificateEntry`. Used only to recover those fields from stable memory
-/// during the one-time post-upgrade migration; `#[serde(default)]` on both fields lets it
-/// also parse already-migrated (trimmed) bytes without error, so re-running the migration
-/// stays safe even though it is guarded to run only once.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct DomainEntryV1 {
-    task: Option<TaskKind>,
-    last_fail_time: Option<UtcTimestamp>,
-    last_failure_reason: Option<TaskFailReason>,
-    failures_count: u32,
-    rate_limit_failures_count: u32,
-    canister_id: Option<Principal>,
-    created_at: UtcTimestamp,
-    taken_at: Option<UtcTimestamp>,
-    task_created_at: Option<UtcTimestamp>,
-    #[serde(default)]
-    enc_cert: Option<Vec<u8>>,
-    #[serde(default)]
-    enc_priv_key: Option<Vec<u8>>,
-    not_before: Option<UtcTimestamp>,
-    not_after: Option<UtcTimestamp>,
-    #[serde(default)]
-    wildcard: bool,
-}
-
-impl Storable for DomainEntryV1 {
-    const BOUND: Bound = Bound::Unbounded;
-
-    fn to_bytes(&self) -> std::borrow::Cow<'_, [u8]> {
-        Cow::Owned(to_vec(&self).expect("DomainEntryV1 serialization failed"))
-    }
-
-    fn into_bytes(self) -> Vec<u8> {
-        to_vec(&self).expect("DomainEntryV1 serialization failed")
-    }
-
-    fn from_bytes(bytes: std::borrow::Cow<[u8]>) -> Self {
-        from_slice(&bytes).expect("DomainEntryV1 deserialization failed")
-    }
-}
-
 #[derive(Debug, Clone, Eq, PartialEq, Hash, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum TaskStatus {
-    // Task is pending and has not been taken by any worker yet
+    /// Task is pending and has not been taken by any worker yet
     Pending(TaskKind),
-    // Task is currently being processed by a worker
+    /// Task is currently being processed by a worker
     InProgress(TaskKind),
 }
 
@@ -148,7 +105,7 @@ impl TaskStatus {
     }
 }
 
-// Simplified registration status labels for metrics and stats
+/// Simplified registration status labels for metrics and stats
 #[derive(Debug, Clone, Eq, PartialEq, Hash, EnumIter, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum RegistrationStatusLabel {
@@ -258,85 +215,10 @@ pub struct CanisterState {
     pub last_change: StableCell<UtcTimestamp, VirtualMemory<DefaultMemoryImpl>>,
     pub certificates: StableBTreeMap<String, CertificateEntry, VirtualMemory<DefaultMemoryImpl>>,
     pub max_domains: u64,
-    /// Guards `migrate_certificates_out_of_domains`, so the one-time rewrite of every
-    /// domain entry only ever runs on the first post-upgrade after this migration shipped.
-    pub certificates_migrated: StableCell<bool, VirtualMemory<DefaultMemoryImpl>>,
 }
 
 impl CanisterState {
-    /// One-time migration: moves `enc_cert`/`enc_priv_key` out of each `DomainEntry` and
-    /// into the `certificates` map, then rewrites the (now smaller) entry back into
-    /// `domains`. Before this ran, every full scan over `domains` (stats, cleanup, task
-    /// scheduling) had to decode the certificate/key bytes of every entry just to skip
-    /// past them, which is what made those scans expensive.
-    ///
-    /// Safe to call on every post_upgrade: guarded by `certificates_migrated` so it's a
-    /// no-op after the first run, and reads legacy bytes through `DomainEntryV1`, whose
-    /// `#[serde(default)]` cert fields also parse already-migrated entries without error.
-    ///
-    /// Reads proceed key-by-key via point lookups (`get`), never a live iterator held
-    /// across a mutation of `domains`/`certificates` on the same underlying stable memory.
-    /// `domains_memory` must be a *second* handle onto the same memory region backing
-    /// `self.domains` (e.g. another `MEMORY_MANAGER.get(MemoryId::new(0))` call) — taken as
-    /// a parameter, rather than reached for internally, so this stays testable against
-    /// any `CanisterState`/`MemoryManager` pairing instead of only the real canister's.
-    pub fn migrate_certificates_out_of_domains(
-        &mut self,
-        domains_memory: VirtualMemory<DefaultMemoryImpl>,
-    ) {
-        if *self.certificates_migrated.get() {
-            return;
-        }
-
-        let legacy_domains: StableBTreeMap<
-            String,
-            DomainEntryV1,
-            VirtualMemory<DefaultMemoryImpl>,
-        > = StableBTreeMap::init(domains_memory);
-
-        let domain_keys: Vec<String> = self.domains.keys().collect();
-
-        for domain in domain_keys {
-            let Some(legacy_entry) = legacy_domains.get(&domain) else {
-                continue;
-            };
-
-            if let (Some(enc_cert), Some(enc_priv_key)) = (
-                legacy_entry.enc_cert.clone(),
-                legacy_entry.enc_priv_key.clone(),
-            ) {
-                self.certificates.insert(
-                    domain.clone(),
-                    CertificateEntry {
-                        enc_cert,
-                        enc_priv_key,
-                    },
-                );
-            }
-
-            self.domains.insert(
-                domain,
-                DomainEntry {
-                    task: legacy_entry.task,
-                    last_fail_time: legacy_entry.last_fail_time,
-                    last_failure_reason: legacy_entry.last_failure_reason,
-                    failures_count: legacy_entry.failures_count,
-                    rate_limit_failures_count: legacy_entry.rate_limit_failures_count,
-                    canister_id: legacy_entry.canister_id,
-                    created_at: legacy_entry.created_at,
-                    taken_at: legacy_entry.taken_at,
-                    task_created_at: legacy_entry.task_created_at,
-                    not_before: legacy_entry.not_before,
-                    not_after: legacy_entry.not_after,
-                    wildcard: legacy_entry.wildcard,
-                },
-            );
-        }
-
-        self.certificates_migrated.set(true);
-    }
-
-    // Processes all domains and returns true if next task exists.
+    /// Processes all domains and returns true if next task exists.
     pub fn has_next_task(&self, now: UtcTimestamp) -> HasNextTaskResult {
         let has_task = self
             .domains
@@ -423,7 +305,7 @@ impl CanisterState {
         }
     }
 
-    // Compute statistics about the domains and tasks
+    /// Compute statistics about the domains and tasks
     pub fn compute_stats(&self, now: UtcTimestamp) -> Stats {
         let mut domains_nearing_expiration = 0;
         let mut registration_statuses: HashMap<_, _> = HashMap::new();
@@ -504,7 +386,7 @@ impl CanisterState {
         Ok(Some(domain_entry_to_api(entry, cert)))
     }
 
-    // Removes unregistered domains that have been in the system for too long
+    /// Removes unregistered domains that have been in the system for too long
     pub fn cleanup_stale_domains(&mut self, now: UtcTimestamp) {
         let mut domains_to_remove = Vec::new();
 
@@ -1066,118 +948,21 @@ mod tests {
         assert_eq!(entry.created_at, 1000);
     }
 
-    /// `migrate_certificates_out_of_domains` must move `enc_cert`/`enc_priv_key` out of
-    /// stable-storage bytes written by a pre-migration canister and into the certificates
-    /// map, then rewrite the domain entry without them.
-    #[test]
-    fn test_migrate_certificates_out_of_domains() {
-        // Built by hand (rather than via `create_test_empty_state`) so the test keeps its
-        // own `MemoryManager` around: a second `.get(MemoryId::new(0))` call on that same
-        // manager is what gives `legacy_domains` a view onto the exact bytes `state.domains`
-        // is backed by.
-        let memory_manager = MemoryManager::init(DefaultMemoryImpl::default());
-
-        // Write raw legacy-shaped bytes directly into the domains memory region, exactly as
-        // a pre-migration canister would have, bypassing the (already trimmed) `DomainEntry`
-        // Storable impl. This must happen *before* `state.domains` below is constructed:
-        // `StableBTreeMap::init` caches the tree's root address/length in Rust-level fields
-        // at construction time (mirroring `BTreeHeader`), so it only sees data already on
-        // disk at that point — exactly like a real upgrade, where the previous canister run's
-        // data is on disk before the new run's `STATE` is lazily initialized.
-        let mut legacy_domains: StableBTreeMap<
-            String,
-            DomainEntryV1,
-            VirtualMemory<DefaultMemoryImpl>,
-        > = StableBTreeMap::init(memory_manager.get(MemoryId::new(0)));
-        legacy_domains.insert(
-            "example.com".to_string(),
-            DomainEntryV1 {
-                task: None,
-                last_fail_time: None,
-                last_failure_reason: None,
-                failures_count: 0,
-                rate_limit_failures_count: 0,
-                canister_id: Some(Principal::from_text("rdmx6-jaaaa-aaaaa-aaadq-cai").unwrap()),
-                created_at: 1000,
-                taken_at: None,
-                task_created_at: None,
-                enc_cert: Some(b"cert_data".to_vec()),
-                enc_priv_key: Some(b"key_data".to_vec()),
-                not_before: Some(1500),
-                not_after: Some(2500),
-                wildcard: true,
-            },
-        );
-        // A domain that never had a certificate issued must not gain a spurious entry.
-        legacy_domains.insert(
-            "pending.net".to_string(),
-            DomainEntryV1 {
-                task: Some(TaskKind::Issue),
-                last_fail_time: None,
-                last_failure_reason: None,
-                failures_count: 0,
-                rate_limit_failures_count: 0,
-                canister_id: None,
-                created_at: 1200,
-                taken_at: None,
-                task_created_at: None,
-                enc_cert: None,
-                enc_priv_key: None,
-                not_before: None,
-                not_after: None,
-                wildcard: false,
-            },
-        );
-
-        let mut state = CanisterState {
-            domains: StableBTreeMap::init(memory_manager.get(MemoryId::new(0))),
-            last_change: StableCell::init(memory_manager.get(MemoryId::new(1)), 0),
-            certificates: StableBTreeMap::init(memory_manager.get(MemoryId::new(2))),
-            max_domains: MAX_STORED_DOMAINS,
-            certificates_migrated: StableCell::init(memory_manager.get(MemoryId::new(3)), false),
-        };
-
-        state.migrate_certificates_out_of_domains(memory_manager.get(MemoryId::new(0)));
-
-        let cert = state
-            .certificates
-            .get(&"example.com".to_string())
-            .expect("certificate should have been migrated");
-        assert_eq!(cert.enc_cert, b"cert_data");
-        assert_eq!(cert.enc_priv_key, b"key_data");
-        assert!(state.certificates.get(&"pending.net".to_string()).is_none());
-
-        let entry = state.domains.get(&"example.com".to_string()).unwrap();
-        assert_eq!(entry.not_before, Some(1500));
-        assert_eq!(entry.not_after, Some(2500));
-        assert!(entry.wildcard);
-
-        assert!(*state.certificates_migrated.get());
-
-        // Re-running must be a no-op: it's guarded by `certificates_migrated`, so a second
-        // call must not resurrect anything even if the raw legacy bytes were still there.
-        state.migrate_certificates_out_of_domains(memory_manager.get(MemoryId::new(0)));
-        assert_eq!(state.certificates.len(), 1);
-    }
-
     fn create_test_empty_state() -> CanisterState {
         let memory_manager = MemoryManager::init(DefaultMemoryImpl::default());
         let domains_memory = memory_manager.get(MemoryId::new(0));
         let last_change_memory = memory_manager.get(MemoryId::new(1));
         let certs_memory = memory_manager.get(MemoryId::new(2));
-        let migrated_memory = memory_manager.get(MemoryId::new(3));
 
         let domains = StableBTreeMap::init(domains_memory);
         let last_change = StableCell::init(last_change_memory, 0);
         let certificates = StableBTreeMap::init(certs_memory);
-        let certificates_migrated = StableCell::init(migrated_memory, false);
 
         CanisterState {
             domains,
             last_change,
             certificates,
             max_domains: MAX_STORED_DOMAINS,
-            certificates_migrated,
         }
     }
 
@@ -1187,19 +972,16 @@ mod tests {
         let domains_memory = memory_manager.get(MemoryId::new(0));
         let last_change_memory = memory_manager.get(MemoryId::new(1));
         let certs_memory = memory_manager.get(MemoryId::new(2));
-        let migrated_memory = memory_manager.get(MemoryId::new(3));
 
         let domains = StableBTreeMap::init(domains_memory);
         let last_change = StableCell::init(last_change_memory, 0);
         let certificates = StableBTreeMap::init(certs_memory);
-        let certificates_migrated = StableCell::init(migrated_memory, false);
 
         let mut state = CanisterState {
             domains,
             last_change,
             certificates,
             max_domains: MAX_STORED_DOMAINS,
-            certificates_migrated,
         };
 
         let canister_id_1 = Principal::from_text("rdmx6-jaaaa-aaaaa-aaadq-cai").unwrap();
@@ -1478,19 +1260,16 @@ mod tests {
         let domains_memory = memory_manager.get(MemoryId::new(0));
         let last_change_memory = memory_manager.get(MemoryId::new(1));
         let certs_memory = memory_manager.get(MemoryId::new(2));
-        let migrated_memory = memory_manager.get(MemoryId::new(3));
 
         let domains = StableBTreeMap::init(domains_memory);
         let last_change = StableCell::init(last_change_memory, 0);
         let certificates = StableBTreeMap::init(certs_memory);
-        let certificates_migrated = StableCell::init(migrated_memory, false);
 
         let state = CanisterState {
             domains,
             last_change,
             certificates,
             max_domains: MAX_STORED_DOMAINS,
-            certificates_migrated,
         };
 
         let input = ListCertificatesPageInput {
