@@ -21,9 +21,9 @@ use crate::{
 
 #[cfg(feature = "bench")]
 mod bench;
-pub mod metrics;
-pub mod state;
-pub mod storage;
+mod metrics;
+mod state;
+mod storage;
 
 /// Inspect ingress messages in the pre-consensus phase and reject early, if the caller is unauthorized
 #[inspect_message]
