@@ -37,6 +37,9 @@ log "Building the canister wasm with the bench feature"
 CARGO_TARGET_DIR="${BENCH_CANISTER_TARGET_DIR}" cargo build --package ic-custom-domains-canister --target wasm32-unknown-unknown --release --features bench || { log "Failed to build the bench canister wasm"; exit 1; }
 log "Bench canister wasm built successfully at ${BENCH_CANISTER_WASM_PATH}"
 
+log "Running canister interface compatibility test (without bench feature)"
+cargo test --profile dev -p ic-custom-domains-canister --lib || { log "Canister unit tests failed"; exit 1; }
+
 log "Running unit tests using all features enabled"
 cargo test --all-features --profile dev --workspace --lib || { log "Unit tests failed"; exit 1; }
 log "Unit tests completed successfully"
