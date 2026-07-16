@@ -6,9 +6,10 @@ use reqwest::Url;
 
 use crate::{
     dns::{Options as DnsOptions, resolvers::Resolver},
+    http::client::ClientOptions,
     tls::acme::{
         AcmeUrl,
-        client::{Client, ClientBuilder},
+        client::{Client, ClientBuilder, HttpClient},
         dns::{
             TokenManagerDns,
             cloudflare::{Cloudflare, DEFAULT_CLOUDFLARE_URL},
@@ -122,12 +123,14 @@ impl AcmeClientConfig {
         let dns_resolver =
             Resolver::new(self.dns_options).context("unable to create DNS Resolver")?;
         let token_manager = Arc::new(TokenManagerDns::new(
-            Arc::new(dns_resolver),
+            Arc::new(dns_resolver.clone()),
             cloudflare,
             self.delegation_domain,
         ));
 
-        let builder = ClientBuilder::new(self.insecure_tls)
+        let http_client = HttpClient::new(ClientOptions::default(), dns_resolver);
+
+        let builder = ClientBuilder::new(Box::new(http_client))
             .with_acme_url(self.acme_url.clone())
             .with_token_manager(token_manager);
 
@@ -138,7 +141,7 @@ impl AcmeClientConfig {
                 .context("unable to load ACME account")?
         } else {
             let (builder, _) = builder
-                .create_account("mailto:boundary-nodes@dfinity.org")
+                .create_account("boundary-nodes@dfinity.org")
                 .await
                 .context("unable to create ACME account")?;
 

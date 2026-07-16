@@ -4,57 +4,62 @@ use anyhow::Context;
 use async_trait::async_trait;
 use bytes::Bytes;
 use http::Request;
-use hyper_util::{
-    client::legacy::{Client as HyperClient, connect::HttpConnector},
-    rt::TokioExecutor,
-};
+use hyper_util::client::legacy::{Client as HyperClient, connect::HttpConnector};
 use instant_acme::{
-    Account, AccountCredentials, AuthorizationHandle, AuthorizationStatus, BodyWrapper,
-    BytesResponse, ChallengeHandle, ChallengeType, Error as AcmeError,
-    HttpClient as HttpClientTrait, Identifier, NewAccount, NewOrder, Order, OrderStatus,
+    Account, AccountBuilder, AccountCredentials, AuthorizationHandle, AuthorizationStatus,
+    BodyWrapper, BytesResponse, ChallengeHandle, ChallengeType, Error as AcmeError,
+    HttpClient as AcmeHttpClientTrait, Identifier, NewAccount, NewOrder, Order, OrderStatus,
     RetryPolicy, RevocationRequest,
 };
 use rcgen::{CertificateParams, DistinguishedName, KeyPair};
+use rustls::ClientConfig;
 use tracing::{debug, instrument, warn};
 
 use crate::{
-    RetryError, retry_async,
+    RetryError,
+    dns::resolvers::{CloneableHyperDnsResolver, Resolver},
+    http::client::{ClientOptions, clients_hyper},
+    retry_async,
     tls::{
         acme::{AcmeCert, AcmeCertificateClient, AcmeUrl, Error, TokenManager},
-        prepare_client_config,
         verify::NoopServerCertVerifier,
     },
 };
 
-struct HttpClient(HyperClient<hyper_rustls::HttpsConnector<HttpConnector>, BodyWrapper<Bytes>>);
+pub struct HttpClient<R>(
+    HyperClient<hyper_rustls::HttpsConnector<HttpConnector<R>>, BodyWrapper<Bytes>>,
+);
 
-impl HttpClient {
-    /// Create a new client
-    fn new(insecure_tls: bool) -> Self {
-        let mut tls_config =
-            prepare_client_config(&[&rustls::version::TLS13, &rustls::version::TLS12]);
-
-        // Hyper doesn't like when ALPN is set
-        tls_config.alpn_protocols = vec![];
-
-        if insecure_tls {
-            tls_config
-                .dangerous()
-                .set_certificate_verifier(Arc::new(NoopServerCertVerifier::default()));
-        }
-
-        let connector = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_tls_config(tls_config)
-            .https_or_http()
-            .enable_http1()
-            .enable_http2()
-            .build();
-
-        Self(HyperClient::builder(TokioExecutor::new()).build(connector))
+impl Default for HttpClient<Resolver> {
+    fn default() -> Self {
+        Self::new(ClientOptions::default(), Resolver::default())
     }
 }
 
-impl HttpClientTrait for HttpClient {
+impl HttpClient<Resolver> {
+    /// Create a client with TLS certificate verification disabled.
+    /// To be used only in tests.
+    pub fn default_insecure() -> Self {
+        let mut opts = ClientOptions::default();
+        opts.tls_config = Some(
+            ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(NoopServerCertVerifier::default()))
+                .with_no_client_auth(),
+        );
+
+        Self::new(opts, Resolver::default())
+    }
+}
+
+impl<R: CloneableHyperDnsResolver> HttpClient<R> {
+    /// Create a new ACME HTTP client
+    pub fn new(opts: ClientOptions, resolver: R) -> Self {
+        Self(clients_hyper::new(opts, resolver))
+    }
+}
+
+impl<R: CloneableHyperDnsResolver> AcmeHttpClientTrait for HttpClient<R> {
     fn request(
         &self,
         req: Request<BodyWrapper<Bytes>>,
@@ -89,29 +94,38 @@ impl Default for Opts {
     }
 }
 
-/// Builder that builds a Client
+/// Builder for the ACME [`Client`]
 pub struct ClientBuilder {
     opts: Opts,
     account: Option<Account>,
-    insecure_tls: bool,
+    account_builder: Option<AccountBuilder>,
     token_manager: Option<Arc<dyn TokenManager>>,
 }
 
 impl Default for ClientBuilder {
     fn default() -> Self {
-        Self::new(false)
+        Self::new(Box::new(HttpClient::default()))
     }
 }
 
 impl ClientBuilder {
-    /// Create a new builder, optionally with an insecure TLS
-    pub fn new(insecure_tls: bool) -> Self {
+    /// Create a new builder with a provided HTTP client implementation
+    pub fn new(client: Box<dyn AcmeHttpClientTrait>) -> Self {
         Self {
             opts: Opts::default(),
             account: None,
-            insecure_tls,
+            account_builder: Some(Account::builder_with_http(client)),
             token_manager: None,
         }
+    }
+
+    /// Create a new builder that creates an HTTP client from provided options & resolver
+    pub fn new_with_http_opts<R: CloneableHyperDnsResolver>(
+        opts: ClientOptions,
+        resolver: R,
+    ) -> Self {
+        let client = HttpClient::new(opts, resolver);
+        Self::new(Box::new(client))
     }
 
     /// Create the account with the provided contact
@@ -119,18 +133,20 @@ impl ClientBuilder {
         mut self,
         contact: &str,
     ) -> Result<(Self, AccountCredentials), AcmeError> {
-        let (account, creds) =
-            Account::builder_with_http(Box::new(HttpClient::new(self.insecure_tls)))
-                .create(
-                    &NewAccount {
-                        contact: &[contact],
-                        terms_of_service_agreed: true,
-                        only_return_existing: false,
-                    },
-                    self.opts.url.to_string(),
-                    None,
-                )
-                .await?;
+        let (account, creds) = self
+            .account_builder
+            .take()
+            .unwrap()
+            .create(
+                &NewAccount {
+                    contact: &[contact],
+                    terms_of_service_agreed: true,
+                    only_return_existing: false,
+                },
+                self.opts.url.to_string(),
+                None,
+            )
+            .await?;
 
         self.account = Some(account);
         Ok((self, creds))
@@ -141,7 +157,10 @@ impl ClientBuilder {
         mut self,
         credentials: AccountCredentials,
     ) -> Result<Self, AcmeError> {
-        let account = Account::builder_with_http(Box::new(HttpClient::new(self.insecure_tls)))
+        let account = self
+            .account_builder
+            .take()
+            .unwrap()
             .from_credentials(credentials)
             .await?;
 
@@ -165,25 +184,29 @@ impl ClientBuilder {
         self
     }
 
-    /// Set the order timeout. Default is 60s.
+    /// Set the order timeout.
+    /// Default is 60s.
     pub const fn with_order_timeout(mut self, order_timeout: Duration) -> Self {
         self.opts.order_timeout = order_timeout;
         self
     }
 
-    /// Set the token timeout. Default is 60s.
+    /// Set the token timeout.
+    /// Default is 60s.
     pub const fn with_token_timeout(mut self, token_timeout: Duration) -> Self {
         self.opts.token_timeout = token_timeout;
         self
     }
 
-    /// Set the ACME URL. Default is LetsEncrypt Staging.
+    /// Set the ACME URL.
+    /// Default is LetsEncrypt Staging.
     pub fn with_acme_url(mut self, url: AcmeUrl) -> Self {
         self.opts.url = url;
         self
     }
 
-    /// Set the challenge type. Default is DNS-01.
+    /// Set the challenge type.
+    /// Default is DNS-01.
     pub fn with_challenge(mut self, challenge: ChallengeType) -> Self {
         self.opts.challenge = challenge;
         self
@@ -501,7 +524,7 @@ mod test {
                 .unwrap(),
         ));
 
-        let builder = ClientBuilder::new(true)
+        let builder = ClientBuilder::new(Box::new(HttpClient::default_insecure()))
             .with_acme_url(AcmeUrl::Custom(
                 format!("https://{}/dir", pebble_env.addr_acme())
                     .parse()
@@ -509,7 +532,7 @@ mod test {
             ))
             .with_token_manager(tm);
 
-        let (builder, _) = builder.create_account("mailto:foo@bar.com").await.unwrap();
+        let (builder, _) = builder.create_account("foo@bar.com").await.unwrap();
         let cli = builder.build().await.unwrap();
 
         let cert = cli

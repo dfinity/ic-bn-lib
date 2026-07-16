@@ -15,6 +15,7 @@ use x509_parser::{parse_x509_certificate, prelude::GeneralName};
 
 use super::helpers::{TestEnv, init_logging};
 
+use crate::tls::acme::client::HttpClient;
 use crate::tls::acme::{AcmeCertificateClient, AcmeUrl, TokenManager};
 use crate::{
     custom_domains::{
@@ -107,11 +108,11 @@ async fn create_acme_client(
     addr_acme: String,
     token_manager: Arc<dyn TokenManager>,
 ) -> anyhow::Result<Arc<dyn AcmeCertificateClient>> {
-    let builder = ClientBuilder::new(true)
+    let builder = ClientBuilder::new(Box::new(HttpClient::default_insecure()))
         .with_acme_url(AcmeUrl::Custom(format!("https://{addr_acme}/dir").parse()?))
         .with_token_manager(token_manager);
 
-    let (builder, _contract) = builder.create_account("mailto:foo@bar.com").await?;
+    let (builder, _contract) = builder.create_account("foo@bar.com").await?;
 
     let acme_client = builder
         .build()

@@ -60,16 +60,22 @@ pub struct Cloudflare {
 }
 
 impl Cloudflare {
+    /// Create a new Cloudflare client with a default HTTP client
     pub fn new(base_url: Url, token: String) -> Result<Self, Error> {
         let client = Client::builder()
             .build()
             .context("failed to initialize HTTP client")?;
 
-        Ok(Self {
+        Ok(Self::new_with_http_client(base_url, token, client))
+    }
+
+    /// Create a new Cloudflare client with a provided HTTP client
+    pub const fn new_with_http_client(base_url: Url, token: String, client: Client) -> Self {
+        Self {
             client,
             base_url,
             token,
-        })
+        }
     }
 
     /// GET /client/v4/zones?name=<zone>

@@ -48,6 +48,71 @@ where
     }
 }
 
+/// Creates a Hyper client from provided options & resolver
+pub fn new<B, R>(
+    opts: ClientOptions,
+    resolver: R,
+) -> ClientHyper<HttpsConnector<HttpConnector<R>>, B>
+where
+    B: Body + Send + 'static + Unpin,
+    B::Data: Send,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    R: CloneableHyperDnsResolver,
+{
+    let mut http_conn = HttpConnector::new_with_resolver(resolver);
+    http_conn.set_connect_timeout(Some(opts.timeout_connect));
+    http_conn.set_keepalive(opts.tcp_keepalive_delay);
+    http_conn.set_keepalive_interval(opts.tcp_keepalive_interval);
+    http_conn.set_keepalive_retries(opts.tcp_keepalive_retries);
+    http_conn.enforce_http(false);
+    http_conn.set_nodelay(true);
+    http_conn.set_reuse_address(true);
+    http_conn.set_happy_eyeballs_timeout(Some(opts.happy_eyeballs_timeout));
+
+    let builder = HttpsConnector::<HttpConnector>::builder();
+    let mut builder = if let Some(mut v) = opts.tls_config {
+        // Hyper is sad when we set our ALPN
+        v.alpn_protocols = vec![];
+        builder.with_tls_config(v)
+    } else {
+        builder.with_platform_verifier()
+    }
+    .https_or_http();
+
+    if let Some(v) = opts.tls_fixed_name {
+        let name = DnsName::try_from(v).expect("able to parse as DNSName");
+        builder = builder.with_server_name_resolver(FixedServerNameResolver::new(
+            rustls::pki_types::ServerName::DnsName(name),
+        ))
+    }
+
+    let https_conn = match opts.http_version {
+        HttpVersion::Http1 => builder.enable_http1().wrap_connector(http_conn),
+        HttpVersion::Http2 => builder.enable_http2().wrap_connector(http_conn),
+        HttpVersion::All => builder.enable_all_versions().wrap_connector(http_conn),
+    };
+
+    let mut builder = ClientHyper::builder(TokioExecutor::new());
+    builder
+        .http2_adaptive_window(true)
+        .http2_keep_alive_interval(opts.http2_keepalive)
+        .http2_keep_alive_while_idle(opts.http2_keepalive_idle)
+        .pool_idle_timeout(opts.pool_idle_timeout)
+        .pool_timer(TokioTimer::new())
+        .timer(TokioTimer::new())
+        .retry_canceled_requests(true);
+
+    if let Some(v) = opts.http2_keepalive_timeout {
+        builder.http2_keep_alive_timeout(v);
+    }
+
+    if let Some(v) = opts.pool_idle_max {
+        builder.pool_max_idle_per_host(v);
+    }
+
+    builder.build(https_conn)
+}
+
 impl<B, R> HyperClient<B, R>
 where
     B: Body + Send + 'static + Unpin,
@@ -56,59 +121,9 @@ where
     R: CloneableHyperDnsResolver,
 {
     pub fn new(opts: ClientOptions, resolver: R) -> Self {
-        let mut http_conn = HttpConnector::new_with_resolver(resolver);
-        http_conn.set_connect_timeout(Some(opts.timeout_connect));
-        http_conn.set_keepalive(opts.tcp_keepalive_delay);
-        http_conn.set_keepalive_interval(opts.tcp_keepalive_interval);
-        http_conn.set_keepalive_retries(opts.tcp_keepalive_retries);
-        http_conn.enforce_http(false);
-        http_conn.set_nodelay(true);
-        http_conn.set_reuse_address(true);
-        http_conn.set_happy_eyeballs_timeout(Some(opts.happy_eyeballs_timeout));
-
-        let builder = HttpsConnector::<HttpConnector>::builder();
-        let mut builder = if let Some(mut v) = opts.tls_config {
-            // Hyper is sad when we set our ALPN
-            v.alpn_protocols = vec![];
-            builder.with_tls_config(v)
-        } else {
-            builder.with_webpki_roots()
+        Self {
+            cli: new(opts, resolver),
         }
-        .https_or_http();
-
-        if let Some(v) = opts.tls_fixed_name {
-            let name = DnsName::try_from(v).expect("able to parse as DNSName");
-            builder = builder.with_server_name_resolver(FixedServerNameResolver::new(
-                rustls::pki_types::ServerName::DnsName(name),
-            ))
-        }
-
-        let https_conn = match opts.http_version {
-            HttpVersion::Http1 => builder.enable_http1().wrap_connector(http_conn),
-            HttpVersion::Http2 => builder.enable_http2().wrap_connector(http_conn),
-            HttpVersion::All => builder.enable_all_versions().wrap_connector(http_conn),
-        };
-
-        let mut builder = ClientHyper::builder(TokioExecutor::new());
-        builder
-            .http2_adaptive_window(true)
-            .http2_keep_alive_interval(opts.http2_keepalive)
-            .http2_keep_alive_while_idle(opts.http2_keepalive_idle)
-            .pool_idle_timeout(opts.pool_idle_timeout)
-            .pool_timer(TokioTimer::new())
-            .timer(TokioTimer::new())
-            .retry_canceled_requests(true);
-
-        if let Some(v) = opts.http2_keepalive_timeout {
-            builder.http2_keep_alive_timeout(v);
-        }
-
-        if let Some(v) = opts.pool_idle_max {
-            builder.pool_max_idle_per_host(v);
-        }
-
-        let cli = builder.build(https_conn);
-        Self { cli }
     }
 }
 
