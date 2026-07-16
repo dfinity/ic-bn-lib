@@ -237,7 +237,7 @@ impl AcmeDns {
         } else {
             // Finally just create a new account
             let (builder2, creds) = builder
-                .create_account(&format!("mailto:{}", opts.contact))
+                .create_account(&opts.contact)
                 .await
                 .context("unable to create ACME account")?;
             builder = builder2;

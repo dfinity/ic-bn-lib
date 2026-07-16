@@ -136,7 +136,9 @@ impl ClientBuilder {
         let (account, creds) = self
             .account_builder
             .take()
-            .unwrap()
+            .ok_or_else(|| {
+                AcmeError::Other(Box::new(std::io::Error::other("account already loaded")))
+            })?
             .create(
                 &NewAccount {
                     contact: &[&format!("mailto:{contact}")],
@@ -160,7 +162,9 @@ impl ClientBuilder {
         let account = self
             .account_builder
             .take()
-            .unwrap()
+            .ok_or_else(|| {
+                AcmeError::Other(Box::new(std::io::Error::other("account already loaded")))
+            })?
             .from_credentials(credentials)
             .await?;
 
