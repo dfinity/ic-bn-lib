@@ -43,14 +43,25 @@ impl TestEnv {
         authorized_principal: Option<Principal>,
         sender: Principal,
     ) -> anyhow::Result<Self> {
+        Self::new_with_wasm_env("CANISTER_WASM_PATH", authorized_principal, sender).await
+    }
+
+    /// Like `new`, but loads the canister WASM from a caller-specified env var instead of the
+    /// default `CANISTER_WASM_PATH`. Useful for tests that need a WASM built with non-default
+    /// features (e.g. the `bench` feature), which is built separately from the main test WASM.
+    pub async fn new_with_wasm_env(
+        wasm_path_env_var: &str,
+        authorized_principal: Option<Principal>,
+        sender: Principal,
+    ) -> anyhow::Result<Self> {
         info!("pocket-ic server starting ...");
 
         let pic = PocketIcBuilder::new().with_nns_subnet().build_async().await;
 
         info!("pocket-ic server started");
 
-        let wasm_path =
-            std::env::var("CANISTER_WASM_PATH").expect("CANISTER_WASM_PATH env var not set");
+        let wasm_path = std::env::var(wasm_path_env_var)
+            .unwrap_or_else(|_| panic!("{wasm_path_env_var} env var not set"));
 
         let wasm = fs::read(PathBuf::from(wasm_path)).context("unable to load WASM")?;
 

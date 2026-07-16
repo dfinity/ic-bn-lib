@@ -26,3 +26,8 @@ strum = { workspace = true }
 
 [dev-dependencies]
 candid_parser = { workspace = true }
+
+[features]
+# Test-only endpoints for measuring instruction usage as a function of domain count.
+# Must never be enabled in a production build/deployment.
+bench = []

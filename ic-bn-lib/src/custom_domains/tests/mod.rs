@@ -19,6 +19,7 @@ const RATE_LIMIT_MAX_ATTEMPTS: u32 = 25;
 
 mod e2e_test;
 mod helpers;
+mod instruction_scaling_test;
 
 #[ignore]
 #[tokio::test]

@@ -8,6 +8,10 @@ readonly WORKDIR="$(pwd)"
 export POCKET_IC_BIN="${WORKDIR}/pocket-ic"
 export CARGO_TARGET_DIR="${WORKDIR}/target"
 export CANISTER_WASM_PATH="${CARGO_TARGET_DIR}/wasm32-unknown-unknown/release/ic_custom_domains_canister.wasm"
+# Separate target dir: the `bench` feature adds test-only instrumentation endpoints that must
+# never ship in the WASM used by the other (non-`--features bench`) tests above.
+export BENCH_CANISTER_TARGET_DIR="${WORKDIR}/target/bench"
+export BENCH_CANISTER_WASM_PATH="${BENCH_CANISTER_TARGET_DIR}/wasm32-unknown-unknown/release/ic_custom_domains_canister.wasm"
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >&2; }
 
@@ -28,6 +32,13 @@ log "PocketIC setup completed"
 log "Building the canister wasm"
 cargo build --package ic-custom-domains-canister --target wasm32-unknown-unknown --release || { log "Failed to build the canister wasm"; exit 1; }
 log "Canister wasm built successfully at ${CANISTER_WASM_PATH}"
+
+log "Building the canister wasm with the bench feature"
+CARGO_TARGET_DIR="${BENCH_CANISTER_TARGET_DIR}" cargo build --package ic-custom-domains-canister --target wasm32-unknown-unknown --release --features bench || { log "Failed to build the bench canister wasm"; exit 1; }
+log "Bench canister wasm built successfully at ${BENCH_CANISTER_WASM_PATH}"
+
+log "Running canister interface compatibility test (without bench feature)"
+cargo test --profile dev -p ic-custom-domains-canister --lib || { log "Canister unit tests failed"; exit 1; }
 
 log "Running unit tests using all features enabled"
 cargo test --all-features --profile dev --workspace --lib || { log "Unit tests failed"; exit 1; }

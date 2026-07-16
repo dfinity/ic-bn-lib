@@ -1,3 +1,5 @@
+use std::{borrow::Cow, collections::HashMap, hash::Hash, ops::Bound as RangeBound};
+
 use candid::Principal;
 use ic_custom_domains_canister_api::{
     CERT_EXPIRATION_ALERT_THRESHOLD, CERTIFICATE_VALIDITY_FRACTION, CertificatesPage,
@@ -17,13 +19,9 @@ use ic_stable_structures::{
 };
 use serde::{Deserialize, Serialize};
 use serde_cbor::{from_slice, to_vec};
-use std::hash::Hash;
-use std::{borrow::Cow, collections::HashMap, ops::Bound as RangeBound};
 use strum::{EnumIter, IntoEnumIterator, IntoStaticStr};
 
-use crate::storage::MAX_STORED_DOMAINS;
 use crate::{
-    get_time_secs,
     metrics::{
         FAILURE_STATUS, FETCH_NEXT_TASK_FUNC, METRICS, SUBMIT_TASK_RESULT_FUNC, SUCCESS_STATUS,
         TRY_ADD_TASK_FUNC,
@@ -36,45 +34,65 @@ pub type UtcTimestamp = u64;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DomainEntry {
-    // Current task being processed for the domain, if any
+    /// Current task being processed for the domain, if any
     pub task: Option<TaskKind>,
-    // Timestamp when the task failed last time, if any
+    /// Timestamp when the task failed last time, if any
     pub last_fail_time: Option<UtcTimestamp>,
-    // Reason for the last failure, if any
+    /// Reason for the last failure, if any
     pub last_failure_reason: Option<TaskFailReason>,
-    // Number of consecutive failures for the current task (excluding rate limit failures)
+    /// Number of consecutive failures for the current task (excluding rate limit failures)
     pub failures_count: u32,
-    // Number of rate limit failures for the current task
+    /// Number of rate limit failures for the current task
     pub rate_limit_failures_count: u32,
-    // Canister ID associated with the domain
+    /// Canister ID associated with the domain
     pub canister_id: Option<Principal>,
-    // Timestamp when the domain entry was created (set once and never updated)
+    /// Timestamp when the domain entry was created (set once and never updated)
     pub created_at: UtcTimestamp,
-    // Timestamp when the current task was taken by a worker
+    /// Timestamp when the current task was taken by a worker
     pub taken_at: Option<UtcTimestamp>,
-    // Timestamp when the current task was created
+    /// Timestamp when the current task was created
     pub task_created_at: Option<UtcTimestamp>,
-    // PEM-encoded certificate data (encrypted)
-    pub enc_cert: Option<Vec<u8>>,
-    // PEM-encoded private key data (encrypted)
-    pub enc_priv_key: Option<Vec<u8>>,
-    // Certificate validity period start (as UNIX timestamp)
+    /// Certificate validity period start (as UNIX timestamp)
     pub not_before: Option<UtcTimestamp>,
-    // Certificate validity period end (as UNIX timestamp)
+    /// Certificate validity period end (as UNIX timestamp)
     pub not_after: Option<UtcTimestamp>,
-    // Whether to also issue a `*.domain` wildcard SAN in the certificate.
-    // `#[serde(default)]` keeps existing stable-storage entries deserializable
-    // after upgrade (they predate this field and default to `false`).
+    /// Whether to also issue a `*.domain` wildcard SAN in the certificate.
+    /// `#[serde(default)]` keeps existing stable-storage entries deserializable
+    /// after upgrade (they predate this field and default to `false`).
     #[serde(default)]
     pub wildcard: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CertificateEntry {
+    /// PEM-encoded certificate data (encrypted)
+    pub enc_cert: Vec<u8>,
+    /// PEM-encoded private key data (encrypted)
+    pub enc_priv_key: Vec<u8>,
+}
+
+impl Storable for CertificateEntry {
+    const BOUND: Bound = Bound::Unbounded;
+
+    fn to_bytes(&self) -> std::borrow::Cow<'_, [u8]> {
+        Cow::Owned(to_vec(&self).expect("CertificateEntry serialization failed"))
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        to_vec(&self).expect("CertificateEntry serialization failed")
+    }
+
+    fn from_bytes(bytes: std::borrow::Cow<[u8]>) -> Self {
+        from_slice(&bytes).expect("CertificateEntry deserialization failed")
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum TaskStatus {
-    // Task is pending and has not been taken by any worker yet
+    /// Task is pending and has not been taken by any worker yet
     Pending(TaskKind),
-    // Task is currently being processed by a worker
+    /// Task is currently being processed by a worker
     InProgress(TaskKind),
 }
 
@@ -87,7 +105,7 @@ impl TaskStatus {
     }
 }
 
-// Simplified registration status labels for metrics and stats
+/// Simplified registration status labels for metrics and stats
 #[derive(Debug, Clone, Eq, PartialEq, Hash, EnumIter, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum RegistrationStatusLabel {
@@ -128,10 +146,14 @@ impl DomainEntry {
     }
 
     pub fn registration_status(&self, now: UtcTimestamp) -> RegistrationStatus {
-        if let (Some(_cert), Some(not_after)) = (&self.enc_cert, self.not_after) {
+        // `not_after` is only ever set together with the certificate (see
+        // `submit_task_result`), so its presence is a reliable, cheap proxy for "certificate
+        // issued" that avoids a `certificates` map lookup on this hot, per-entry path.
+        if let Some(not_after) = self.not_after {
             if now < not_after {
                 return RegistrationStatus::Registered;
             }
+
             RegistrationStatus::Expired
         } else if self.task == Some(TaskKind::Issue) {
             RegistrationStatus::Registering
@@ -173,6 +195,8 @@ impl DomainEntry {
 }
 
 impl Storable for DomainEntry {
+    const BOUND: Bound = Bound::Unbounded;
+
     fn to_bytes(&self) -> std::borrow::Cow<'_, [u8]> {
         Cow::Owned(to_vec(&self).expect("DomainEntry serialization failed"))
     }
@@ -184,18 +208,17 @@ impl Storable for DomainEntry {
     fn from_bytes(bytes: std::borrow::Cow<[u8]>) -> Self {
         from_slice(&bytes).expect("DomainEntry deserialization failed")
     }
-
-    const BOUND: Bound = Bound::Unbounded;
 }
 
 pub struct CanisterState {
     pub domains: StableBTreeMap<String, DomainEntry, VirtualMemory<DefaultMemoryImpl>>,
     pub last_change: StableCell<UtcTimestamp, VirtualMemory<DefaultMemoryImpl>>,
+    pub certificates: StableBTreeMap<String, CertificateEntry, VirtualMemory<DefaultMemoryImpl>>,
     pub max_domains: u64,
 }
 
 impl CanisterState {
-    // Processes all domains and returns true if next task exists.
+    /// Processes all domains and returns true if next task exists.
     pub fn has_next_task(&self, now: UtcTimestamp) -> HasNextTaskResult {
         let has_task = self
             .domains
@@ -268,11 +291,13 @@ impl CanisterState {
                 domain_entry.taken_at = Some(now);
                 self.domains.insert(domain.clone(), domain_entry.clone());
 
+                let enc_cert = self.certificates.get(&domain).map(|cert| cert.enc_cert);
+
                 Ok(Some(ScheduledTask::new(
                     domain_entry.task.unwrap(),
                     domain,
                     now,
-                    domain_entry.enc_cert,
+                    enc_cert,
                     Some(domain_entry.wildcard),
                 )))
             }
@@ -280,7 +305,7 @@ impl CanisterState {
         }
     }
 
-    // Compute statistics about the domains and tasks
+    /// Compute statistics about the domains and tasks
     pub fn compute_stats(&self, now: UtcTimestamp) -> Stats {
         let mut domains_nearing_expiration = 0;
         let mut registration_statuses: HashMap<_, _> = HashMap::new();
@@ -357,10 +382,11 @@ impl CanisterState {
             None => return Ok(None),
         };
 
-        Ok(Some(entry.into()))
+        let cert = self.certificates.get(&domain);
+        Ok(Some(domain_entry_to_api(entry, cert)))
     }
 
-    // Removes unregistered domains that have been in the system for too long
+    /// Removes unregistered domains that have been in the system for too long
     pub fn cleanup_stale_domains(&mut self, now: UtcTimestamp) {
         let mut domains_to_remove = Vec::new();
 
@@ -370,7 +396,9 @@ impl CanisterState {
 
             // Remove domain if it stayed unregistered for more than UNREGISTERED_DOMAIN_EXPIRATION_TIME
             // This covers new registrations that fail to be completed
-            let unregistered_too_long = domain_entry.enc_cert.is_none()
+            // (`not_after` is only ever set alongside the certificate, so its absence
+            // reliably means no certificate has been issued yet)
+            let unregistered_too_long = domain_entry.not_after.is_none()
                 && domain_entry.task.is_none()
                 && now
                     >= domain_entry
@@ -388,9 +416,11 @@ impl CanisterState {
             }
         }
 
-        // Remove expired/unregistered domains
+        // Remove expired/unregistered domains, along with any associated certificate
+        // data so it doesn't linger orphaned in the certificates map.
         for domain in domains_to_remove {
             self.domains.remove(&domain);
+            self.certificates.remove(&domain);
         }
 
         METRICS.with(|cell| {
@@ -453,15 +483,17 @@ impl CanisterState {
 
                 // Prevent explicit certificate re-issuance (if the domain is not near expiration)
                 // Note: to reissue certificate, submit `Renew` task instead
+                // (`not_after` is only ever set alongside the certificate, so it's a
+                // reliable, cheap proxy for "certificate issued" here)
                 if task.kind == TaskKind::Issue
-                    && entry.enc_cert.is_some()
+                    && entry.not_after.is_some()
                     && !entry.is_nearing_expiration(now)
                 {
                     return Err(TryAddTaskError::CertificateAlreadyIssued(domain));
                 }
 
                 // Require an existing certificate for `Update` task
-                if task.kind == TaskKind::Update && entry.enc_cert.is_none() {
+                if task.kind == TaskKind::Update && entry.not_after.is_none() {
                     return Err(TryAddTaskError::MissingCertificateForUpdate(domain));
                 }
 
@@ -564,13 +596,19 @@ impl CanisterState {
                 match output {
                     TaskOutput::Issue(output) => {
                         entry.canister_id = Some(output.canister_id);
-                        entry.enc_cert = Some(output.enc_cert);
-                        entry.enc_priv_key = Some(output.enc_priv_key);
                         entry.not_before = Some(output.not_before);
                         entry.not_after = Some(output.not_after);
+                        self.certificates.insert(
+                            domain.clone(),
+                            CertificateEntry {
+                                enc_cert: output.enc_cert,
+                                enc_priv_key: output.enc_priv_key,
+                            },
+                        );
                     }
                     TaskOutput::Delete => {
                         self.domains.remove(&domain);
+                        self.certificates.remove(&domain);
                         return Ok(());
                     }
                     TaskOutput::Update(canister_id) => {
@@ -636,22 +674,27 @@ impl CanisterState {
             let domain = entry.key();
             let domain_entry = entry.value();
 
-            // Only include domains with issued certificates and existing canister_id
-            if let (Some(cert), Some(private_key), Some(canister_id)) = (
-                &domain_entry.enc_cert,
-                &domain_entry.enc_priv_key,
-                &domain_entry.canister_id,
-            ) {
+            // Only include domains with an issued certificate and existing canister_id.
+            // `not_after` is only ever set alongside the certificate, so it's a reliable,
+            // cheap proxy for "certificate issued" that avoids a `certificates` map lookup
+            // for every entry scanned (as opposed to only the ones actually returned below).
+            if domain_entry.not_after.is_some()
+                && let Some(canister_id) = &domain_entry.canister_id
+            {
                 if count >= limit {
                     next_key = Some(domain.clone());
                     break;
                 }
 
+                let Some(cert_entry) = self.certificates.get(domain) else {
+                    continue;
+                };
+
                 registered_domains.push(RegisteredDomain {
                     domain: domain.clone(),
                     canister_id: *canister_id,
-                    enc_cert: cert.clone(),
-                    enc_priv_key: private_key.clone(),
+                    enc_cert: cert_entry.enc_cert,
+                    enc_priv_key: cert_entry.enc_priv_key,
                 });
 
                 count += 1;
@@ -659,7 +702,6 @@ impl CanisterState {
         }
 
         let page = CertificatesPage::new(registered_domains, next_key);
-
         Ok(page)
     }
 
@@ -710,63 +752,6 @@ impl CanisterState {
     }
 }
 
-impl CanisterState {
-    /// Creates a new CanisterState with optionally pre-populated domains for testing
-    pub fn new_with_sample_domains(num_domains: usize, cert_size_bytes: usize) -> Self {
-        use ic_stable_structures::memory_manager::{MemoryId, MemoryManager};
-
-        let memory_manager = MemoryManager::init(DefaultMemoryImpl::default());
-        let domains_memory = memory_manager.get(MemoryId::new(0));
-        let last_change_memory = memory_manager.get(MemoryId::new(1));
-
-        let domains = StableBTreeMap::init(domains_memory);
-        let last_change = StableCell::init(last_change_memory, 1);
-
-        let mut state = Self {
-            domains,
-            last_change,
-            max_domains: MAX_STORED_DOMAINS,
-        };
-
-        // Some sample canister IDs
-        let sample_canister_ids = [
-            Principal::from_text("rdmx6-jaaaa-aaaaa-aaadq-cai").unwrap(),
-            Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap(),
-            Principal::from_text("rno2w-sqaaa-aaaaa-aaacq-cai").unwrap(),
-            Principal::from_text("renrk-eyaaa-aaaaa-aaada-cai").unwrap(),
-            Principal::from_text("rdmx6-jaaaa-aaaaa-aaadq-cai").unwrap(),
-        ];
-
-        for i in 0..num_domains {
-            let domain = format!("domain_{i}.example.com");
-            let canister_id = sample_canister_ids[i % sample_canister_ids.len()];
-
-            let mut domain_entry = DomainEntry::new(None, i as u64);
-            domain_entry.canister_id = Some(canister_id);
-
-            // Generate certificate data of specified size
-            let cert_data = {
-                let base_cert = format!("-----BEGIN CERTIFICATE-----\ncert_data_{}\n", i + 1);
-                let padding = "X".repeat(cert_size_bytes);
-                format!("{base_cert}{padding}-----END CERTIFICATE-----")
-            };
-
-            // Generate private key data
-            let key_data = format!("key_data_{}", i + 1);
-
-            let now = get_time_secs();
-            domain_entry.enc_cert = Some(cert_data.into_bytes());
-            domain_entry.enc_priv_key = Some(key_data.into_bytes());
-            domain_entry.not_before = Some(now);
-            domain_entry.not_after = Some(now + 30 * 24 * 60 * 60);
-
-            state.domains.insert(domain, domain_entry);
-        }
-
-        state
-    }
-}
-
 /// Determines the next pending task for a domain entry based on current state and time.
 fn next_pending_task(entry: &DomainEntry, now: UtcTimestamp) -> Option<TaskKind> {
     // Normal existing tasks are always prioritized over scheduling renewals
@@ -784,12 +769,9 @@ fn next_pending_task(entry: &DomainEntry, now: UtcTimestamp) -> Option<TaskKind>
     // `failures_count` hits `MAX_TASK_FAILURES`, and without this check we'd
     // recreate a fresh `Renew` task here on the very next call, ignoring both
     // `MIN_TASK_RETRY_DELAY` and the failure cap that was just enforced.
-    if let (None, Some(_cert), Some(not_before), Some(not_after)) = (
-        entry.task,
-        entry.enc_cert.as_ref(),
-        entry.not_before,
-        entry.not_after,
-    ) && renewal_needed(not_before, not_after, now)
+    if let (None, Some(not_before), Some(not_after)) =
+        (entry.task, entry.not_before, entry.not_after)
+        && renewal_needed(not_before, not_after, now)
         && retry_allowed(entry, now)
     {
         return Some(TaskKind::Renew);
@@ -876,29 +858,32 @@ pub fn export_expiring_domains_as_http_response(now: UtcTimestamp) -> HttpRespon
         .build()
 }
 
-impl From<DomainEntry> for DomainEntryApi {
-    fn from(entry: DomainEntry) -> Self {
-        Self {
-            task: entry.task,
-            last_fail_time: entry.last_fail_time,
-            last_failure_reason: entry.last_failure_reason.clone(),
-            failures_count: entry.failures_count,
-            rate_limit_failures_count: entry.rate_limit_failures_count,
-            canister_id: entry.canister_id,
-            created_at: entry.created_at,
-            taken_at: entry.taken_at,
-            task_created_at: entry.task_created_at,
-            enc_cert: entry.enc_cert.clone(),
-            enc_priv_key: entry.enc_priv_key.clone(),
-            not_before: entry.not_before,
-            not_after: entry.not_after,
-            wildcard: Some(entry.wildcard),
-        }
+/// Builds the public (candid) `DomainEntry` from the internal, cert-less entry plus its
+/// certificate data (looked up separately, since `enc_cert`/`enc_priv_key` no longer live
+/// on the internal `DomainEntry`).
+fn domain_entry_to_api(entry: DomainEntry, cert: Option<CertificateEntry>) -> DomainEntryApi {
+    DomainEntryApi {
+        task: entry.task,
+        last_fail_time: entry.last_fail_time,
+        last_failure_reason: entry.last_failure_reason.clone(),
+        failures_count: entry.failures_count,
+        rate_limit_failures_count: entry.rate_limit_failures_count,
+        canister_id: entry.canister_id,
+        created_at: entry.created_at,
+        taken_at: entry.taken_at,
+        task_created_at: entry.task_created_at,
+        enc_cert: cert.as_ref().map(|c| c.enc_cert.clone()),
+        enc_priv_key: cert.map(|c| c.enc_priv_key),
+        not_before: entry.not_before,
+        not_after: entry.not_after,
+        wildcard: Some(entry.wildcard),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::storage::MAX_STORED_DOMAINS;
+
     use super::*;
     use candid::Principal;
     use ic_custom_domains_canister_api::{IssueCertificateOutput, TaskKind as TaskKindApi};
@@ -925,6 +910,10 @@ mod tests {
 
     /// A `DomainEntry` persisted before the `wildcard` field existed must still deserialize
     /// after upgrade, defaulting `wildcard` to `false` (guards the `#[serde(default)]`).
+    /// It also carries `enc_cert`/`enc_priv_key`, which `DomainEntry` no longer declares
+    /// since the certificate split: those extra CBOR map keys must be silently ignored
+    /// rather than causing a deserialization error, since that's exactly the property
+    /// `migrate_certificates_out_of_domains` relies on being safe.
     #[test]
     fn test_domain_entry_deserializes_legacy_bytes_without_wildcard() {
         let legacy = LegacyDomainEntry {
@@ -957,20 +946,22 @@ mod tests {
         assert_eq!(entry.task, Some(TaskKind::Issue));
         assert_eq!(entry.failures_count, 3);
         assert_eq!(entry.created_at, 1000);
-        assert_eq!(entry.enc_cert, Some(b"cert".to_vec()));
     }
 
     fn create_test_empty_state() -> CanisterState {
         let memory_manager = MemoryManager::init(DefaultMemoryImpl::default());
         let domains_memory = memory_manager.get(MemoryId::new(0));
         let last_change_memory = memory_manager.get(MemoryId::new(1));
+        let certs_memory = memory_manager.get(MemoryId::new(2));
 
         let domains = StableBTreeMap::init(domains_memory);
         let last_change = StableCell::init(last_change_memory, 0);
+        let certificates = StableBTreeMap::init(certs_memory);
 
         CanisterState {
             domains,
             last_change,
+            certificates,
             max_domains: MAX_STORED_DOMAINS,
         }
     }
@@ -980,13 +971,16 @@ mod tests {
         let memory_manager = MemoryManager::init(DefaultMemoryImpl::default());
         let domains_memory = memory_manager.get(MemoryId::new(0));
         let last_change_memory = memory_manager.get(MemoryId::new(1));
+        let certs_memory = memory_manager.get(MemoryId::new(2));
 
         let domains = StableBTreeMap::init(domains_memory);
         let last_change = StableCell::init(last_change_memory, 0);
+        let certificates = StableBTreeMap::init(certs_memory);
 
         let mut state = CanisterState {
             domains,
             last_change,
+            certificates,
             max_domains: MAX_STORED_DOMAINS,
         };
 
@@ -997,20 +991,30 @@ mod tests {
         // Domain with certificate
         let mut domain1 = DomainEntry::new(None, 1000);
         domain1.canister_id = Some(canister_id_1);
-        domain1.enc_cert = Some(b"cert1_data".to_vec());
-        domain1.enc_priv_key = Some(b"key1_data".to_vec());
         domain1.not_before = Some(1500);
         domain1.not_after = Some(2500);
         state.domains.insert("example.com".to_string(), domain1);
+        state.certificates.insert(
+            "example.com".to_string(),
+            CertificateEntry {
+                enc_cert: b"cert1_data".to_vec(),
+                enc_priv_key: b"key1_data".to_vec(),
+            },
+        );
 
         // Another domain with certificate
         let mut domain2 = DomainEntry::new(None, 1100);
         domain2.canister_id = Some(canister_id_2);
-        domain2.enc_cert = Some(b"cert2_data".to_vec());
-        domain2.enc_priv_key = Some(b"key2_data".to_vec());
         domain2.not_before = Some(1600);
         domain2.not_after = Some(2600);
         state.domains.insert("test.org".to_string(), domain2);
+        state.certificates.insert(
+            "test.org".to_string(),
+            CertificateEntry {
+                enc_cert: b"cert2_data".to_vec(),
+                enc_priv_key: b"key2_data".to_vec(),
+            },
+        );
 
         // Domain without certificate (should be excluded)
         let domain3 = DomainEntry::new(Some(TaskKind::Issue), 1200);
@@ -1019,26 +1023,35 @@ mod tests {
         // Another domain with certificate
         let mut domain4 = DomainEntry::new(None, 1300);
         domain4.canister_id = Some(canister_id_3);
-        domain4.enc_cert = Some(b"cert3_data".to_vec());
-        domain4.enc_priv_key = Some(b"key3_data".to_vec());
         domain4.not_before = Some(1700);
         domain4.not_after = Some(2700);
         state.domains.insert("website.io".to_string(), domain4);
+        state.certificates.insert(
+            "website.io".to_string(),
+            CertificateEntry {
+                enc_cert: b"cert3_data".to_vec(),
+                enc_priv_key: b"key3_data".to_vec(),
+            },
+        );
 
         // Domain without certificate (should be excluded)
         let mut domain5 = DomainEntry::new(None, 1400);
         domain5.canister_id = Some(canister_id_1);
-        domain5.enc_cert = None;
         state.domains.insert("incomplete.dev".to_string(), domain5);
 
         // Another domain with certificate
         let mut domain6 = DomainEntry::new(None, 1300);
         domain6.canister_id = Some(canister_id_2);
-        domain6.enc_cert = Some(b"cert6_data".to_vec());
-        domain6.enc_priv_key = Some(b"key6_data".to_vec());
         domain6.not_before = Some(1700);
         domain6.not_after = Some(2700);
         state.domains.insert("dfinity.org".to_string(), domain6);
+        state.certificates.insert(
+            "dfinity.org".to_string(),
+            CertificateEntry {
+                enc_cert: b"cert6_data".to_vec(),
+                enc_priv_key: b"key6_data".to_vec(),
+            },
+        );
 
         state
     }
@@ -1246,13 +1259,16 @@ mod tests {
         let memory_manager = MemoryManager::init(DefaultMemoryImpl::default());
         let domains_memory = memory_manager.get(MemoryId::new(0));
         let last_change_memory = memory_manager.get(MemoryId::new(1));
+        let certs_memory = memory_manager.get(MemoryId::new(2));
 
         let domains = StableBTreeMap::init(domains_memory);
         let last_change = StableCell::init(last_change_memory, 0);
+        let certificates = StableBTreeMap::init(certs_memory);
 
         let state = CanisterState {
             domains,
             last_change,
+            certificates,
             max_domains: MAX_STORED_DOMAINS,
         };
 
@@ -1491,7 +1507,6 @@ mod tests {
         // Certificate renewal check. 65% of the validity period has elapsed => no renewal task yet
         {
             let mut domain = DomainEntry::new(None, created_at);
-            domain.enc_cert = Some(b"cert_data".to_vec());
             let not_before = 500;
             let not_after = 2500;
             domain.not_before = Some(not_before);
@@ -1503,7 +1518,6 @@ mod tests {
         // Certificate renewal check. 67% of the validity period has elapsed => renewal task
         {
             let mut domain = DomainEntry::new(None, created_at);
-            domain.enc_cert = Some(b"cert_data".to_vec());
             let not_before = 500;
             let not_after = 2500;
             domain.not_before = Some(not_before);
@@ -1574,7 +1588,7 @@ mod tests {
         // generated Renew would re-issue without the wildcard SAN.
         let mut entry = state.domains.get(&domain).unwrap();
         entry.task = None; // simulate the issue task having completed
-        entry.enc_cert = Some(b"cert".to_vec()); // Update requires an existing certificate
+        entry.not_after = Some(9999); // Update requires an existing certificate
         state.domains.insert(domain.clone(), entry);
 
         state
@@ -1646,7 +1660,7 @@ mod tests {
         // Add a domain with previous failures
         let domain = "example.com".to_string();
         let mut domain_with_failures = DomainEntry::new(None, now);
-        domain_with_failures.enc_cert = Some(b"cert_data".to_vec());
+        domain_with_failures.not_after = Some(now + 9999);
         domain_with_failures.canister_id = Some(canister_id);
         domain_with_failures.failures_count = 5;
         domain_with_failures.rate_limit_failures_count = 3;
@@ -1697,7 +1711,7 @@ mod tests {
         // Test Update task on domain with certificate
         {
             let mut domain_for_update = DomainEntry::new(None, now);
-            domain_for_update.enc_cert = Some(b"cert_data".to_vec());
+            domain_for_update.not_after = Some(now + 9999);
             domain_for_update.canister_id = Some(canister_id);
             state
                 .domains
@@ -1718,7 +1732,7 @@ mod tests {
         // Test Delete task on domain with certificate
         {
             let mut domain_for_delete = DomainEntry::new(None, now);
-            domain_for_delete.enc_cert = Some(b"cert_data".to_vec());
+            domain_for_delete.not_after = Some(now + 9999);
             domain_for_delete.canister_id = Some(canister_id);
             state
                 .domains
@@ -1739,7 +1753,7 @@ mod tests {
         // Test Renew task on domain with certificate
         {
             let mut domain_for_renew = DomainEntry::new(None, now);
-            domain_for_renew.enc_cert = Some(b"cert_data".to_vec());
+            domain_for_renew.not_after = Some(now + 9999);
             domain_for_renew.canister_id = Some(canister_id);
             state
                 .domains
@@ -1809,7 +1823,7 @@ mod tests {
         // Test Issue task on domain with existing certificate is not allowed
         {
             let mut domain_with_cert = DomainEntry::new(None, now);
-            domain_with_cert.enc_cert = Some(b"cert_data".to_vec());
+            domain_with_cert.not_after = Some(now + 9999);
             domain_with_cert.canister_id = Some(canister_id);
             state
                 .domains
@@ -1831,7 +1845,7 @@ mod tests {
         // Test Renew task on domain with certificate should succeed
         {
             let mut domain_with_cert = DomainEntry::new(None, now);
-            domain_with_cert.enc_cert = Some(b"cert_data".to_vec());
+            domain_with_cert.not_after = Some(now + 9999);
             domain_with_cert.canister_id = Some(canister_id);
             state
                 .domains
@@ -1922,11 +1936,17 @@ mod tests {
         let now = 10000;
         state.domains.insert("renewal.com".to_string(), {
             let mut domain = DomainEntry::new(None, now - 5000);
-            domain.enc_cert = Some(b"cert_data".to_vec());
             domain.not_before = Some(0);
             domain.not_after = Some(now);
             domain
         });
+        state.certificates.insert(
+            "renewal.com".to_string(),
+            CertificateEntry {
+                enc_cert: b"cert_data".to_vec(),
+                enc_priv_key: b"key_data".to_vec(),
+            },
+        );
 
         // Act
         let result = state.fetch_next_task(now - 4000).unwrap();
@@ -1955,7 +1975,6 @@ mod tests {
         let mut domain = DomainEntry::new(Some(TaskKind::Renew), now - 5000);
         domain.taken_at = Some(task_id);
         domain.canister_id = Some(canister_id);
-        domain.enc_cert = Some(b"cert_data".to_vec());
         domain.not_before = Some(0);
         domain.not_after = Some(now);
         domain.failures_count = MAX_TASK_FAILURES - 1;
@@ -2007,7 +2026,6 @@ mod tests {
         // Scenario 1: Domain with valid certificate should NOT be removed
         {
             let mut domain_with_cert = DomainEntry::new(None, now - expiration_time - 3600);
-            domain_with_cert.enc_cert = Some(b"cert_data".to_vec());
             domain_with_cert.canister_id = Some(canister_id);
             domain_with_cert.not_after = Some(now + 3600); // Expires in 1 hour
             state
@@ -2053,21 +2071,24 @@ mod tests {
             let expired_grace = EXPIRED_DOMAIN_EXPIRATION_TIME.as_secs();
             let mut expired_cert_domain = DomainEntry::new(Some(TaskKind::Renew), now - 10000);
             expired_cert_domain.canister_id = Some(canister_id);
-            expired_cert_domain.enc_cert = Some(b"cert_data".to_vec());
-            expired_cert_domain.enc_priv_key = Some(b"key_data".to_vec());
             expired_cert_domain.not_before = Some(now - 900_000);
             expired_cert_domain.not_after = Some(now - expired_grace - 3600); // Expired >7 days ago
             state
                 .domains
                 .insert("expired-cert.com".to_string(), expired_cert_domain);
+            state.certificates.insert(
+                "expired-cert.com".to_string(),
+                CertificateEntry {
+                    enc_cert: b"cert_data".to_vec(),
+                    enc_priv_key: b"key_data".to_vec(),
+                },
+            );
         }
 
         // Scenario 7: Domain with certificate that expired less than 7 days ago should NOT be removed
         {
             let mut recent_expired = DomainEntry::new(None, now - 10000);
             recent_expired.canister_id = Some(canister_id);
-            recent_expired.enc_cert = Some(b"cert_data".to_vec());
-            recent_expired.enc_priv_key = Some(b"key_data".to_vec());
             recent_expired.not_before = Some(now - 10000);
             recent_expired.not_after = Some(now - 3600); // Expired 1 hour ago (< 7 days)
             state
@@ -2099,6 +2120,14 @@ mod tests {
         assert!(state.domains.get(&"old.com".to_string()).is_none());
         assert!(state.domains.get(&"just-expired.com".to_string()).is_none());
         assert!(state.domains.get(&"expired-cert.com".to_string()).is_none());
+
+        // The certificate for a removed domain must not linger orphaned
+        assert!(
+            state
+                .certificates
+                .get(&"expired-cert.com".to_string())
+                .is_none()
+        );
     }
 
     #[test]
@@ -2202,8 +2231,6 @@ mod tests {
 
         // Verify domain state updated correctly
         let domain_entry = state.domains.get(&"test.com".to_string()).unwrap();
-        assert_eq!(domain_entry.enc_cert, Some(certificate_data));
-        assert_eq!(domain_entry.enc_priv_key, Some(private_key_data));
         assert_eq!(domain_entry.not_before, Some(not_before));
         assert_eq!(domain_entry.not_after, Some(not_after));
         assert_eq!(domain_entry.canister_id, Some(canister_id));
@@ -2213,6 +2240,11 @@ mod tests {
         assert_eq!(domain_entry.rate_limit_failures_count, 0);
         assert_eq!(domain_entry.last_fail_time, None);
         assert_eq!(domain_entry.last_failure_reason, None);
+
+        // Verify the certificate landed in the certificates map, not the domain entry
+        let cert = state.certificates.get(&"test.com".to_string()).unwrap();
+        assert_eq!(cert.enc_cert, certificate_data);
+        assert_eq!(cert.enc_priv_key, private_key_data);
 
         // Verify last_change timestamp updated
         assert_eq!(*state.last_change.get(), now);
@@ -2230,9 +2262,14 @@ mod tests {
         let mut domain = DomainEntry::new(Some(TaskKind::Update), now);
         domain.taken_at = Some(task_id);
         domain.canister_id = Some(canister_id);
-        domain.enc_cert = Some(b"old_certificate".to_vec());
-        domain.enc_priv_key = Some(b"old_private_key".to_vec());
         state.domains.insert("test.com".to_string(), domain);
+        state.certificates.insert(
+            "test.com".to_string(),
+            CertificateEntry {
+                enc_cert: b"old_certificate".to_vec(),
+                enc_priv_key: b"old_private_key".to_vec(),
+            },
+        );
 
         let task_result = TaskResult {
             domain: "test.com".to_string(),
@@ -2255,8 +2292,9 @@ mod tests {
         assert_eq!(domain_entry.last_fail_time, None);
         assert_eq!(domain_entry.last_failure_reason, None);
         // Certificate and private key should remain unchanged
-        assert_eq!(domain_entry.enc_cert, Some(b"old_certificate".to_vec()));
-        assert_eq!(domain_entry.enc_priv_key, Some(b"old_private_key".to_vec()));
+        let cert = state.certificates.get(&"test.com".to_string()).unwrap();
+        assert_eq!(cert.enc_cert, b"old_certificate");
+        assert_eq!(cert.enc_priv_key, b"old_private_key");
 
         // Verify last_change timestamp updated
         assert_eq!(*state.last_change.get(), now);
@@ -2273,9 +2311,14 @@ mod tests {
         let mut domain = DomainEntry::new(Some(TaskKind::Delete), now);
         domain.taken_at = Some(task_id);
         domain.canister_id = Some(canister_id);
-        domain.enc_cert = Some(b"certificate_data".to_vec());
-        domain.enc_priv_key = Some(b"private_key_data".to_vec());
         state.domains.insert("test.com".to_string(), domain);
+        state.certificates.insert(
+            "test.com".to_string(),
+            CertificateEntry {
+                enc_cert: b"certificate_data".to_vec(),
+                enc_priv_key: b"private_key_data".to_vec(),
+            },
+        );
 
         let task_result = TaskResult {
             domain: "test.com".to_string(),
@@ -2290,6 +2333,9 @@ mod tests {
 
         // Verify domain was completely removed
         assert!(state.domains.get(&"test.com".to_string()).is_none());
+
+        // The certificate must not linger orphaned in the certificates map
+        assert!(state.certificates.get(&"test.com".to_string()).is_none());
 
         // Verify last_change timestamp updated
         assert_eq!(*state.last_change.get(), now);
@@ -2306,11 +2352,16 @@ mod tests {
         let mut domain = DomainEntry::new(Some(TaskKind::Renew), now);
         domain.taken_at = Some(task_id);
         domain.canister_id = Some(canister_id);
-        domain.enc_cert = Some(b"old_certificate".to_vec());
-        domain.enc_priv_key = Some(b"old_private_key".to_vec());
         domain.not_before = Some(500);
         domain.not_after = Some(1500);
         state.domains.insert("test.com".to_string(), domain);
+        state.certificates.insert(
+            "test.com".to_string(),
+            CertificateEntry {
+                enc_cert: b"old_certificate".to_vec(),
+                enc_priv_key: b"old_private_key".to_vec(),
+            },
+        );
 
         let new_certificate_data = b"new_certificate_data".to_vec();
         let new_private_key_data = b"new_private_key_data".to_vec();
@@ -2335,8 +2386,6 @@ mod tests {
 
         // Verify domain state updated correctly
         let domain_entry = state.domains.get(&"test.com".to_string()).unwrap();
-        assert_eq!(domain_entry.enc_cert, Some(new_certificate_data));
-        assert_eq!(domain_entry.enc_priv_key, Some(new_private_key_data));
         assert_eq!(domain_entry.not_before, Some(new_not_before));
         assert_eq!(domain_entry.not_after, Some(new_not_after));
         assert_eq!(domain_entry.task, None);
@@ -2345,6 +2394,11 @@ mod tests {
         assert_eq!(domain_entry.rate_limit_failures_count, 0);
         assert_eq!(domain_entry.last_fail_time, None);
         assert_eq!(domain_entry.last_failure_reason, None);
+
+        // Verify the certificate was replaced with the new one
+        let cert = state.certificates.get(&"test.com".to_string()).unwrap();
+        assert_eq!(cert.enc_cert, new_certificate_data);
+        assert_eq!(cert.enc_priv_key, new_private_key_data);
 
         // Verify last_change timestamp updated
         assert_eq!(*state.last_change.get(), now);
@@ -2389,8 +2443,9 @@ mod tests {
 
         // Verify all failure state was cleared on success
         let domain_entry = state.domains.get(&"test.com".to_string()).unwrap();
-        assert_eq!(domain_entry.enc_cert, Some(certificate_data));
-        assert_eq!(domain_entry.enc_priv_key, Some(private_key_data));
+        let cert = state.certificates.get(&"test.com".to_string()).unwrap();
+        assert_eq!(cert.enc_cert, certificate_data);
+        assert_eq!(cert.enc_priv_key, private_key_data);
         assert_eq!(domain_entry.task, None);
         assert_eq!(domain_entry.taken_at, None);
         assert_eq!(domain_entry.failures_count, 0);

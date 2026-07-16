@@ -19,11 +19,13 @@ use crate::{
     storage::AUTHORIZED_PRINCIPAL,
 };
 
-pub mod metrics;
-pub mod state;
-pub mod storage;
+#[cfg(feature = "bench")]
+mod bench;
+mod metrics;
+mod state;
+mod storage;
 
-// Inspect ingress messages in the pre-consensus phase and reject early, if the caller is unauthorized
+/// Inspect ingress messages in the pre-consensus phase and reject early, if the caller is unauthorized
 #[inspect_message]
 fn inspect_message() {
     if let Some(authorized_principal) = AUTHORIZED_PRINCIPAL.with(|p| *p.borrow())
@@ -65,7 +67,7 @@ fn init(init_arg: InitArg) {
     });
 }
 
-// Run every time a canister is upgraded
+/// Run every time a canister is upgraded
 #[post_upgrade]
 fn post_upgrade(init_arg: InitArg) {
     // Run the same initialization logic
@@ -141,7 +143,9 @@ fn http_request(request: HttpRequest) -> HttpResponse {
     }
 }
 
-#[cfg(test)]
+// The `bench` feature adds extra test-only endpoints that intentionally aren't part of
+// the public candid interface, so this check doesn't apply to that build configuration.
+#[cfg(all(test, not(feature = "bench")))]
 mod tests {
     use std::{env, fs::read_to_string, path::PathBuf};
 
