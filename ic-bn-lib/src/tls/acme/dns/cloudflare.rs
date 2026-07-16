@@ -1,9 +1,10 @@
-use super::{DnsManager, Record};
 use anyhow::{Context, Error, anyhow};
 use async_trait::async_trait;
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
+
+use super::{DnsManager, Record};
 
 pub const DEFAULT_CLOUDFLARE_URL: &str = "https://api.cloudflare.com/";
 

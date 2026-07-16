@@ -33,7 +33,7 @@ use crate::{
     tasks::Run,
     tls::{
         acme::{
-            AcmeCertificateClient as _, AcmeUrl, DnsManager, Record, TokenManager,
+            AcmeCertificateClient as _, AcmeUrl, Record, TokenManager,
             client::{Client, ClientBuilder},
         },
         extract_sans, pem_convert_to_rustls_single, sni_matches,
@@ -45,6 +45,20 @@ const FILE_CERT: &str = "cert.pem";
 
 // 60s is the lowest possible Cloudflare TTL
 const TTL: u32 = 60;
+
+/// ACME trait to manage DNS entries
+#[async_trait]
+pub trait DnsManager: Sync + Send {
+    async fn create(
+        &self,
+        zone: &str,
+        name: &str,
+        record: Record,
+        ttl: u32,
+    ) -> Result<(), anyhow::Error>;
+
+    async fn delete(&self, zone: &str, name: &str) -> Result<(), anyhow::Error>;
+}
 
 /// Manages ACME tokens using DNS.
 /// It creates `_acme-challenge` TXT records and verifies

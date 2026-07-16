@@ -139,7 +139,7 @@ impl ClientBuilder {
             .unwrap()
             .create(
                 &NewAccount {
-                    contact: &[contact],
+                    contact: &[&format!("mailto:{contact}")],
                     terms_of_service_agreed: true,
                     only_return_existing: false,
                 },

@@ -26,17 +26,23 @@ pub trait TokenManager: Sync + Send {
     async fn verify(&self, id: &str, token: &str) -> Result<(), anyhow::Error>;
 }
 
-/// ACME trait to manage DNS entries
+/// Token manager that does nothing.
+/// Usable when you don't need to set tokens like in DNS-PERSIST-01 challenge
+pub struct TokenManagerNoop;
+
 #[async_trait]
-pub trait DnsManager: Sync + Send {
-    async fn create(
-        &self,
-        zone: &str,
-        name: &str,
-        record: Record,
-        ttl: u32,
-    ) -> Result<(), anyhow::Error>;
-    async fn delete(&self, zone: &str, name: &str) -> Result<(), anyhow::Error>;
+impl TokenManager for TokenManagerNoop {
+    async fn verify(&self, _zone: &str, _token: &str) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
+
+    async fn set(&self, _zone: &str, _token: &str) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
+
+    async fn unset(&self, _zone: &str) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
 }
 
 /// ACME client trait to issue and revoke certificates
@@ -59,6 +65,7 @@ pub trait AcmeCertificateClient: Sync + Send {
 pub enum Challenge {
     Alpn,
     Dns,
+    DnsPersist,
 }
 
 /// Type of ACME server.
