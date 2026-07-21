@@ -14,7 +14,7 @@ use core::fmt;
 use derive_new::new;
 use fqdn::FQDN;
 use hickory_proto::rr::RecordType;
-use instant_acme::AccountCredentials;
+use instant_acme::{AccountCredentials, HttpClient as AcmeHttpClientTrait};
 use rustls::{
     server::{ClientHello, ResolvesServerCert},
     sign::CertifiedKey,
@@ -27,12 +27,13 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::{
     RetryError,
-    dns::resolvers::Resolves,
+    dns::resolvers::{CloneableHyperDnsResolver, Resolves},
+    http::client::ClientOptions,
     retry_async,
     tasks::Run,
     tls::{
         acme::{
-            AcmeCertificateClient as _, AcmeUrl, DnsManager, Record, TokenManager,
+            AcmeCertificateClient as _, AcmeUrl, Record, TokenManager,
             client::{Client, ClientBuilder},
         },
         extract_sans, pem_convert_to_rustls_single, sni_matches,
@@ -44,6 +45,20 @@ const FILE_CERT: &str = "cert.pem";
 
 // 60s is the lowest possible Cloudflare TTL
 const TTL: u32 = 60;
+
+/// ACME trait to manage DNS entries
+#[async_trait]
+pub trait DnsManager: Sync + Send {
+    async fn create(
+        &self,
+        zone: &str,
+        name: &str,
+        record: Record,
+        ttl: u32,
+    ) -> Result<(), anyhow::Error>;
+
+    async fn delete(&self, zone: &str, name: &str) -> Result<(), anyhow::Error>;
+}
 
 /// Manages ACME tokens using DNS.
 /// It creates `_acme-challenge` TXT records and verifies
@@ -148,15 +163,35 @@ pub struct Opts {
     pub path: PathBuf,
     pub domains: Vec<FQDN>,
     pub wildcard: bool,
+    pub contact: String,
     pub renew_before: Duration,
     pub account_credentials: Option<AccountCredentials>,
     pub token_manager: Arc<dyn TokenManager>,
-    pub insecure_tls: bool,
 }
 
 impl AcmeDns {
-    pub async fn new(opts: Opts) -> Result<Self, Error> {
-        let mut builder = ClientBuilder::new(opts.insecure_tls)
+    /// Create a new [`AcmeDns`] client from provided HTTP options & resolver
+    pub async fn new_with_http_opts<R: CloneableHyperDnsResolver>(
+        opts: Opts,
+        http_opts: ClientOptions,
+        resolver: R,
+    ) -> Result<Self, Error> {
+        let acme_client_builder = ClientBuilder::new_with_http_opts(http_opts, resolver);
+        Self::new(opts, acme_client_builder).await
+    }
+
+    /// Create a new [`AcmeDns`] client from a provided HTTP client
+    pub async fn new_with_http_client(
+        opts: Opts,
+        http_client: Box<dyn AcmeHttpClientTrait>,
+    ) -> Result<Self, Error> {
+        let acme_client_builder = ClientBuilder::new(http_client);
+        Self::new(opts, acme_client_builder).await
+    }
+
+    /// Create a new [`AcmeDns`] client from a provided Acme client builder
+    pub async fn new(opts: Opts, mut builder: ClientBuilder) -> Result<Self, Error> {
+        builder = builder
             .with_acme_url(opts.acme_url)
             .with_token_manager(opts.token_manager);
         let account_path = opts.path.join("account.json");
@@ -183,10 +218,17 @@ impl AcmeDns {
                 .load_account(v)
                 .await
                 .context("unable to load ACME account")?;
-        } else if let Ok(v) = fs::read(&account_path).await {
+        } else if fs::try_exists(&account_path)
+            .await
+            .context("unable to check account.json existence")?
+        {
+            let js = fs::read(&account_path)
+                .await
+                .context("unable to read account.json")?;
+
             // Otherwise first try to load them from file
-            let creds: AccountCredentials =
-                serde_json::from_slice(&v).context("unable to parse ACME account credentials")?;
+            let creds: AccountCredentials = serde_json::from_slice(&js)
+                .context("unable to parse ACME account credentials from JSON")?;
 
             builder = builder
                 .load_account(creds)
@@ -195,7 +237,7 @@ impl AcmeDns {
         } else {
             // Finally just create a new account
             let (builder2, creds) = builder
-                .create_account("mailto:boundary-nodes@dfinity.org")
+                .create_account(&opts.contact)
                 .await
                 .context("unable to create ACME account")?;
             builder = builder2;
@@ -337,7 +379,7 @@ mod test {
     use super::*;
     use crate::{
         tests::pebble::{Env, dns::TokenManagerPebble},
-        tls::extract_sans_der,
+        tls::{acme::client::HttpClient, extract_sans_der},
     };
 
     #[ignore]
@@ -365,14 +407,17 @@ mod test {
             ),
             path: dir.path().to_path_buf(),
             domains: vec![fqdn!("foo")],
+            contact: "foo@bar.com".into(),
             wildcard: true,
             renew_before: Duration::from_secs(30),
             account_credentials: None,
             token_manager: token_manager_dns,
-            insecure_tls: true,
         };
 
-        let acme_dns = AcmeDns::new(opts).await.unwrap();
+        let acme_dns =
+            AcmeDns::new_with_http_client(opts, Box::new(HttpClient::default_insecure()))
+                .await
+                .unwrap();
         assert_eq!(acme_dns.refresh().await.unwrap(), RefreshResult::Refreshed);
         let cert = acme_dns.cert.load_full().unwrap();
         let mut sans = extract_sans_der(cert.end_entity_cert().unwrap()).unwrap();

@@ -422,7 +422,7 @@ pub mod dns {
     use async_trait::async_trait;
 
     #[cfg(feature = "acme-dns")]
-    use crate::tls::acme::{DnsManager, Record};
+    use crate::tls::acme::{Record, dns::DnsManager};
     use serde_json::json;
     use url::Url;
 

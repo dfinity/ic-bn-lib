@@ -1,5 +1,5 @@
 use clap::Parser;
-use ic_bn_lib::tls::acme::{DnsManager, Record, dns::cloudflare::Cloudflare};
+use ic_bn_lib::tls::acme::{Record, dns::DnsManager, dns::cloudflare::Cloudflare};
 
 #[derive(Parser)]
 pub struct Cli {

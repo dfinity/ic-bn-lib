@@ -8,7 +8,7 @@ use rustls::{
     sign::CertifiedKey,
 };
 use rustls_acme::{
-    AcmeConfig, AcmeState, ResolvesServerCertAcme, caches::DirCache,
+    AccountCache, AcmeConfig, AcmeState, ResolvesServerCertAcme, caches::DirCache,
     futures_rustls::rustls::ClientConfig,
 };
 use tokio::sync::Mutex;
@@ -17,12 +17,39 @@ use tracing::warn;
 
 use crate::{tasks::Run, tls::acme::AcmeUrl};
 
+/// Simple AccountCache implementation that just gives out a predefined account.
+/// Store is a noop.
+struct StubAccountCache(Vec<u8>);
+
+#[async_trait]
+impl AccountCache for StubAccountCache {
+    type EA = std::io::Error;
+
+    async fn load_account(
+        &self,
+        _contact: &[String],
+        _directory_url: &str,
+    ) -> Result<Option<Vec<u8>>, Self::EA> {
+        Ok(Some(self.0.clone()))
+    }
+
+    async fn store_account(
+        &self,
+        _contact: &[String],
+        _directory_url: &str,
+        _account: &[u8],
+    ) -> Result<(), Self::EA> {
+        Ok(())
+    }
+}
+
 #[derive(derive_new::new)]
 pub struct Opts {
     pub acme_url: AcmeUrl,
     pub domains: Vec<String>,
     pub contact: String,
     pub cache_path: PathBuf,
+    pub account_credentials: Option<Vec<u8>>,
     pub tls_config: Option<ClientConfig>,
 }
 
@@ -41,13 +68,21 @@ impl AcmeAlpn {
         } else {
             AcmeConfig::new(opts.domains)
         }
-        .contact_push(opts.contact)
+        .contact_push(format!("mailto:{}", opts.contact))
         .directory(opts.acme_url.to_string());
 
-        let state = state.cache(DirCache::new(opts.cache_path)).state();
-        let resolver = state.resolver();
+        let cert_cache = DirCache::new(opts.cache_path);
 
-        Self(Mutex::new(state), resolver)
+        // If the credentials were provided - use a stub account cache
+        let state = if let Some(v) = opts.account_credentials {
+            state.cache_compose(cert_cache, StubAccountCache(v))
+        } else {
+            state.cache(cert_cache)
+        }
+        .state();
+
+        let cert_resolver = state.resolver();
+        Self(Mutex::new(state), cert_resolver)
     }
 }
 
