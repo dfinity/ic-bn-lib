@@ -27,6 +27,7 @@ acme-dns = ["acme"]
 acme-alpn = ["acme", "dep:rustls-acme"]
 clients-hyper = ["dep:hyper-rustls"]
 custom-domains = ["acme-dns"]
+custom-domains-openapi = ["custom-domains", "dep:utoipa", "dep:utoipa-swagger-ui"]
 cert-providers = ["custom-domains"]
 lb = []
 pubsub = []
@@ -116,8 +117,8 @@ tower-service = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
-utoipa = { workspace = true }
-utoipa-swagger-ui = { workspace = true }
+utoipa = { workspace = true, optional = true }
+utoipa-swagger-ui = { workspace = true, optional = true }
 uuid = { workspace = true }
 vrl = { workspace = true, optional = true }
 webpki-root-certs = { workspace = true }

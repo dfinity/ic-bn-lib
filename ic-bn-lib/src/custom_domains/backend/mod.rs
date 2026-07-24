@@ -2,6 +2,7 @@ mod backend_service;
 mod handlers;
 mod metrics;
 mod models;
+#[cfg(feature = "custom-domains-openapi")]
 mod openapi;
 pub mod router;
 
