@@ -5,6 +5,7 @@ use candid::Principal;
 use derive_new::new;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+#[cfg(feature = "custom-domains-openapi")]
 use utoipa::ToSchema;
 
 use crate::custom_domains::base::{
@@ -13,7 +14,8 @@ use crate::custom_domains::base::{
 };
 
 /// Generic API response structure for all endpoints.
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize)]
+#[cfg_attr(feature = "custom-domains-openapi", derive(ToSchema))]
 pub struct ApiResponse<T> {
     /// Status of the response ("success" or "error")
     status: String,
@@ -53,19 +55,22 @@ pub enum ApiError {
 /// Response data payload for domain creation/update.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
-#[derive(ToSchema)]
+#[cfg_attr(feature = "custom-domains-openapi", derive(ToSchema))]
 pub struct CreateOrUpdateResponse {
     /// The domain name
     pub domain: String,
     /// Associated canister ID
-    #[schema(value_type = String, example = "rrkah-fqaaa-aaaaa-aaaaq-cai")]
+    #[cfg_attr(
+        feature = "custom-domains-openapi",
+        schema(value_type = String, example = "rrkah-fqaaa-aaaaa-aaaaq-cai")
+    )]
     pub canister_id: Principal,
 }
 
 /// Error response data payload.
 #[derive(Serialize, Deserialize, Debug, Clone, new)]
 #[serde(rename_all = "snake_case")]
-#[derive(ToSchema)]
+#[cfg_attr(feature = "custom-domains-openapi", derive(ToSchema))]
 pub struct ErrorResponse {
     /// The domain name
     pub domain: String,
@@ -74,7 +79,7 @@ pub struct ErrorResponse {
 /// Delete response data payload.
 #[derive(Serialize, Deserialize, Debug, Clone, new)]
 #[serde(rename_all = "snake_case")]
-#[derive(ToSchema)]
+#[cfg_attr(feature = "custom-domains-openapi", derive(ToSchema))]
 pub struct DeleteResponse {
     /// The domain name
     pub domain: String,
@@ -83,12 +88,15 @@ pub struct DeleteResponse {
 /// Get domains status response data payload.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
-#[derive(ToSchema)]
+#[cfg_attr(feature = "custom-domains-openapi", derive(ToSchema))]
 pub struct GetStatusResponse {
     /// The domain name
     pub domain: String,
     /// Associated canister ID
-    #[schema(value_type = Option<String>, example = "rrkah-fqaaa-aaaaa-aaaaq-cai", nullable = true)]
+    #[cfg_attr(
+        feature = "custom-domains-openapi",
+        schema(value_type = Option<String>, example = "rrkah-fqaaa-aaaaa-aaaaq-cai", nullable = true)
+    )]
     pub canister_id: Option<Principal>,
     /// Domain registration status
     pub registration_status: RegistrationStatus,
@@ -97,12 +105,15 @@ pub struct GetStatusResponse {
 /// Response data payload for domain-related endpoints.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
-#[derive(ToSchema)]
+#[cfg_attr(feature = "custom-domains-openapi", derive(ToSchema))]
 pub struct ValidateResponse {
     /// The domain name
     pub domain: String,
     /// Associated canister ID
-    #[schema(value_type = String, example = "rrkah-fqaaa-aaaaa-aaaaq-cai")]
+    #[cfg_attr(
+        feature = "custom-domains-openapi",
+        schema(value_type = String, example = "rrkah-fqaaa-aaaaa-aaaaq-cai")
+    )]
     pub canister_id: Principal,
     /// Domain validation status
     pub validation_status: ValidationStatus,
@@ -178,7 +189,7 @@ pub fn error_response<T: Serialize>(
 /// Domain validation status for API responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[derive(ToSchema)]
+#[cfg_attr(feature = "custom-domains-openapi", derive(ToSchema))]
 pub enum ValidationStatus {
     /// Domain validation passed
     Valid,

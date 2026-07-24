@@ -15,13 +15,15 @@ use tower_http::{
     trace::{DefaultOnRequest, DefaultOnResponse, TraceLayer},
 };
 use tracing::Level;
+#[cfg(feature = "custom-domains-openapi")]
 use utoipa_swagger_ui::SwaggerUi;
 
+#[cfg(feature = "custom-domains-openapi")]
+use super::openapi::get_openapi_json;
 use super::{
     backend_service::BackendService,
     handlers::{create_handler, delete_handler, get_handler, update_handler, validate_handler},
     metrics::{HttpMetrics, metrics_handler, metrics_middleware},
-    openapi::get_openapi_json,
 };
 use crate::{
     custom_domains::base::traits::{repository::Repository, validation::ValidatesDomains},
@@ -104,10 +106,16 @@ pub fn create_router(
         Router::new()
     };
 
-    let swagger_ui =
-        SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", get_openapi_json());
+    #[cfg(feature = "custom-domains-openapi")]
+    let router = {
+        let swagger_ui =
+            SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", get_openapi_json());
+        api_router.merge(metrics_router).merge(swagger_ui)
+    };
+    #[cfg(not(feature = "custom-domains-openapi"))]
+    let router = api_router.merge(metrics_router);
 
-    api_router.merge(metrics_router).merge(swagger_ui)
+    router
 }
 
 #[cfg(test)]

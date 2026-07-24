@@ -603,13 +603,11 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
         // backend call & cache insert below, actually serializing concurrent
         // requests for the same key instead of releasing it immediately.
         let mut guard = None;
-        let mut lock_obtained = false;
         select! {
             // Only one parallel request should execute and populate the cache.
             // Other requests will wait for the lock to be released and get results from the cache.
             g = lock.lock() => {
                 guard = Some(g);
-                lock_obtained = true;
             }
 
             // We proceed with the request as is if takes too long to get the lock
@@ -619,7 +617,7 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
         // Record prometheus metrics for the time spent waiting for the lock
         self.metrics
             .lock_await
-            .with_label_values(&[if lock_obtained { "yes" } else { "no" }])
+            .with_label_values(&[if guard.is_some() { "yes" } else { "no" }])
             .observe(now.elapsed().as_secs_f64());
 
         // Check again the cache in case some other request filled it

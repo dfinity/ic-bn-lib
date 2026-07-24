@@ -33,7 +33,8 @@ fn log_error(err: &ApiError, domain: &str, operation: &str) {
 /// Register a new domain.
 ///
 /// Triggers an async certificate issuance task for the specified domain.
-#[
+#[cfg_attr(
+    feature = "custom-domains-openapi",
     utoipa::path(
         post,
         path = "/v1/{id}",
@@ -48,7 +49,7 @@ fn log_error(err: &ApiError, domain: &str, operation: &str) {
         ),
         tag = "domains"
     )
-]
+)]
 pub async fn create_handler(
     State(backend_service): State<BackendService>,
     Path(domain): Path<String>,
@@ -83,7 +84,8 @@ pub async fn create_handler(
 /// Update a domain's canister mapping.
 ///
 /// Changes which canister the registered domain points to via an async task.
-#[
+#[cfg_attr(
+    feature = "custom-domains-openapi",
     utoipa::path(
         patch,
         path = "/v1/{id}",
@@ -98,7 +100,7 @@ pub async fn create_handler(
         ),
         tag = "domains"
     )
-]
+)]
 pub async fn update_handler(
     State(backend_service): State<BackendService>,
     Path(domain): Path<String>,
@@ -130,7 +132,9 @@ pub async fn update_handler(
 }
 
 /// Get domain registration status.
-#[utoipa::path(
+#[cfg_attr(
+    feature = "custom-domains-openapi",
+    utoipa::path(
         get,
         path = "/v1/{id}",
         params(
@@ -143,7 +147,7 @@ pub async fn update_handler(
         ),
         tag = "domains"
     )
-]
+)]
 pub async fn get_handler(
     State(backend_service): State<BackendService>,
     Path(domain): Path<String>,
@@ -172,7 +176,9 @@ pub async fn get_handler(
 /// Validate domain eligibility for registration.
 ///
 /// Verifies DNS configuration and canister ownership for the specified domain.
-#[utoipa::path(
+#[cfg_attr(
+    feature = "custom-domains-openapi",
+    utoipa::path(
         get,
         path = "/v1/{id}/validate",
         params(
@@ -184,7 +190,7 @@ pub async fn get_handler(
         ),
         tag = "domains"
     )
-]
+)]
 pub async fn validate_handler(
     State(backend_service): State<BackendService>,
     Path(domain): Path<String>,
@@ -213,7 +219,9 @@ pub async fn validate_handler(
 /// Delete an existing domain registration.
 ///
 /// Revokes the certificate and removes the domain registration asynchronously.
-#[utoipa::path(
+#[cfg_attr(
+    feature = "custom-domains-openapi",
+    utoipa::path(
         delete,
         path = "/v1/{id}",
         params(
@@ -226,7 +234,7 @@ pub async fn validate_handler(
         ),
         tag = "domains"
     )
-]
+)]
 pub async fn delete_handler(
     State(backend_service): State<BackendService>,
     Path(domain): Path<String>,
