@@ -69,6 +69,7 @@ ic-cdk-timers = "1.0"
 ic-custom-domains-canister-api = { version = "0.2", path = "./custom-domains/api" }
 ic-http-types = "0.1.0"
 ic-stable-structures = "0.7.0"
+ic-verify-bls-signature = "0.6"
 instant-acme = { version = "0.8.5", default-features = false, features = [
     "aws-lc-rs",
     "hyper-rustls",
