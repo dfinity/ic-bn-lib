@@ -27,7 +27,7 @@ pub trait AgentExt {
         root_subnet_id: Principal,
     ) -> Result<AHashSet<Principal>, AgentError>;
 
-    /// Returns a [`SubnetData`] struct that containts subnet's type & its canister ranges
+    /// Returns a [`SubnetData`] struct that contains the subnet type and its canister ranges
     async fn fetch_subnet_data(&self, subnet_id: &Principal) -> Result<SubnetData, AgentError>;
 }
 
