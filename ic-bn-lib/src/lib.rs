@@ -11,6 +11,7 @@ pub mod custom_domains;
 pub mod dns;
 pub mod health;
 pub mod http;
+pub mod ic;
 #[cfg(feature = "lb")]
 pub mod lb;
 pub mod network;
