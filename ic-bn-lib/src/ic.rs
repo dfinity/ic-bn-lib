@@ -63,7 +63,7 @@ impl AgentExt for Agent {
             .map(|p| {
                 Principal::try_from_slice(p[0].as_bytes()).map_err(|e| {
                     AgentError::MessageError(format!(
-                        "Mailformed subnet ID in the NNS state tree: {e:#}"
+                        "Malformed subnet ID in the NNS state tree: {e:#}"
                     ))
                 })
             })
