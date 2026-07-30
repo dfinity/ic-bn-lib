@@ -129,11 +129,13 @@ zstd = { workspace = true }
 [dev-dependencies]
 axum-server = { workspace = true }
 criterion = { workspace = true }
+ic-verify-bls-signature = { workspace = true }
 mail-send = { workspace = true }
 mockall = { workspace = true }
 mock-io = { workspace = true }
 pocket-ic = { workspace = true }
 rand_regex = { workspace = true }
+serde_cbor = { workspace = true }
 tempfile = { workspace = true }
 tokio-test = { workspace = true }
 
