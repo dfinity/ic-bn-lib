@@ -1,4 +1,4 @@
-use anyhow::{Context, Error, anyhow};
+use anyhow::{Context, Error, anyhow, bail};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,10 @@ pub struct IcDnsLb {
 impl IcDnsLb {
     /// Create a new IC-DNS-LB API client with a default HTTP client
     pub fn new(base_urls: Vec<Url>, token: String) -> Result<Self, Error> {
+        if base_urls.is_empty() {
+            bail!("At least one URL must be specified");
+        }
+
         let client = Client::builder()
             .build()
             .context("failed to initialize HTTP client")?;
@@ -22,14 +26,28 @@ impl IcDnsLb {
         Ok(Self::new_with_http_client(base_urls, client, token))
     }
 
-    /// Create a new IC-DNS-LB API client with a provided HTTP client.
-    /// Client needs to set the authentication token itself.
+    /// Create a new IC-DNS-LB API client with a provided HTTP client
     pub const fn new_with_http_client(base_urls: Vec<Url>, client: Client, token: String) -> Self {
         Self {
             client,
             base_urls,
             token,
         }
+    }
+
+    /// Sends a POST request
+    async fn post(&self, url: Url, req: AcmeChallengeRequest) -> Result<(), Error> {
+        self.client
+            .post(url)
+            .bearer_auth(&self.token)
+            .json(&req)
+            .send()
+            .await
+            .context("unable to send request")?
+            .error_for_status()
+            .context("bad HTTP status code")?;
+
+        Ok(())
     }
 }
 
@@ -55,21 +73,17 @@ impl DnsManager for IcDnsLb {
 
             // Strip trailing slash if exists & add path
             url.path_segments_mut()
-                .map_err(|()| anyhow!("base URL cannot be used as a base for relative paths"))?
+                .map_err(|_| anyhow!("base URL cannot be used as a base for relative paths"))?
                 .pop_if_empty()
                 .extend(["acme-challenge", "set", zone]);
 
-            self.client
-                .post(url)
-                .bearer_auth(&self.token)
-                .json(&AcmeChallengeRequest {
+            self.post(
+                url,
+                AcmeChallengeRequest {
                     challenge: challenge.clone(),
-                })
-                .send()
-                .await
-                .context("unable to send request")?
-                .error_for_status()
-                .context("bad HTTP status code")?;
+                },
+            )
+            .await?;
         }
 
         Ok(())
@@ -78,29 +92,35 @@ impl DnsManager for IcDnsLb {
     async fn delete(&self, zone: &str, _name: &str, record: &Record) -> Result<(), Error> {
         let Record::Txt(challenge) = record;
 
+        // Try to remove records from all nodes even if some fail
+        let mut errors = vec![];
         for url in &self.base_urls {
             let mut url = url.clone();
 
             // Strip trailing slash if exists & add path
             url.path_segments_mut()
-                .map_err(|()| anyhow!("base URL cannot be used as a base for relative paths"))?
+                .map_err(|_| anyhow!("base URL cannot be used as a base for relative paths"))?
                 .pop_if_empty()
                 .extend(["acme-challenge", "unset", zone]);
 
-            self.client
-                .post(url)
-                .bearer_auth(&self.token)
-                .json(&AcmeChallengeRequest {
-                    challenge: challenge.clone(),
-                })
-                .send()
+            if let Err(e) = self
+                .post(
+                    url,
+                    AcmeChallengeRequest {
+                        challenge: challenge.clone(),
+                    },
+                )
                 .await
-                .context("unable to send request")?
-                .error_for_status()
-                .context("bad HTTP status code")?;
+            {
+                errors.push(e.to_string());
+            }
         }
 
-        Ok(())
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::msg(errors.join(", ")))
+        }
     }
 }
 
@@ -317,7 +337,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn delete_stops_at_first_failing_node_and_does_not_contact_the_rest() {
+    async fn delete_contacts_all_nodes_even_if_one_fails() {
         let (client, nodes) = setup(2).await;
         nodes[0].state.lock().unwrap().fail_unset = true;
 
@@ -331,11 +351,7 @@ mod test {
             .unwrap_err();
 
         assert_eq!(nodes[0].state.lock().unwrap().requests_received, 1);
-        assert_eq!(
-            nodes[1].state.lock().unwrap().requests_received,
-            0,
-            "later nodes must not be contacted once an earlier one fails"
-        );
+        assert_eq!(nodes[1].state.lock().unwrap().requests_received, 1);
     }
 
     #[tokio::test]
