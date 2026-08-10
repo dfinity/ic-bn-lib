@@ -111,6 +111,7 @@ pub struct AcmeCert {
 #[non_exhaustive]
 pub enum DnsBackend {
     Cloudflare,
+    IcDnsLb,
 }
 
 /// Record type for DnsManager trait
