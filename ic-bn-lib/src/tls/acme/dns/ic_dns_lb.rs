@@ -13,7 +13,7 @@ pub struct IcDnsLb {
 }
 
 impl IcDnsLb {
-    /// Create a new Cloudflare client with a default HTTP client
+    /// Create a new IC-DNS-LB API client with a default HTTP client
     pub fn new(base_urls: Vec<Url>, token: String) -> Result<Self, Error> {
         let client = Client::builder()
             .build()
@@ -22,7 +22,7 @@ impl IcDnsLb {
         Ok(Self::new_with_http_client(base_urls, client, token))
     }
 
-    /// Create a new Cloudflare client with a provided HTTP client.
+    /// Create a new IC-DNS-LB API client with a provided HTTP client.
     /// Client needs to set the authentication token itself.
     pub const fn new_with_http_client(base_urls: Vec<Url>, client: Client, token: String) -> Self {
         Self {
@@ -33,9 +33,10 @@ impl IcDnsLb {
     }
 }
 
+/// Request that IC-DNS-LB expects
 #[derive(Clone, Serialize, Deserialize)]
-pub struct AcmeChallengeRequest {
-    pub challenge: String,
+struct AcmeChallengeRequest {
+    challenge: String,
 }
 
 #[async_trait]
@@ -51,6 +52,8 @@ impl DnsManager for IcDnsLb {
 
         for url in &self.base_urls {
             let mut url = url.clone();
+
+            // Strip trailing slash if exists & add path
             url.path_segments_mut()
                 .map_err(|()| anyhow!("base URL cannot be used as a base for relative paths"))?
                 .pop_if_empty()
@@ -77,6 +80,8 @@ impl DnsManager for IcDnsLb {
 
         for url in &self.base_urls {
             let mut url = url.clone();
+
+            // Strip trailing slash if exists & add path
             url.path_segments_mut()
                 .map_err(|()| anyhow!("base URL cannot be used as a base for relative paths"))?
                 .pop_if_empty()
