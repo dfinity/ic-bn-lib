@@ -266,22 +266,22 @@ impl DnsManager for Cloudflare {
 mod test {
     use std::{
         collections::HashMap,
-        net::SocketAddr,
         sync::{Arc, Mutex},
     };
 
     use axum::{
         Json, Router,
         extract::{Path, Query, State},
-        http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+        http::{HeaderMap, StatusCode},
         response::{IntoResponse, Response},
         routing::{delete, get},
     };
-    use axum_server::tls_rustls::RustlsConfig;
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::tests::{TEST_CERT_1, TEST_KEY_1};
+    use crate::tls::acme::dns::test::support::{
+        check_bearer_auth, insecure_http_client, install_crypto_provider, spawn_https_mock_server,
+    };
 
     const TOKEN: &str = "test-api-token";
 
@@ -358,13 +358,6 @@ mod test {
 
     type SharedState = Arc<Mutex<MockState>>;
 
-    fn check_auth(headers: &HeaderMap, state: &MockState) -> bool {
-        headers
-            .get(AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v == format!("Bearer {}", state.token))
-    }
-
     /// Cloudflare-shaped error envelope: HTTP status codes for auth/lookup failures follow
     /// https://developers.cloudflare.com/api/ (non-2xx), while application-level failures
     /// (e.g. record already exists) come back as HTTP 200 with `success: false`.
@@ -396,7 +389,7 @@ mod test {
     ) -> Response {
         let result: Vec<Value> = {
             let state = state.lock().unwrap();
-            if !check_auth(&headers, &state) {
+            if !check_bearer_auth(&headers, &state.token) {
                 return unauthorized();
             }
 
@@ -427,7 +420,7 @@ mod test {
     ) -> Response {
         let records: Vec<MockRecord> = {
             let state = state.lock().unwrap();
-            if !check_auth(&headers, &state) {
+            if !check_bearer_auth(&headers, &state.token) {
                 return unauthorized();
             }
 
@@ -484,7 +477,7 @@ mod test {
     ) -> Response {
         let id = {
             let mut state = state.lock().unwrap();
-            if !check_auth(&headers, &state) {
+            if !check_bearer_auth(&headers, &state.token) {
                 return unauthorized();
             }
             if !state.records.contains_key(&zone_id) {
@@ -522,7 +515,7 @@ mod test {
     ) -> Response {
         {
             let mut state = state.lock().unwrap();
-            if !check_auth(&headers, &state) {
+            if !check_bearer_auth(&headers, &state.token) {
                 return unauthorized();
             }
             if state.fail_delete {
@@ -551,20 +544,9 @@ mod test {
         .into_response()
     }
 
-    /// Spawns the mock Cloudflare API over HTTPS on a random loopback port and returns its base URL.
-    async fn spawn_mock_server(state: SharedState) -> Url {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let addr: SocketAddr = listener.local_addr().unwrap();
-
-        let config = RustlsConfig::from_pem(
-            TEST_CERT_1.as_bytes().to_vec(),
-            TEST_KEY_1.as_bytes().to_vec(),
-        )
-        .await
-        .unwrap();
-
-        let router = Router::new()
+    /// Builds the mock Cloudflare API router, ready to be handed to `spawn_https_mock_server`.
+    fn mock_router(state: SharedState) -> Router {
+        Router::new()
             .route("/client/v4/zones", get(list_zones))
             .route(
                 "/client/v4/zones/{zone_id}/dns_records",
@@ -574,17 +556,7 @@ mod test {
                 "/client/v4/zones/{zone_id}/dns_records/{record_id}",
                 delete(delete_dns_record),
             )
-            .with_state(state);
-
-        tokio::spawn(async move {
-            axum_server::from_tcp_rustls(listener, config)
-                .unwrap()
-                .serve(router.into_make_service())
-                .await
-                .unwrap();
-        });
-
-        format!("https://{addr}/").parse().unwrap()
+            .with_state(state)
     }
 
     struct TestEnv {
@@ -596,10 +568,10 @@ mod test {
     /// Boots a fresh mock server + matching `Cloudflare` client. Each test gets its own server
     /// instance (cheap, unlike the real Pebble-based ACME tests) so they can run independently.
     async fn setup() -> TestEnv {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        install_crypto_provider();
 
         let state: SharedState = Arc::new(Mutex::new(MockState::new()));
-        let base_url = spawn_mock_server(state.clone()).await;
+        let base_url = spawn_https_mock_server(mock_router(state.clone())).await;
 
         let client = client_with_token(base_url.clone(), TOKEN);
 
@@ -611,12 +583,7 @@ mod test {
     }
 
     fn client_with_token(base_url: Url, token: &str) -> Cloudflare {
-        let http_client = reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
-            .build()
-            .unwrap();
-
-        Cloudflare::new_with_http_client(base_url, token.to_string(), http_client)
+        Cloudflare::new_with_http_client(base_url, token.to_string(), insecure_http_client())
     }
 
     #[tokio::test]
@@ -837,50 +804,6 @@ mod test {
         assert!(err.to_string().contains("API error"), "{err}");
     }
 
-    /// TEMP VERIFICATION TEST (re-added after detecting tampering; will be removed before
-    /// finishing this review — not part of the actual PR). Exercises create() with the exact
-    /// argument shape the real TokenManagerDns::set() sends with no delegation domain: a bare
-    /// `name` ("_acme-challenge") plus the real `zone`, i.e. NOT pre-concatenated by the caller.
-    #[tokio::test]
-    async fn zzz_temp_verify_bare_name_like_real_caller() {
-        let env = setup().await;
-        let zone_id = env.state.lock().unwrap().add_zone("example.com");
-
-        env.client
-            .create(
-                "example.com",
-                "_acme-challenge",
-                Record::Txt("real-caller-token".into()),
-                60,
-            )
-            .await
-            .unwrap();
-
-        let records = env
-            .client
-            .find_records(&zone_id, "_acme-challenge.example.com")
-            .await
-            .unwrap();
-
-        let stored_names: Vec<String> = env
-            .state
-            .lock()
-            .unwrap()
-            .records
-            .get(&zone_id)
-            .unwrap()
-            .iter()
-            .map(|r| r.name.clone())
-            .collect();
-
-        assert_eq!(
-            records.len(),
-            1,
-            "record created via the real bare-name calling convention should be discoverable \
-             at the fully-qualified name verify() will query -- stored names were: {stored_names:?}"
-        );
-    }
-
     /// End-to-end lifecycle through the public `DnsManager` trait: create a TXT record,
     /// confirm it's visible, delete it, confirm it's gone.
     #[tokio::test]
@@ -921,52 +844,5 @@ mod test {
             .await
             .unwrap();
         assert!(records.is_empty());
-    }
-
-    /// TEMP investigative test (not part of the real diff): mirrors the exact call shape that
-    /// TokenManagerDns::set()/unset() use in the default (no delegation_domain) configuration --
-    /// i.e. the SAME bare `name` ("_acme-challenge") passed unmodified to both create() and
-    /// delete(), rather than a pre-qualified name only for create().
-    #[tokio::test]
-    async fn temp_investigate_real_caller_shape_round_trip() {
-        let env = setup().await;
-        let zone_id = env.state.lock().unwrap().add_zone("example.com");
-
-        env.client
-            .create(
-                "example.com",
-                "_acme-challenge",
-                Record::Txt("round-trip-token".into()),
-                60,
-            )
-            .await
-            .unwrap();
-
-        // Inspect exactly what name got stored by create().
-        let stored_name = {
-            let state = env.state.lock().unwrap();
-            state.records[&zone_id][0].name.clone()
-        };
-        eprintln!("TEMP: record name stored by create() = {stored_name:?}");
-
-        env.client
-            .delete(
-                "example.com",
-                "_acme-challenge",
-                &Record::Txt("round-trip-token".into()),
-            )
-            .await
-            .unwrap();
-
-        let remaining = env.state.lock().unwrap().records[&zone_id].clone();
-        eprintln!(
-            "TEMP: records remaining after delete() = {:?}",
-            remaining.iter().map(|r| &r.name).collect::<Vec<_>>()
-        );
-        assert!(
-            remaining.is_empty(),
-            "record was NOT deleted using the real caller's argument shape: {:?}",
-            remaining.iter().map(|r| &r.name).collect::<Vec<_>>()
-        );
     }
 }

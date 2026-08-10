@@ -350,7 +350,6 @@ impl Client {
     }
 
     /// Iterates over authorizations in the order and tries to fulfill them.
-    /// Returns the list of IDs that are later used in the cleanup.
     #[instrument(level = "debug", skip_all)]
     #[allow(clippy::significant_drop_tightening)]
     async fn process_authorizations(
