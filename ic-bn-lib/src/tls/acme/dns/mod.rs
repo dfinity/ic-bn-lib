@@ -1,4 +1,5 @@
 pub mod cloudflare;
+pub mod ic_dns_lb;
 
 use std::{
     path::PathBuf,

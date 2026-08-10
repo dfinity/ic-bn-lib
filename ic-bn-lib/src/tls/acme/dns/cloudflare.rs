@@ -612,7 +612,7 @@ mod test {
 
     fn client_with_token(base_url: Url, token: &str) -> Cloudflare {
         let http_client = reqwest::Client::builder()
-            .tls_danger_accept_invalid_certs(true)
+            .danger_accept_invalid_certs(true)
             .build()
             .unwrap();
 
@@ -837,6 +837,50 @@ mod test {
         assert!(err.to_string().contains("API error"), "{err}");
     }
 
+    /// TEMP VERIFICATION TEST (re-added after detecting tampering; will be removed before
+    /// finishing this review — not part of the actual PR). Exercises create() with the exact
+    /// argument shape the real TokenManagerDns::set() sends with no delegation domain: a bare
+    /// `name` ("_acme-challenge") plus the real `zone`, i.e. NOT pre-concatenated by the caller.
+    #[tokio::test]
+    async fn zzz_temp_verify_bare_name_like_real_caller() {
+        let env = setup().await;
+        let zone_id = env.state.lock().unwrap().add_zone("example.com");
+
+        env.client
+            .create(
+                "example.com",
+                "_acme-challenge",
+                Record::Txt("real-caller-token".into()),
+                60,
+            )
+            .await
+            .unwrap();
+
+        let records = env
+            .client
+            .find_records(&zone_id, "_acme-challenge.example.com")
+            .await
+            .unwrap();
+
+        let stored_names: Vec<String> = env
+            .state
+            .lock()
+            .unwrap()
+            .records
+            .get(&zone_id)
+            .unwrap()
+            .iter()
+            .map(|r| r.name.clone())
+            .collect();
+
+        assert_eq!(
+            records.len(),
+            1,
+            "record created via the real bare-name calling convention should be discoverable \
+             at the fully-qualified name verify() will query -- stored names were: {stored_names:?}"
+        );
+    }
+
     /// End-to-end lifecycle through the public `DnsManager` trait: create a TXT record,
     /// confirm it's visible, delete it, confirm it's gone.
     #[tokio::test]
@@ -877,5 +921,52 @@ mod test {
             .await
             .unwrap();
         assert!(records.is_empty());
+    }
+
+    /// TEMP investigative test (not part of the real diff): mirrors the exact call shape that
+    /// TokenManagerDns::set()/unset() use in the default (no delegation_domain) configuration --
+    /// i.e. the SAME bare `name` ("_acme-challenge") passed unmodified to both create() and
+    /// delete(), rather than a pre-qualified name only for create().
+    #[tokio::test]
+    async fn temp_investigate_real_caller_shape_round_trip() {
+        let env = setup().await;
+        let zone_id = env.state.lock().unwrap().add_zone("example.com");
+
+        env.client
+            .create(
+                "example.com",
+                "_acme-challenge",
+                Record::Txt("round-trip-token".into()),
+                60,
+            )
+            .await
+            .unwrap();
+
+        // Inspect exactly what name got stored by create().
+        let stored_name = {
+            let state = env.state.lock().unwrap();
+            state.records[&zone_id][0].name.clone()
+        };
+        eprintln!("TEMP: record name stored by create() = {stored_name:?}");
+
+        env.client
+            .delete(
+                "example.com",
+                "_acme-challenge",
+                &Record::Txt("round-trip-token".into()),
+            )
+            .await
+            .unwrap();
+
+        let remaining = env.state.lock().unwrap().records[&zone_id].clone();
+        eprintln!(
+            "TEMP: records remaining after delete() = {:?}",
+            remaining.iter().map(|r| &r.name).collect::<Vec<_>>()
+        );
+        assert!(
+            remaining.is_empty(),
+            "record was NOT deleted using the real caller's argument shape: {:?}",
+            remaining.iter().map(|r| &r.name).collect::<Vec<_>>()
+        );
     }
 }
