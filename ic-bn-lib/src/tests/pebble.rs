@@ -28,7 +28,7 @@ use crate::{
     tests::{TEST_CERT_1, TEST_KEY_1},
 };
 
-const VER: &str = "2.8.0";
+const VER: &str = "2.10.1";
 const PEBBLE_KEY: &str = "pebble-key.pem";
 const PEBBLE_CERT: &str = "pebble-cert.pem";
 
@@ -66,21 +66,21 @@ pub async fn download(path: &Path) -> Result<(), Error> {
             "linux": {
                 "x86_64": {
                     "url": format!("https://github.com/letsencrypt/pebble/releases/download/v{VER}/pebble-linux-amd64.tar.gz"),
-                    "sha": "34595d915bbc2fc827affb3f58593034824df57e95353b031c8d5185724485ce",
+                    "sha": "4f2fcb5bca8c85c9cf73ad140fccfc0d2be40bd81ab99879c79b7b8a0b4f70ed",
                 },
                 "aarch64": {
                     "url": format!("https://github.com/letsencrypt/pebble/releases/download/v{VER}/pebble-linux-arm64.tar.gz"),
-                    "sha": "0e70f2537353f61cbf06aa54740bf7f7bb5f963ba00e909f23af5f85bc13fd1a",
+                    "sha": "b53fd072a69eb7692451de4e8b0667e0bdf5cccd7e36fc51b8eaf2fcc135ed9f",
                 }
             },
             "macos": {
                 "x86_64": {
                     "url": format!("https://github.com/letsencrypt/pebble/releases/download/v{VER}/pebble-darwin-amd64.tar.gz"),
-                    "sha": "9b9625651f8ce47706235179503fec149f8f38bce2b2554efe8c0f2a021f877c",
+                    "sha": "e670ff869886022637e077502a62e7f23be693c45a5a6727ebd76da8fdce64dc",
                 },
                 "aarch64": {
                     "url": format!("https://github.com/letsencrypt/pebble/releases/download/v{VER}/pebble-darwin-arm64.tar.gz"),
-                    "sha": "39e07d63dc776521f2ffe0584e5f4f081c984ac02742c882b430891d89f0c866",
+                    "sha": "09a3a4e6ebed71e8d83294a26d361232262f45a7488f5de7bccb5887b395217f",
                 }
             }
         },
@@ -88,21 +88,21 @@ pub async fn download(path: &Path) -> Result<(), Error> {
             "linux": {
                 "x86_64": {
                     "url": format!("https://github.com/letsencrypt/pebble/releases/download/v{VER}/pebble-challtestsrv-linux-amd64.tar.gz"),
-                    "sha": "a817449d1f05ae58bcb7bf073b4cebe5d31512f859ba4b83951bd825d28d2114",
+                    "sha": "e93a5aa25ecdf3af2f9fbb2de32b0173e64a2eae81002a4ccfe35fa6f4f60b92",
                 },
                 "aarch64": {
                     "url": format!("https://github.com/letsencrypt/pebble/releases/download/v{VER}/pebble-challtestsrv-linux-arm64.tar.gz"),
-                    "sha": "99a276aac8ceac121859b799708218e6dc57d7ca1dc1b8b5b586246b3c4160e6",
+                    "sha": "db8e1a79ccdb2195c489fbe4f40fddb7f30e86f9cd8a07912566ee5025094d6c",
                 }
             },
             "macos": {
-                "aarch64": {
+                "x86_64": {
                     "url": format!("https://github.com/letsencrypt/pebble/releases/download/v{VER}/pebble-challtestsrv-darwin-amd64.tar.gz"),
-                    "sha": "3d1343b1bbe892145fd2da70be36e67b149e482fbff897e109b8053f4f790f40",
+                    "sha": "796bd923f2c595dd7bf15ae693096abfb1df962cb3673c7981ff306daa5c4a52",
                 },
                 "aarch64": {
                     "url": format!("https://github.com/letsencrypt/pebble/releases/download/v{VER}/pebble-challtestsrv-darwin-arm64.tar.gz"),
-                    "sha": "1bc5a6cfa062d9756e98d67825daf67f61dd655bcb6025efca2138fe836c9bbc",
+                    "sha": "59bf917fe39c96e2edca980fc2899f4f04aa1ce5485f28d419d18237b902cf82",
                 }
             }
         }
@@ -233,7 +233,7 @@ impl Dns {
         let mut cmd = Command::new(&opts.path);
         cmd.arg("-management");
         cmd.arg(format!("{}:{}", opts.ip, opts.port_man));
-        cmd.arg("-dns01");
+        cmd.arg("-dnsserver");
         cmd.arg(format!("{}:{}", opts.ip, opts.port_dns));
         // Disable the rest
         cmd.arg("-doh");
