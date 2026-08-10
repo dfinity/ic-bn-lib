@@ -22,7 +22,7 @@ use url::Url;
 #[async_trait]
 pub trait TokenManager: Sync + Send {
     async fn set(&self, id: &str, token: &str) -> Result<(), anyhow::Error>;
-    async fn unset(&self, id: &str) -> Result<(), anyhow::Error>;
+    async fn unset(&self, id: &str, token: &str) -> Result<(), anyhow::Error>;
     async fn verify(&self, id: &str, token: &str) -> Result<(), anyhow::Error>;
 }
 
@@ -40,7 +40,7 @@ impl TokenManager for TokenManagerNoop {
         Ok(())
     }
 
-    async fn unset(&self, _zone: &str) -> Result<(), anyhow::Error> {
+    async fn unset(&self, _zone: &str, _token: &str) -> Result<(), anyhow::Error> {
         Ok(())
     }
 }
@@ -150,8 +150,8 @@ pub enum Error {
     UnexpectedOrderStatus(OrderStatus),
     #[error("Unable to set challenge token: {0}")]
     UnableToSetChallengeToken(anyhow::Error),
-    #[error("Unable to unset challenge token: {0}")]
-    UnableToUnsetChallengeToken(anyhow::Error),
+    #[error("Unable to unset challenge token: {0:?}")]
+    UnableToUnsetChallengeToken(Vec<anyhow::Error>),
     #[error("Unable to verify challenge token: {0}")]
     UnableToVerifyChallengeToken(anyhow::Error),
     #[error("Unable to create order: {0}")]

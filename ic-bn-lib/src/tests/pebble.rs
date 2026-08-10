@@ -468,7 +468,8 @@ pub mod dns {
             Ok(())
         }
 
-        async fn unset(&self, zone: &str) -> Result<(), Error> {
+        /// pebble-challtestsrv doesn't allow to delete specific TXT record, so we nuke them all
+        async fn unset(&self, zone: &str, _token: &str) -> Result<(), Error> {
             let url = self.url.join("/clear-txt").unwrap();
             let body = json!({
                 "host" : format!("_acme-challenge.{zone}."),
@@ -498,8 +499,8 @@ pub mod dns {
             self.set(zone, &token).await
         }
 
-        async fn delete(&self, zone: &str, _name: &str) -> Result<(), Error> {
-            self.unset(zone).await
+        async fn delete(&self, zone: &str, _name: &str, _record: &Record) -> Result<(), Error> {
+            self.unset(zone, "").await
         }
     }
 
@@ -530,7 +531,7 @@ pub mod dns {
             assert_eq!(r[0].record_type(), RecordType::TXT);
             assert_eq!(r[0].data.to_string(), "bar");
 
-            tm.unset("foo").await.unwrap();
+            tm.unset("foo", "").await.unwrap();
             let r = resolver
                 .resolve(RecordType::TXT, "_acme-challenge.foo")
                 .await;
@@ -548,7 +549,7 @@ pub mod dns {
                 assert_eq!(r[0].record_type(), RecordType::TXT);
                 assert_eq!(r[0].data.to_string(), "deadbeef");
 
-                tm.unset("baz").await.unwrap();
+                tm.unset("baz", "").await.unwrap();
                 let r = resolver
                     .resolve(RecordType::TXT, "_acme-challenge.baz")
                     .await;

@@ -43,6 +43,7 @@ pub struct DnsRecord {
     name: String,
     #[serde(rename = "type")]
     record_type: String,
+    content: String,
 }
 
 #[derive(Serialize)]
@@ -198,7 +199,7 @@ impl DnsManager for Cloudflare {
     }
 
     /// DELETE /client/v4/zones/<zone_id>/dns_records/<record_id>  (once per match)
-    async fn delete(&self, zone: &str, name: &str) -> Result<(), Error> {
+    async fn delete(&self, zone: &str, name: &str, target_record: &Record) -> Result<(), Error> {
         let zone_id = self
             .find_zone(zone)
             .await
@@ -211,11 +212,19 @@ impl DnsManager for Cloudflare {
             .await
             .context("unable to find records")?;
 
-        for record in records
-            .into_iter()
-            .filter(|r| r.record_type.eq_ignore_ascii_case("TXT"))
-        {
-            debug!("Cloudflare: deleting record {} in zone {zone}", record.name);
+        for record in records.into_iter() {
+            match target_record {
+                Record::Txt(v) => {
+                    if !record.record_type.eq_ignore_ascii_case("TXT") || &record.content != v {
+                        continue;
+                    }
+                }
+            }
+
+            debug!(
+                "Cloudflare: deleting record {} ({}) in zone {zone}",
+                record.name, record.content
+            );
 
             let url = self
                 .base_url

@@ -57,7 +57,7 @@ pub trait DnsManager: Sync + Send {
         ttl: u32,
     ) -> Result<(), anyhow::Error>;
 
-    async fn delete(&self, zone: &str, name: &str) -> Result<(), anyhow::Error>;
+    async fn delete(&self, zone: &str, name: &str, record: &Record) -> Result<(), anyhow::Error>;
 }
 
 /// Manages ACME tokens using DNS.
@@ -127,9 +127,13 @@ impl TokenManager for TokenManagerDns {
             .await
     }
 
-    async fn unset(&self, zone: &str) -> Result<(), Error> {
+    async fn unset(&self, zone: &str, token: &str) -> Result<(), Error> {
         self.manager
-            .delete(&self.pick_zone(zone), &self.pick_record(zone))
+            .delete(
+                &self.pick_zone(zone),
+                &self.pick_record(zone),
+                &Record::Txt(token.into()),
+            )
             .await
     }
 }
