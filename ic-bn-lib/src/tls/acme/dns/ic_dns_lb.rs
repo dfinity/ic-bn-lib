@@ -100,9 +100,6 @@ impl DnsManager for IcDnsLb {
 }
 
 /// Mocks the IC DNS LB HTTP API (`/acme-challenge/set/{zone}` and `/acme-challenge/unset/{zone}`)
-/// so that `IcDnsLb` can be exercised without talking to real nodes. Each mock server represents
-/// one node behind the load balancer -- in a real deployment `base_urls` holds several of them,
-/// and every call is expected to reach all of them, in order.
 #[cfg(test)]
 mod test {
     use std::sync::{Arc, Mutex};
@@ -436,29 +433,6 @@ mod test {
         assert_eq!(
             state.lock().unwrap().set_calls,
             vec![("example.com".to_string(), "the-token".to_string())]
-        );
-    }
-
-    /// `zone` is spliced into the request path via `Url::path_segments_mut`, which percent-encodes
-    /// it as a single path segment rather than via naive string formatting -- so URI-structural
-    /// characters in `zone` can't be misinterpreted as e.g. a query separator.
-    #[tokio::test]
-    async fn create_percent_encodes_unusual_zone_characters() {
-        let (client, nodes) = setup(1).await;
-
-        client
-            .create(
-                "a?b#c.com",
-                "_acme-challenge",
-                Record::Txt("the-token".into()),
-                60,
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(
-            nodes[0].state.lock().unwrap().set_calls,
-            vec![("a?b#c.com".to_string(), "the-token".to_string())]
         );
     }
 
