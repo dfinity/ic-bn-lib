@@ -15,6 +15,19 @@ pub struct IcDnsLb {
 impl IcDnsLb {
     /// Create a new IC-DNS-LB API client with a default HTTP client
     pub fn new(base_urls: Vec<Url>, token: String) -> Result<Self, Error> {
+        let client = Client::builder()
+            .build()
+            .context("failed to initialize HTTP client")?;
+
+        Self::new_with_http_client(base_urls, client, token)
+    }
+
+    /// Create a new IC-DNS-LB API client with a provided HTTP client
+    pub fn new_with_http_client(
+        base_urls: Vec<Url>,
+        client: Client,
+        token: String,
+    ) -> Result<Self, Error> {
         if base_urls.is_empty() {
             bail!("At least one URL must be specified");
         }
@@ -25,20 +38,11 @@ impl IcDnsLb {
             }
         }
 
-        let client = Client::builder()
-            .build()
-            .context("failed to initialize HTTP client")?;
-
-        Ok(Self::new_with_http_client(base_urls, client, token))
-    }
-
-    /// Create a new IC-DNS-LB API client with a provided HTTP client
-    pub const fn new_with_http_client(base_urls: Vec<Url>, client: Client, token: String) -> Self {
-        Self {
+        Ok(Self {
             client,
             base_urls,
             token,
-        }
+        })
     }
 
     /// Sends a POST request
@@ -222,7 +226,7 @@ mod test {
     }
 
     fn client_with_token(base_urls: Vec<Url>, token: &str) -> IcDnsLb {
-        IcDnsLb::new_with_http_client(base_urls, insecure_http_client(), token.to_string())
+        IcDnsLb::new_with_http_client(base_urls, insecure_http_client(), token.to_string()).unwrap()
     }
 
     /// Boots `n` independent mock IC DNS LB nodes and a matching `IcDnsLb` client pointed at

@@ -80,24 +80,28 @@ pub struct Cloudflare {
 impl Cloudflare {
     /// Create a new Cloudflare client with a default HTTP client
     pub fn new(base_url: Url, token: String) -> Result<Self, Error> {
-        if base_url.cannot_be_a_base() {
-            bail!("Invalid URL (cannot be a base)");
-        }
-
         let client = Client::builder()
             .build()
             .context("failed to initialize HTTP client")?;
 
-        Ok(Self::new_with_http_client(base_url, token, client))
+        Self::new_with_http_client(base_url, token, client)
     }
 
     /// Create a new Cloudflare client with a provided HTTP client
-    pub const fn new_with_http_client(base_url: Url, token: String, client: Client) -> Self {
-        Self {
+    pub fn new_with_http_client(
+        base_url: Url,
+        token: String,
+        client: Client,
+    ) -> Result<Self, Error> {
+        if base_url.cannot_be_a_base() {
+            bail!("Invalid URL (cannot be a base)");
+        }
+
+        Ok(Self {
             client,
             base_url,
             token,
-        }
+        })
     }
 
     /// GET /client/v4/zones?name=<zone>
@@ -682,6 +686,7 @@ mod test {
 
     fn client_with_token(base_url: Url, token: &str) -> Cloudflare {
         Cloudflare::new_with_http_client(base_url, token.to_string(), insecure_http_client())
+            .unwrap()
     }
 
     #[tokio::test]
