@@ -1,5 +1,8 @@
-use anyhow::{Context, Error, bail};
+use std::time::Duration;
+
+use anyhow::{Context, Error, anyhow, bail};
 use async_trait::async_trait;
+use http::StatusCode;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -47,17 +50,45 @@ impl IcDnsLb {
 
     /// Sends a POST request
     async fn post(&self, url: Url, req: AcmeChallengeRequest) -> Result<(), Error> {
-        self.client
-            .post(url)
-            .bearer_auth(&self.token)
-            .json(&req)
-            .send()
-            .await
-            .context("unable to send request")?
-            .error_for_status()
-            .context("bad HTTP status code")?;
+        let call = async || -> Result<StatusCode, Error> {
+            Ok(self
+                .client
+                .post(url.clone())
+                .bearer_auth(&self.token)
+                .json(&req)
+                .send()
+                .await
+                .context("unable to send request")?
+                .status())
+        };
 
-        Ok(())
+        // The calls are idempotent - do a few retries
+        let mut last_error = None;
+        for i in 0..5 {
+            match call().await {
+                Ok(v) => {
+                    if !v.is_success() {
+                        last_error = Some(anyhow!("bad HTTP status code: {v}"));
+
+                        // Do not retry when it's not a server error
+                        if !v.is_server_error() {
+                            return Err(last_error.unwrap());
+                        }
+                    } else {
+                        return Ok(());
+                    }
+                }
+
+                Err(e) => {
+                    last_error = Some(e);
+                }
+            }
+
+            // Back off exponentially
+            tokio::time::sleep(Duration::from_millis(250) * i).await;
+        }
+
+        Err(last_error.unwrap())
     }
 }
 
@@ -291,7 +322,7 @@ mod test {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn create_errors_when_a_node_returns_bad_status() {
         let (client, nodes) = setup(1).await;
         nodes[0].state.lock().unwrap().fail_set = true;
@@ -308,7 +339,7 @@ mod test {
         assert!(err.to_string().contains("bad HTTP status code"), "{err}");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn delete_errors_when_a_node_returns_bad_status() {
         let (client, nodes) = setup(1).await;
         nodes[0].state.lock().unwrap().fail_unset = true;
@@ -324,7 +355,7 @@ mod test {
         assert!(err.to_string().contains("bad HTTP status code"), "{err}");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn create_stops_at_first_failing_node_and_does_not_contact_the_rest() {
         let (client, nodes) = setup(2).await;
         nodes[0].state.lock().unwrap().fail_set = true;
@@ -339,7 +370,7 @@ mod test {
             .await
             .unwrap_err();
 
-        assert_eq!(nodes[0].state.lock().unwrap().requests_received, 1);
+        assert_eq!(nodes[0].state.lock().unwrap().requests_received, 5);
         assert_eq!(
             nodes[1].state.lock().unwrap().requests_received,
             0,
@@ -347,7 +378,7 @@ mod test {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn delete_contacts_all_nodes_even_if_one_fails() {
         let (client, nodes) = setup(2).await;
         nodes[0].state.lock().unwrap().fail_unset = true;
@@ -361,11 +392,11 @@ mod test {
             .await
             .unwrap_err();
 
-        assert_eq!(nodes[0].state.lock().unwrap().requests_received, 1);
+        assert_eq!(nodes[0].state.lock().unwrap().requests_received, 5);
         assert_eq!(nodes[1].state.lock().unwrap().requests_received, 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn create_errors_when_a_node_is_unreachable() {
         install_crypto_provider();
 
