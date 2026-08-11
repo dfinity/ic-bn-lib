@@ -11,8 +11,10 @@ use instant_acme::{
     HttpClient as AcmeHttpClientTrait, Identifier, NewAccount, NewOrder, Order, OrderStatus,
     RetryPolicy, RevocationRequest,
 };
+use itertools::Itertools;
 use rcgen::{CertificateParams, DistinguishedName, KeyPair};
 use rustls::ClientConfig;
+use tokio::sync::Mutex;
 use tracing::{debug, instrument, warn};
 
 use crate::{
@@ -348,9 +350,14 @@ impl Client {
     }
 
     /// Iterates over authorizations in the order and tries to fulfill them.
-    /// Returns the list of IDs that are later used in the cleanup.
     #[instrument(level = "debug", skip_all)]
-    async fn process_authorizations(&self, order: &mut Order) -> Result<(), Error> {
+    #[allow(clippy::significant_drop_tightening)]
+    async fn process_authorizations(
+        &self,
+        order: &mut Order,
+        challenge_tokens: Arc<Mutex<Vec<(String, String)>>>,
+    ) -> Result<(), Error> {
+        let mut challenge_tokens = challenge_tokens.lock().await;
         let mut authorizations = order.authorizations();
 
         while let Some(authz) = authorizations.next().await {
@@ -361,6 +368,7 @@ impl Client {
                 continue;
             };
 
+            challenge_tokens.push((id.clone(), token.clone()));
             self.process_challenge(id, token, challenge).await?;
         }
 
@@ -368,36 +376,25 @@ impl Client {
     }
 
     /// Cleans up the tokens after issuance using authorization IDs
-    #[instrument(level = "debug", skip_all, fields(ids = %auth_ids.join(", ")))]
-    async fn cleanup(&self, auth_ids: &[String]) -> Result<(), Error> {
-        debug!(
-            "Cleaning up the authorization tokens for ids: {}",
-            auth_ids.join(", ")
-        );
+    #[instrument(level = "debug", skip_all, fields(ids = %challenge_tokens.iter().map(|x| &x.0).join(", ")))]
+    async fn cleanup(&self, challenge_tokens: &[(String, String)]) -> Result<(), Error> {
+        debug!("Cleaning up the authorization tokens");
 
-        for id in auth_ids {
-            debug!("Unsetting token for id: '{id}'");
+        let mut errors = vec![];
+        for (id, token) in challenge_tokens {
+            debug!("Unsetting token for '{id}' : {token}");
 
-            self.token_manager
-                .unset(id)
-                .await
-                .map_err(Error::UnableToUnsetChallengeToken)?;
-        }
-
-        Ok(())
-    }
-
-    async fn get_authorization_ids(&self, order: &mut Order) -> Result<Vec<String>, Error> {
-        let mut auth_ids = vec![];
-        let mut identifiers_stream = order.identifiers();
-        while let Some(id) = identifiers_stream.next().await {
-            let id = id.map_err(Error::UnableToGetAuthorizations)?.to_string();
-            if !auth_ids.contains(&id) {
-                auth_ids.push(id.to_string());
+            if let Err(e) = self.token_manager.unset(id, token).await {
+                warn!("Unable to unset token '{token}' for '{id}': {e:#}");
+                errors.push(e);
             }
         }
 
-        Ok(auth_ids)
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::UnableToUnsetChallengeToken(errors))
+        }
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -417,14 +414,13 @@ impl Client {
         // Prepare the order
         let mut order = self.prepare_order(ids).await?;
 
-        // Get auth ids and clean them up
-        let auth_ids = self.get_authorization_ids(&mut order).await?;
-        self.cleanup(&auth_ids).await?;
-
         debug!(
             "Order obtained (status: {:?}), processing authorizations",
             order.state().status
         );
+
+        let challenge_tokens = Arc::new(Mutex::new(vec![]));
+        let challenge_tokens_clone = challenge_tokens.clone();
 
         // From this point on, challenges may get set up (DNS-01 TXT record /
         // ALPN response), so no matter how issuance finishes we must attempt
@@ -434,7 +430,8 @@ impl Client {
         // exact same domain set happens to clean it up first.
         let result: Result<AcmeCert, Error> = async move {
             // Process authorizations and fulfill their challenges
-            self.process_authorizations(&mut order).await?;
+            self.process_authorizations(&mut order, challenge_tokens_clone)
+                .await?;
 
             debug!("Authorizations processed, waiting for the order to reach Ready state");
 
@@ -488,9 +485,11 @@ impl Client {
         }
         .await;
 
-        debug!("Cleaning up the authorization tokens");
-        if let Err(e) = self.cleanup(&auth_ids).await {
-            warn!("Unable to clean up ACME challenge tokens for {auth_ids:?}: {e:#}");
+        debug!("Cleaning up the challenge tokens");
+        let challenge_tokens = challenge_tokens.lock().await.drain(..).collect::<Vec<_>>();
+
+        if let Err(e) = self.cleanup(&challenge_tokens).await {
+            warn!("Unable to clean up ACME challenge tokens: {e:#}");
 
             // Only surface the cleanup error if issuance itself succeeded -
             // otherwise the original error is the more important one and

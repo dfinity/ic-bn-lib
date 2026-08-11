@@ -1,4 +1,5 @@
 pub mod cloudflare;
+pub mod ic_dns_lb;
 
 use std::{
     path::PathBuf,
@@ -57,7 +58,7 @@ pub trait DnsManager: Sync + Send {
         ttl: u32,
     ) -> Result<(), anyhow::Error>;
 
-    async fn delete(&self, zone: &str, name: &str) -> Result<(), anyhow::Error>;
+    async fn delete(&self, zone: &str, name: &str, record: &Record) -> Result<(), anyhow::Error>;
 }
 
 /// Manages ACME tokens using DNS.
@@ -127,9 +128,13 @@ impl TokenManager for TokenManagerDns {
             .await
     }
 
-    async fn unset(&self, zone: &str) -> Result<(), Error> {
+    async fn unset(&self, zone: &str, token: &str) -> Result<(), Error> {
         self.manager
-            .delete(&self.pick_zone(zone), &self.pick_record(zone))
+            .delete(
+                &self.pick_zone(zone),
+                &self.pick_record(zone),
+                &Record::Txt(token.into()),
+            )
             .await
     }
 }
@@ -382,11 +387,73 @@ mod test {
         tls::{acme::client::HttpClient, extract_sans_der},
     };
 
+    /// Test helpers shared across the `dns` module's submodules (e.g. `cloudflare`,
+    /// `ic_dns_lb`) for mocking out DNS provider HTTP APIs.
+    pub mod support {
+        use std::net::SocketAddr;
+
+        use axum::{
+            Router,
+            http::{HeaderMap, header::AUTHORIZATION},
+        };
+        use axum_server::tls_rustls::RustlsConfig;
+        use url::Url;
+
+        use crate::tests::{TEST_CERT_1, TEST_KEY_1};
+
+        /// Installs the process-level rustls `CryptoProvider` required by rustls 0.23+.
+        /// Idempotent, so it's safe to call at the start of every test.
+        pub fn install_crypto_provider() {
+            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        }
+
+        /// Checks an `Authorization` header against an expected bearer token.
+        pub fn check_bearer_auth(headers: &HeaderMap, expected_token: &str) -> bool {
+            headers
+                .get(AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v == format!("Bearer {expected_token}"))
+        }
+
+        /// Builds a `reqwest::Client` that accepts the self-signed test certificate used by
+        /// `spawn_https_mock_server`.
+        pub fn insecure_http_client() -> reqwest::Client {
+            reqwest::Client::builder()
+                .danger_accept_invalid_certs(true)
+                .build()
+                .unwrap()
+        }
+
+        /// Spawns `router` behind HTTPS on a random loopback port using the shared test
+        /// certificate, and returns its base URL.
+        pub async fn spawn_https_mock_server(router: Router) -> Url {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let addr: SocketAddr = listener.local_addr().unwrap();
+
+            let config = RustlsConfig::from_pem(
+                TEST_CERT_1.as_bytes().to_vec(),
+                TEST_KEY_1.as_bytes().to_vec(),
+            )
+            .await
+            .unwrap();
+
+            tokio::spawn(async move {
+                axum_server::from_tcp_rustls(listener, config)
+                    .unwrap()
+                    .serve(router.into_make_service())
+                    .await
+                    .unwrap();
+            });
+
+            format!("https://{addr}/").parse().unwrap()
+        }
+    }
+
     #[ignore]
     #[tokio::test]
     async fn test_acme_dns() {
-        // rustls 0.23+ requires a process-level CryptoProvider to be installed
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        support::install_crypto_provider();
         let pebble_env = Env::new().await;
         let dir = tempdir().unwrap();
 

@@ -127,7 +127,7 @@ zeroize = { workspace = true }
 zstd = { workspace = true }
 
 [dev-dependencies]
-axum-server = { workspace = true }
+axum-server = { workspace = true, features = ["tls-rustls"] }
 criterion = { workspace = true }
 ic-verify-bls-signature = { workspace = true }
 mail-send = { workspace = true }

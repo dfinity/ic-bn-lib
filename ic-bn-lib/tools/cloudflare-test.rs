@@ -31,5 +31,8 @@ async fn main() {
         .await
         .unwrap();
 
-    client.delete(&cli.zone, "_foo_bar").await.unwrap();
+    client
+        .delete(&cli.zone, "_foo_bar", &Record::Txt("blah".into()))
+        .await
+        .unwrap();
 }
