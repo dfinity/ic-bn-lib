@@ -1,4 +1,4 @@
-use anyhow::{Context, Error, anyhow, bail};
+use anyhow::{Context, Error, bail};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,12 @@ impl IcDnsLb {
     pub fn new(base_urls: Vec<Url>, token: String) -> Result<Self, Error> {
         if base_urls.is_empty() {
             bail!("At least one URL must be specified");
+        }
+
+        for url in &base_urls {
+            if url.cannot_be_a_base() {
+                bail!("Invalid URL (cannot be a base)");
+            }
         }
 
         let client = Client::builder()
@@ -73,7 +79,7 @@ impl DnsManager for IcDnsLb {
 
             // Strip trailing slash if exists & add path
             url.path_segments_mut()
-                .map_err(|_| anyhow!("base URL cannot be used as a base for relative paths"))?
+                .unwrap()
                 .pop_if_empty()
                 .extend(["acme-challenge", "set", zone]);
 
@@ -98,10 +104,11 @@ impl DnsManager for IcDnsLb {
             let mut url = url.clone();
 
             // Strip trailing slash if exists & add path
-            url.path_segments_mut()
-                .map_err(|_| anyhow!("base URL cannot be used as a base for relative paths"))?
-                .pop_if_empty()
-                .extend(["acme-challenge", "unset", zone]);
+            url.path_segments_mut().unwrap().pop_if_empty().extend([
+                "acme-challenge",
+                "unset",
+                zone,
+            ]);
 
             if let Err(e) = self
                 .post(

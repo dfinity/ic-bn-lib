@@ -1,4 +1,4 @@
-use anyhow::{Context, Error, anyhow};
+use anyhow::{Context, Error, anyhow, bail};
 use async_trait::async_trait;
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,10 @@ struct ApiResponse<T> {
     success: bool,
     errors: Vec<ApiError>,
     result: T,
+    /// Only present on paginated list endpoints (e.g. list dns_records) -- absent (and thus
+    /// `None`) on zone lookups, creates and deletes.
+    #[serde(default)]
+    result_info: Option<ResultInfo>,
 }
 
 impl<T> ApiResponse<T> {
@@ -23,6 +27,18 @@ impl<T> ApiResponse<T> {
             .collect::<Vec<_>>()
             .join(", ")
     }
+}
+
+/// Pagination metadata returned by Cloudflare's paginated list endpoints, e.g.
+/// `GET /client/v4/zones/<zone_id>/dns_records`.
+#[allow(unused)]
+#[derive(Debug, Deserialize)]
+struct ResultInfo {
+    count: u32,
+    page: u32,
+    per_page: u32,
+    total_count: u32,
+    total_pages: u32,
 }
 
 #[allow(unused)]
@@ -64,6 +80,10 @@ pub struct Cloudflare {
 impl Cloudflare {
     /// Create a new Cloudflare client with a default HTTP client
     pub fn new(base_url: Url, token: String) -> Result<Self, Error> {
+        if base_url.cannot_be_a_base() {
+            bail!("Invalid URL (cannot be a base)");
+        }
+
         let client = Client::builder()
             .build()
             .context("failed to initialize HTTP client")?;
@@ -118,32 +138,78 @@ impl Cloudflare {
             .ok_or_else(|| anyhow!("zone '{zone}' not found"))
     }
 
-    /// GET /client/v4/zones/<zone_id>/dns_records?name=<name>
+    /// GET /client/v4/zones/<zone_id>/dns_records?name=<name>&page=<page>&per_page=<per_page>
+    ///
+    /// This endpoint is paginated, so we page through all results, requesting the largest
+    /// page size allowed by the API each time.
     pub async fn find_records(&self, zone_id: &str, name: &str) -> Result<Vec<DnsRecord>, Error> {
+        /// Documented maximum `per_page` for this endpoint.
+        const MAX_PER_PAGE: u32 = 50;
+
+        /// Defensive upper bound on the number of pages we'll ever fetch
+        const MAX_PAGES: u32 = 100;
+
         let url = self
             .base_url
             .join(&format!("client/v4/zones/{zone_id}/dns_records"))
             .context("failed to build dns_records URL")?;
 
-        let resp: ApiResponse<Vec<DnsRecord>> = self
-            .client
-            .get(url)
-            .bearer_auth(&self.token)
-            .query(&[("name", name)])
-            .send()
-            .await
-            .context("list dns_records request failed")?
-            .error_for_status()
-            .context("list dns_records request returned error status")?
-            .json()
-            .await
-            .context("failed to deserialize dns_records response")?;
+        let mut records = Vec::new();
+        let mut page: u32 = 1;
 
-        if !resp.success {
-            return Err(anyhow!("dns_records API error: {}", resp.join_errors()));
+        loop {
+            let query = [
+                ("name", name.to_string()),
+                ("page", page.to_string()),
+                ("per_page", MAX_PER_PAGE.to_string()),
+            ];
+
+            let resp: ApiResponse<Vec<DnsRecord>> = self
+                .client
+                .get(url.clone())
+                .bearer_auth(&self.token)
+                .query(&query)
+                .send()
+                .await
+                .context("list dns_records request failed")?
+                .error_for_status()
+                .context("list dns_records request returned error status")?
+                .json()
+                .await
+                .context("failed to deserialize dns_records response")?;
+
+            if !resp.success {
+                return Err(anyhow!("dns_records API error: {}", resp.join_errors()));
+            }
+
+            let page_len = resp.result.len() as u32;
+            let result_info = resp.result_info;
+            records.extend(resp.result);
+
+            // Preferred: rely on the server-reported page/total_pages, since Cloudflare
+            // explicitly returns both for this endpoint. Fall back to fetching until an
+            // empty page shows up if result_info is ever missing -- this is what
+            // Cloudflare's own official SDK falls back to as well. We can't use
+            // `page_len < per_page` as a fallback signal here since we don't know what
+            // page size the server actually used without result_info.
+            let last_page = match result_info {
+                Some(info) if info.total_pages > 0 => page >= info.total_pages,
+                _ => page_len == 0,
+            };
+
+            if last_page || page >= MAX_PAGES {
+                break;
+            }
+
+            page += 1;
         }
 
-        Ok(resp.result)
+        debug!(
+            "Cloudflare: found {} dns_records matching '{name}' in zone {zone_id}",
+            records.len()
+        );
+
+        Ok(records)
     }
 }
 
@@ -412,6 +478,11 @@ mod test {
         .into_response()
     }
 
+    /// The mock caps its page size at this many records regardless of what the client asks
+    /// for via `per_page`, purely so that tests can exercise multi-page pagination without
+    /// needing to create huge numbers of fake records.
+    const MOCK_MAX_PAGE_SIZE: usize = 2;
+
     async fn list_dns_records(
         State(state): State<SharedState>,
         Path(zone_id): Path<String>,
@@ -433,9 +504,30 @@ mod test {
         };
 
         let name_filter = params.get("name");
-        let result: Vec<Value> = records
+        let filtered: Vec<&MockRecord> = records
             .iter()
             .filter(|r| name_filter.is_none_or(|n| &r.name == n))
+            .collect();
+        let total_count = filtered.len();
+
+        let requested_per_page: usize = params
+            .get("per_page")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20);
+        let per_page = requested_per_page.clamp(1, MOCK_MAX_PAGE_SIZE);
+
+        let page: usize = params
+            .get("page")
+            .and_then(|v| v.parse().ok())
+            .filter(|&p: &usize| p >= 1)
+            .unwrap_or(1);
+
+        let total_pages = total_count.div_ceil(per_page);
+
+        let result: Vec<Value> = filtered
+            .into_iter()
+            .skip((page - 1) * per_page)
+            .take(per_page)
             .map(|r| {
                 json!({
                     "id": r.id,
@@ -455,7 +547,13 @@ mod test {
             "errors": [],
             "messages": [],
             "result": result,
-            "result_info": {"count": count, "page": 1, "per_page": 20, "total_count": count, "total_pages": 1},
+            "result_info": {
+                "count": count,
+                "page": page,
+                "per_page": per_page,
+                "total_count": total_count,
+                "total_pages": total_pages,
+            },
         }))
         .into_response()
     }
@@ -633,6 +731,43 @@ mod test {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].content, "keep-me");
         assert_eq!(records[0].record_type, "TXT");
+    }
+
+    /// The mock server only serves `MOCK_MAX_PAGE_SIZE` (2) records per page, so 5 matching
+    /// records span 3 pages. This verifies `find_records` actually pages through all of them
+    /// instead of silently returning just the first page.
+    #[tokio::test]
+    async fn find_records_paginates_across_multiple_pages() {
+        let env = setup().await;
+        let zone_id = {
+            let mut state = env.state.lock().unwrap();
+            let zone_id = state.add_zone("example.com");
+            for i in 0..5 {
+                state.add_record(
+                    &zone_id,
+                    "_acme-challenge.example.com",
+                    "TXT",
+                    &format!("token-{i}"),
+                );
+            }
+            // A non-matching record shouldn't leak into the results either.
+            state.add_record(&zone_id, "other.example.com", "TXT", "not-this-one");
+            zone_id
+        };
+
+        let records = env
+            .client
+            .find_records(&zone_id, "_acme-challenge.example.com")
+            .await
+            .unwrap();
+
+        assert_eq!(records.len(), 5);
+        let mut contents: Vec<&str> = records.iter().map(|r| r.content.as_str()).collect();
+        contents.sort_unstable();
+        assert_eq!(
+            contents,
+            vec!["token-0", "token-1", "token-2", "token-3", "token-4"]
+        );
     }
 
     #[tokio::test]
