@@ -41,6 +41,7 @@ pub use hickory_resolver;
 pub use hyper;
 pub use hyper_util;
 pub use ic_agent;
+pub use ic_transport_types;
 #[cfg(feature = "smtp")]
 pub use mail_auth;
 pub use prometheus;

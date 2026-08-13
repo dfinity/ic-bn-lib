@@ -69,6 +69,7 @@ ic-cdk-timers = "1.0"
 ic-custom-domains-canister-api = { version = "0.2", path = "./custom-domains/api" }
 ic-http-types = "0.1.0"
 ic-stable-structures = "0.7.0"
+ic-transport-types = "0.49"
 ic-verify-bls-signature = "0.6"
 ipnet = { version = "2", features = ["serde"] }
 instant-acme = { version = "0.8.5", default-features = false, features = [
@@ -157,7 +158,6 @@ tokio-io-timeout = "1.2.0"
 tokio-test = "0.4"
 tokio-util = { version = "0.7.12", features = ["full"] }
 tower = { version = "0.5.1", features = ["util"] }
-tower_governor = { version = "0.8" }
 tower-service = "0.3.3"
 tower-http = { version = "0.7", features = ["trace"] }
 tracing = { version = "0.1.40", features = ["attributes"] }
