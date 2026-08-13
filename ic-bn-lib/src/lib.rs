@@ -373,6 +373,18 @@ pub fn truncate(s: &str, n: usize) -> &str {
     &s[..m]
 }
 
+/// Best-effort (w/o assembly) constant-time comaprison for byte slices
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -417,5 +429,12 @@ mod test {
             elapsed < timeout + Duration::from_millis(100),
             "retry_async! ran for {elapsed:?}, expected to stay close to the {timeout:?} budget"
         );
+    }
+
+    #[test]
+    fn test_constant_time_eq() {
+        assert!(constant_time_eq(b"foo", b"foo"));
+        assert!(!constant_time_eq(b"foo", b"bar"));
+        assert!(!constant_time_eq(b"foobar", b"bar"));
     }
 }

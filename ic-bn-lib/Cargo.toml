@@ -27,7 +27,11 @@ acme-dns = ["acme"]
 acme-alpn = ["acme", "dep:rustls-acme"]
 clients-hyper = ["dep:hyper-rustls"]
 custom-domains = ["acme-dns"]
-custom-domains-openapi = ["custom-domains", "dep:utoipa", "dep:utoipa-swagger-ui"]
+custom-domains-openapi = [
+    "custom-domains",
+    "dep:utoipa",
+    "dep:utoipa-swagger-ui",
+]
 cert-providers = ["custom-domains"]
 lb = []
 pubsub = []
@@ -70,9 +74,11 @@ ic-agent = { workspace = true }
 ic-custom-domains-canister-api = { workspace = true }
 indoc = { workspace = true }
 instant-acme = { workspace = true, optional = true }
+ipnet = { workspace = true }
 itertools = { workspace = true }
 mail-auth = { workspace = true, optional = true }
 mail-parser = { workspace = true, optional = true }
+maxminddb = { workspace = true }
 moka = { workspace = true }
 nix = { workspace = true }
 parse-size = { workspace = true }

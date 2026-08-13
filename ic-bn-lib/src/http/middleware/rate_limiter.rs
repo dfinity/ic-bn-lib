@@ -18,28 +18,11 @@ use tower_governor::{
     key_extractor::{GlobalKeyExtractor, KeyExtractor},
 };
 
-use crate::{hname, http::middleware::extract_ip_from_request};
+use crate::{constant_time_eq, hname, http::middleware::RemoteAddr};
 
 pub type GovernorLayerAxum<K> = GovernorLayer<K, NoOpMiddleware<QuantaInstant>, Body>;
 
-const BYPASS_HEADER: HeaderName = hname!("x-ratelimit-bypass-token");
-
-/// Constant-time comparison of the bypass header against the configured
-/// token, so that a network timing side-channel can't be used to recover the
-/// token byte-by-byte.
-fn bypass_token_matches(hdr: &HeaderValue, token: &str) -> bool {
-    let a = hdr.as_bytes();
-    let b = token.as_bytes();
-
-    if a.len() != b.len() {
-        return false;
-    }
-
-    a.iter()
-        .zip(b.iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
-}
+const BYPASS_TOKEN_HEADER: HeaderName = hname!("x-ratelimit-bypass-token");
 
 /// Extracts an IP from the request as a rate-limiting key
 #[derive(Clone)]
@@ -49,7 +32,10 @@ impl KeyExtractor for IpKeyExtractor {
     type Key = IpAddr;
 
     fn extract<B>(&self, req: &Request<B>) -> Result<Self::Key, GovernorError> {
-        extract_ip_from_request(req).ok_or(GovernorError::UnableToExtractKey)
+        req.extensions()
+            .get::<RemoteAddr>()
+            .map(|x| x.0)
+            .ok_or(GovernorError::UnableToExtractKey)
     }
 }
 
@@ -80,9 +66,9 @@ where
         // Check that bypass token is configured, header was sent and it matches
         let bypass = request
             .headers()
-            .get(BYPASS_HEADER)
+            .get(BYPASS_TOKEN_HEADER)
             .zip(self.bypass_token.as_ref())
-            .map(|(hdr, token)| bypass_token_matches(hdr, token))
+            .map(|(hdr, token)| constant_time_eq(hdr.as_bytes(), token.as_bytes()))
             == Some(true);
 
         // If bypassing - call the wrapped service directly
@@ -343,25 +329,6 @@ mod test {
         assert_eq!(body, b"Unable to extract rate limiting key");
     }
 
-    #[test]
-    fn test_bypass_token_matches() {
-        let token = "top_secret_token";
-        assert!(bypass_token_matches(
-            &HeaderValue::from_static("top_secret_token"),
-            token
-        ));
-        assert!(!bypass_token_matches(
-            &HeaderValue::from_static("not_very_secret"),
-            token
-        ));
-        // Different length must not match either, and must not panic.
-        assert!(!bypass_token_matches(
-            &HeaderValue::from_static("short"),
-            token
-        ));
-        assert!(!bypass_token_matches(&HeaderValue::from_static(""), token));
-    }
-
     #[tokio::test]
     async fn test_rate_limiter_bypass_token() {
         let rate_limiter_mw = layer(
@@ -401,7 +368,7 @@ mod test {
         for _ in 0..100 {
             let req = Request::builder()
                 .method(Method::POST)
-                .header(BYPASS_HEADER, "top_secret_token")
+                .header(BYPASS_TOKEN_HEADER, "top_secret_token")
                 .body(Body::empty())
                 .unwrap();
             let res = app.call(req).await.unwrap();
@@ -412,7 +379,7 @@ mod test {
         for _ in 0..100 {
             let req = Request::builder()
                 .method(Method::POST)
-                .header(BYPASS_HEADER, "not_very_secret")
+                .header(BYPASS_TOKEN_HEADER, "not_very_secret")
                 .body(Body::empty())
                 .unwrap();
             let res = app.call(req).await.unwrap();

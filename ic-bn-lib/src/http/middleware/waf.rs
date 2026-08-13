@@ -42,7 +42,7 @@ use tracing::warn;
 use url::Url;
 
 use crate::{
-    http::{Error, client::Client, middleware::extract_ip_from_request},
+    http::{Error, client::Client, middleware::RemoteAddr},
     tasks::Run,
 };
 
@@ -380,11 +380,11 @@ impl RateLimitType {
                 // Allow if we fail to extract IP.
                 // It shouldn't happen ever under normal workload
                 // and it's probably better to allow the request in this case.
-                let Some(ip) = extract_ip_from_request(req) else {
+                let Some(ip) = req.extensions().get::<RemoteAddr>() else {
                     return RateLimitDecision::Pass;
                 };
 
-                (v.clock(), v.check_key(&ip))
+                (v.clock(), v.check_key(ip))
             }
         };
 
