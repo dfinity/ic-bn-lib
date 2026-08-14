@@ -265,7 +265,9 @@ impl RequestMatcher {
                 return false;
             };
 
-            return v.is_match(country_code);
+            if !v.is_match(country_code) {
+                return false;
+            }
         }
 
         // Check if any methods match
@@ -836,10 +838,16 @@ impl Run for WafLayer {
 
 #[cfg(test)]
 mod test {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use axum::{Router, body::Body};
     use serde_json::json;
 
-    use crate::{hname, regex};
+    use crate::{
+        hname,
+        http::client::{Client, MockClient},
+        hval, regex,
+    };
 
     use super::*;
 
@@ -870,6 +878,10 @@ mod test {
         assert!(StatusRange::from_str("-500").is_err());
         assert!(StatusRange::from_str("101-600").is_err());
         assert!(StatusRange::from_str("199-100").is_err());
+        // `to` segment present but not a number
+        assert!(StatusRange::from_str("100-abc").is_err());
+        // Equal boundaries should be rejected, not just `to < from`
+        assert!(StatusRange::from_str("300-300").is_err());
 
         let range = StatusRange::from_str("200-499").unwrap();
 
@@ -887,7 +899,20 @@ mod test {
     }
 
     #[test]
-    fn test_request() {
+    fn test_parse_ruleset_formats() {
+        // Valid JSON should parse directly, without needing the YAML fallback
+        let json = json!({ "requests": [] }).to_string();
+        assert!(parse_ruleset(json.as_bytes()).is_ok());
+
+        // Valid YAML is picked up by the fallback
+        assert!(parse_ruleset(b"requests: []\n").is_ok());
+
+        // Invalid as both JSON and YAML representations of a Ruleset
+        assert!(parse_ruleset(b"{not valid as either format").is_err());
+    }
+
+    #[test]
+    fn test_request_matcher_deserialize() {
         let rule = json!({
             "methods": ["GET", "OPTIONS"],
             "headers": [
@@ -926,77 +951,341 @@ mod test {
                 country_code: Some(regex!("^(CH|DE)$")),
             }
         );
+    }
 
-        // Test full matches
-        for cc in ["CH", "DE"] {
-            let req = Request::builder()
-                .header("foo", "barfuss")
-                .header("dead", "beefbeef")
-                .extension(CountryCode(cc.into()))
-                .method(Method::GET)
-                .version(Version::HTTP_2)
-                .uri("https://lala/foo")
-                .body("")
-                .unwrap();
-            assert!(rule.evaluate(&req));
-        }
-
-        for http_ver in [Version::HTTP_09, Version::HTTP_10, Version::HTTP_11] {
-            let req = Request::builder()
-                .header("foo", "barfuss")
-                .header("dead", "beefbeef")
-                .header("host", "lala")
-                .extension(CountryCode("CH".into()))
-                .version(http_ver)
-                .method(Method::OPTIONS)
-                .uri("https://lala/foo")
-                .body("")
-                .unwrap();
-
-            assert!(rule.evaluate(&req));
-        }
+    #[test]
+    fn test_request_matcher_empty() {
+        // A matcher with every field unset matches any request
+        let rule = RequestMatcher {
+            host: None,
+            path: None,
+            methods: None,
+            headers: None,
+            country_code: None,
+        };
 
         let req = Request::builder()
-            .header("dead", "beefbeef")
-            .header("foo", "barfuss")
-            .extension(CountryCode("CH".into()))
+            .method(Method::TRACE)
+            .uri("https://anything.example/whatever")
+            .body("")
+            .unwrap();
+        assert!(rule.evaluate(&req));
+    }
+
+    #[test]
+    fn test_request_matcher_host() {
+        let rule = RequestMatcher {
+            host: Some(regex!("^lala")),
+            path: None,
+            methods: None,
+            headers: None,
+            country_code: None,
+        };
+
+        // HTTP/2+: host comes from the URI authority
+        let req = Request::builder()
             .version(Version::HTTP_2)
-            .method(Method::OPTIONS)
             .uri("https://lala/foo")
             .body("")
             .unwrap();
         assert!(rule.evaluate(&req));
 
-        // Test partial matches (no match)
         let req = Request::builder()
-            .header("foo", "barfuss")
-            .header("dead", "beefbeef")
-            .extension(CountryCode("CH".into()))
-            .method(Method::POST)
-            .uri("https://lala/foo")
+            .version(Version::HTTP_2)
+            .uri("https://other/foo")
             .body("")
             .unwrap();
         assert!(!rule.evaluate(&req));
 
+        // HTTP/1.x: host comes from the `Host` header, not the URI
+        for http_ver in [Version::HTTP_09, Version::HTTP_10, Version::HTTP_11] {
+            let req = Request::builder()
+                .version(http_ver)
+                .header("host", "lala")
+                .uri("https://other/foo")
+                .body("")
+                .unwrap();
+            assert!(rule.evaluate(&req));
+
+            // No Host header -> resolves to an empty string, fails to match
+            let req = Request::builder()
+                .version(http_ver)
+                .uri("https://lala/foo")
+                .body("")
+                .unwrap();
+            assert!(!rule.evaluate(&req));
+        }
+    }
+
+    #[test]
+    fn test_request_matcher_path() {
+        let rule = RequestMatcher {
+            host: None,
+            path: Some(regex!("^/foo")),
+            methods: None,
+            headers: None,
+            country_code: None,
+        };
+
+        let req = Request::builder().uri("https://lala/foo").body("").unwrap();
+        assert!(rule.evaluate(&req));
+
+        let req = Request::builder()
+            .uri("https://lala/foo/bar")
+            .body("")
+            .unwrap();
+        assert!(rule.evaluate(&req));
+
+        let req = Request::builder().uri("https://lala/bar").body("").unwrap();
+        assert!(!rule.evaluate(&req));
+    }
+
+    #[test]
+    fn test_request_matcher_methods() {
+        let rule = RequestMatcher {
+            host: None,
+            path: None,
+            methods: Some(vec![Method::GET, Method::OPTIONS]),
+            headers: None,
+            country_code: None,
+        };
+
+        for m in [Method::GET, Method::OPTIONS] {
+            let req = Request::builder().method(m).body("").unwrap();
+            assert!(rule.evaluate(&req));
+        }
+
+        for m in [Method::POST, Method::DELETE] {
+            let req = Request::builder().method(m).body("").unwrap();
+            assert!(!rule.evaluate(&req));
+        }
+    }
+
+    #[test]
+    fn test_request_matcher_headers() {
+        let rule = RequestMatcher {
+            host: None,
+            path: None,
+            methods: None,
+            headers: Some(vec![
+                HeaderMatcher {
+                    name: hname!("foo"),
+                    regex: regex!("^bar.*$"),
+                },
+                HeaderMatcher {
+                    name: hname!("dead"),
+                    regex: regex!("^beef.*$"),
+                },
+            ]),
+            country_code: None,
+        };
+
+        // All header rules match
         let req = Request::builder()
             .header("foo", "barfuss")
             .header("dead", "beefbeef")
-            .extension(CountryCode("CH".into()))
+            .body("")
+            .unwrap();
+        assert!(rule.evaluate(&req));
+
+        // One header value fails its regex
+        let req = Request::builder()
+            .header("foo", "nope")
+            .header("dead", "beefbeef")
+            .body("")
+            .unwrap();
+        assert!(!rule.evaluate(&req));
+
+        // One required header is missing entirely
+        let req = Request::builder()
+            .header("foo", "barfuss")
+            .body("")
+            .unwrap();
+        assert!(!rule.evaluate(&req));
+    }
+
+    #[test]
+    fn test_request_matcher_country_code() {
+        let rule = RequestMatcher {
+            host: None,
+            path: None,
+            methods: Some(vec![Method::GET]),
+            headers: Some(vec![HeaderMatcher {
+                name: hname!("foo"),
+                regex: regex!("^bar$"),
+            }]),
+            country_code: Some(regex!("^(CH|DE)$")),
+        };
+
+        let build = |cc: &str, method: Method, header: &str| {
+            Request::builder()
+                .method(method)
+                .header("foo", header)
+                .extension(CountryCode(cc.into()))
+                .body("")
+                .unwrap()
+        };
+
+        // Every field matches
+        assert!(rule.evaluate(&build("CH", Method::GET, "bar")));
+
+        assert!(!rule.evaluate(&build("CH", Method::POST, "bar")));
+        assert!(!rule.evaluate(&build("CH", Method::GET, "nope")));
+
+        // Extension present but doesn't match the regex, even though
+        // methods/headers would otherwise pass
+        assert!(!rule.evaluate(&build("US", Method::GET, "bar")));
+
+        // No CountryCode extension at all
+        let req = Request::builder()
             .method(Method::GET)
-            .uri("https://lala/bar")
+            .header("foo", "bar")
             .body("")
             .unwrap();
         assert!(!rule.evaluate(&req));
+    }
+
+    #[test]
+    fn test_request_matcher_full_match() {
+        let rule = RequestMatcher {
+            host: Some(regex!("^lala")),
+            path: Some(regex!("^/foo")),
+            methods: Some(vec![Method::GET, Method::OPTIONS]),
+            headers: Some(vec![
+                HeaderMatcher {
+                    name: hname!("foo"),
+                    regex: regex!("^bar.*$"),
+                },
+                HeaderMatcher {
+                    name: hname!("dead"),
+                    regex: regex!("^beef.*$"),
+                },
+            ]),
+            country_code: Some(regex!("^(CH|DE)$")),
+        };
+
+        let build = |method: Method, uri: &str| {
+            Request::builder()
+                .version(Version::HTTP_2)
+                .method(method)
+                .uri(uri)
+                .header("foo", "barfuss")
+                .header("dead", "beefbeef")
+                .extension(CountryCode("CH".into()))
+                .body("")
+                .unwrap()
+        };
+
+        assert!(rule.evaluate(&build(Method::GET, "https://lala/foo")));
+        assert!(rule.evaluate(&build(Method::OPTIONS, "https://lala/foo")));
+
+        // Each field, perturbed individually, should fail the match
+        assert!(!rule.evaluate(&build(Method::POST, "https://lala/foo")));
+        assert!(!rule.evaluate(&build(Method::GET, "https://other/foo")));
+        assert!(!rule.evaluate(&build(Method::GET, "https://lala/bar")));
 
         let req = Request::builder()
+            .version(Version::HTTP_2)
+            .method(Method::GET)
+            .uri("https://lala/foo")
             .header("fox", "barfuss")
             .header("dead", "beefbeef")
             .extension(CountryCode("CH".into()))
-            .method(Method::GET)
-            .uri("https://lala/foo")
             .body("")
             .unwrap();
         assert!(!rule.evaluate(&req));
+
+        let mut req = build(Method::GET, "https://lala/foo");
+        req.extensions_mut().insert(CountryCode("US".into()));
+        assert!(!rule.evaluate(&req));
+    }
+
+    #[test]
+    fn test_header_matcher() {
+        let m = HeaderMatcher {
+            name: hname!("foo"),
+            regex: regex!("^bar"),
+        };
+
+        // Matching name and value
+        assert!(m.evaluate(&hname!("foo"), &hval!("barfuss")));
+
+        // Name mismatch -- the value alone would satisfy the regex
+        assert!(!m.evaluate(&hname!("baz"), &hval!("bar")));
+
+        // Value fails to_str() (invalid UTF-8), even with a permissive regex
+        let permissive = HeaderMatcher {
+            name: hname!("foo"),
+            regex: regex!(".*"),
+        };
+        let bad_value = HeaderValue::from_bytes(&[0xff, 0xfe]).unwrap();
+        assert!(!permissive.evaluate(&hname!("foo"), &bad_value));
+
+        // evaluate_headermap finds a match anywhere in the map
+        let mut map = HeaderMap::new();
+        map.insert(hname!("other"), hval!("irrelevant"));
+        map.insert(hname!("foo"), hval!("barfuss"));
+        assert!(m.evaluate_headermap(&map));
+
+        map.remove(hname!("foo"));
+        assert!(!m.evaluate_headermap(&map));
+    }
+
+    #[test]
+    fn test_header_matcher_ord() {
+        let mut v = [
+            HeaderMatcher {
+                name: hname!("zzz"),
+                regex: regex!(".*"),
+            },
+            HeaderMatcher {
+                name: hname!("aaa"),
+                regex: regex!(".*"),
+            },
+            HeaderMatcher {
+                name: hname!("mmm"),
+                regex: regex!(".*"),
+            },
+        ];
+        v.sort();
+        let names: Vec<_> = v.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(names, vec!["aaa", "mmm", "zzz"]);
+
+        // RequestMatcher equality sorts headers before comparing, so
+        // differing input order shouldn't affect equality.
+        let a = RequestMatcher {
+            host: None,
+            path: None,
+            methods: None,
+            headers: Some(vec![
+                HeaderMatcher {
+                    name: hname!("foo"),
+                    regex: regex!("^bar.*$"),
+                },
+                HeaderMatcher {
+                    name: hname!("dead"),
+                    regex: regex!("^beef.*$"),
+                },
+            ]),
+            country_code: None,
+        };
+        let b = RequestMatcher {
+            host: None,
+            path: None,
+            methods: None,
+            headers: Some(vec![
+                HeaderMatcher {
+                    name: hname!("dead"),
+                    regex: regex!("^beef.*$"),
+                },
+                HeaderMatcher {
+                    name: hname!("foo"),
+                    regex: regex!("^bar.*$"),
+                },
+            ]),
+            country_code: None,
+        };
+        assert_eq!(a, b);
     }
 
     #[test]
@@ -1027,12 +1316,12 @@ mod test {
                 ]),
                 headers: Some(vec![
                     HeaderMatcher {
-                        name: HeaderName::from_static("foo"),
-                        regex: Regex::from_str("^bar.*$").unwrap(),
+                        name: hname!("foo"),
+                        regex: regex!("^bar.*$"),
                     },
                     HeaderMatcher {
-                        name: HeaderName::from_static("dead"),
-                        regex: Regex::from_str("^beef.*$").unwrap(),
+                        name: hname!("dead"),
+                        regex: regex!("^beef.*$"),
                     }
                 ]),
             }
@@ -1090,6 +1379,53 @@ mod test {
     }
 
     #[test]
+    fn test_response_matcher_empty() {
+        // A matcher with every field unset matches any response
+        let rule = ResponseMatcher {
+            status: None,
+            headers: None,
+        };
+
+        let resp = Response::builder().status(200).body("").unwrap();
+        assert!(rule.evaluate(&resp));
+
+        let resp = Response::builder()
+            .status(500)
+            .header("x", "y")
+            .body("")
+            .unwrap();
+        assert!(rule.evaluate(&resp));
+    }
+
+    #[test]
+    fn test_response_matcher_headers_only() {
+        // status: None means the status check is skipped entirely
+        let rule = ResponseMatcher {
+            status: None,
+            headers: Some(vec![HeaderMatcher {
+                name: hname!("foo"),
+                regex: regex!("^bar.*$"),
+            }]),
+        };
+
+        for status in [StatusCode::OK, StatusCode::INTERNAL_SERVER_ERROR] {
+            let resp = Response::builder()
+                .status(status)
+                .header("foo", "barfuss")
+                .body("")
+                .unwrap();
+            assert!(rule.evaluate(&resp));
+
+            let resp = Response::builder()
+                .status(status)
+                .header("foo", "nope")
+                .body("")
+                .unwrap();
+            assert!(!rule.evaluate(&resp));
+        }
+    }
+
+    #[test]
     fn test_request_action() {
         assert_eq!(
             RequestAction::from_str("pass").unwrap(),
@@ -1135,16 +1471,9 @@ mod test {
 
         assert!(RequestAction::from_str("limit").is_err());
         assert!(RequestAction::from_str("limit:").is_err());
+        // Propagates errors from RateLimitType::from_str -- see
+        // test_rate_limit_type_from_str for its detailed error branches.
         assert!(RequestAction::from_str("limit:foo").is_err());
-        assert!(RequestAction::from_str("limit:0/1s").is_err());
-        assert!(RequestAction::from_str("limit:1/0s").is_err());
-        assert!(RequestAction::from_str("limit:1/foo").is_err());
-
-        // Rate high enough that `dur / rate` truncates to zero should be a parse
-        // error, not a panic (dur/rate used to be passed unchecked into
-        // `Quota::with_period(..).unwrap()`, which panics on a zero duration).
-        assert!(RequestAction::from_str("limit:global:2000000000/1s").is_err());
-        assert!(RequestAction::from_str("limit:per_ip:2000000000/1s").is_err());
     }
 
     #[test]
@@ -1170,49 +1499,184 @@ mod test {
     }
 
     #[test]
-    fn test_ruleset() {
-        let ruleset = json!({
-            "requests": [
-            {
-                "match": {
-                    "methods": ["GET", "POST"],
-                    "host": "^foo",
-                    "path": "^/bar"
-                },
-                "action": "limit:global:10/1h",
-            }]
-        })
-        .to_string();
-        let ruleset: Ruleset = serde_json::from_str(&ruleset).unwrap();
+    fn test_rate_limit_type_from_str() {
+        assert!(RateLimitType::from_str("global:10/1m").is_ok());
+        assert!(RateLimitType::from_str("per_ip:10/1m").is_ok());
+
+        // Missing ':' for the 'type:rate' format
+        assert!(RateLimitType::from_str("10/1m").is_err());
+        // Missing '/' for the 'rate/duration' format
+        assert!(RateLimitType::from_str("global:10").is_err());
+        // Rate fails to parse as u32
+        assert!(RateLimitType::from_str("global:foo/1m").is_err());
+        assert!(RateLimitType::from_str("global:99999999999/1m").is_err());
+        // Duration fails to parse
+        assert!(RateLimitType::from_str("global:10/foo").is_err());
+        // Rate must be > 0
+        assert!(RateLimitType::from_str("global:0/1s").is_err());
+        assert!(RateLimitType::from_str("per_ip:0/1s").is_err());
+        // Duration cannot be zero
+        assert!(RateLimitType::from_str("global:10/0s").is_err());
+        assert!(RateLimitType::from_str("per_ip:10/0s").is_err());
+        // Unknown limiter type
+        assert!(RateLimitType::from_str("bogus:10/1m").is_err());
+
+        // Rate high enough that `dur / rate` truncates to zero should be a
+        // parse error, not a panic (dur/rate used to be passed unchecked
+        // into `Quota::with_period(..).unwrap()`, which panics on a zero
+        // duration).
+        assert!(RateLimitType::from_str("global:2000000000/1s").is_err());
+        assert!(RateLimitType::from_str("per_ip:2000000000/1s").is_err());
+    }
+
+    #[test]
+    fn test_rate_limit_type_eq() {
+        let a = RateLimitType::from_str("global:10/1m").unwrap();
+        let b = RateLimitType::from_str("global:10/1m").unwrap();
+        let c = RateLimitType::from_str("global:20/1m").unwrap();
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+
+        let d = RateLimitType::from_str("per_ip:10/1m").unwrap();
+        let e = RateLimitType::from_str("per_ip:10/1m").unwrap();
+        let f = RateLimitType::from_str("per_ip:20/1m").unwrap();
+        assert_eq!(d, e);
+        assert_ne!(d, f);
+
+        // Different variants are never equal, regardless of quota
+        assert_ne!(a, d);
+    }
+
+    #[test]
+    fn test_rate_limit_type_allowed_global() {
+        let rl = RateLimitType::from_str("global:2/1h").unwrap();
+        let req = Request::builder().body(()).unwrap();
+
+        assert_eq!(rl.allowed(&req), RateLimitDecision::Pass);
+        assert_eq!(rl.allowed(&req), RateLimitDecision::Pass);
+        assert!(matches!(rl.allowed(&req), RateLimitDecision::Throttle(_)));
+    }
+
+    #[test]
+    fn test_rate_limit_type_allowed_per_ip() {
+        let rl = RateLimitType::from_str("per_ip:1/1h").unwrap();
+
+        // No RemoteAddr extension at all -> defensive Pass, regardless of
+        // how many requests come through.
+        let req_no_addr = Request::builder().body(()).unwrap();
+        for _ in 0..10 {
+            assert_eq!(rl.allowed(&req_no_addr), RateLimitDecision::Pass);
+        }
+
+        // Per-IP quota: first request for an IP passes, the next throttles
+        let mut req_a = Request::builder().body(()).unwrap();
+        req_a
+            .extensions_mut()
+            .insert(RemoteAddr(IpAddr::from_str("1.2.3.4").unwrap()));
+        assert_eq!(rl.allowed(&req_a), RateLimitDecision::Pass);
+        assert!(matches!(rl.allowed(&req_a), RateLimitDecision::Throttle(_)));
+
+        // A different IP has an independent quota
+        let mut req_b = Request::builder().body(()).unwrap();
+        req_b
+            .extensions_mut()
+            .insert(RemoteAddr(IpAddr::from_str("5.6.7.8").unwrap()));
+        assert_eq!(rl.allowed(&req_b), RateLimitDecision::Pass);
+    }
+
+    #[test]
+    fn test_ruleset_is_empty() {
+        let ruleset: Ruleset = serde_json::from_str(
+            &json!({
+                "requests": [
+                { "match": { "methods": ["GET"] }, "action": "block:403" }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
         assert!(!ruleset.is_empty());
 
-        let ruleset = json!({
-            "responses": [
-            {
-                "match_req": {
-                    "methods": ["OPTIONS"],
-                },
-                "match_resp": {
-                    "status": ["100-200", "400-499", "599"],
-                },
-                "action": "block:499",
-            }]
-        })
-        .to_string();
-        let ruleset: Ruleset = serde_json::from_str(&ruleset).unwrap();
+        let ruleset: Ruleset = serde_json::from_str(
+            &json!({
+                "responses": [
+                { "match_resp": { "status": ["500"] }, "action": "block:403" }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
         assert!(!ruleset.is_empty());
 
-        let ruleset = json!({
-            "requests": [],
-            "responses": [],
-        })
-        .to_string();
-        let ruleset: Ruleset = serde_json::from_str(&ruleset).unwrap();
+        // Both fields present but empty
+        let ruleset: Ruleset =
+            serde_json::from_str(&json!({"requests": [], "responses": []}).to_string()).unwrap();
         assert!(ruleset.is_empty());
 
-        let ruleset = json!({}).to_string();
-        let ruleset: Ruleset = serde_json::from_str(&ruleset).unwrap();
+        // Both fields entirely absent
+        let ruleset: Ruleset = serde_json::from_str(&json!({}).to_string()).unwrap();
         assert!(ruleset.is_empty());
+
+        // One field present-but-empty, the other absent entirely: a
+        // combination independent of the two cases above -- a
+        // requests/responses field-swap bug in is_empty() would still pass
+        // those but fail these.
+        let ruleset: Ruleset = serde_json::from_str(&json!({"requests": []}).to_string()).unwrap();
+        assert!(ruleset.is_empty());
+
+        let ruleset: Ruleset = serde_json::from_str(&json!({"responses": []}).to_string()).unwrap();
+        assert!(ruleset.is_empty());
+    }
+
+    #[test]
+    fn test_ruleset_evaluate_request() {
+        let probe = Request::builder().method(Method::GET).body("").unwrap();
+
+        // Neither field set, or a present-but-empty requests field: both
+        // fall through to Decision::Pass from within evaluate_request
+        // itself, not merely via the Waf service's separate is_empty()
+        // fast path.
+        let empty = Ruleset {
+            requests: None,
+            responses: None,
+        };
+        assert_eq!(empty.evaluate_request(&probe), Decision::Pass);
+
+        let empty_vec = Ruleset {
+            requests: Some(vec![]),
+            responses: None,
+        };
+        assert_eq!(empty_vec.evaluate_request(&probe), Decision::Pass);
+
+        // An earlier rule with an explicit `pass` action stops the scan
+        // before a later, also-matching, blocking rule is considered.
+        let ruleset: Ruleset = serde_json::from_str(
+            &json!({
+                "requests": [
+                { "match": { "methods": ["GET"] }, "action": "pass" },
+                { "match": { "methods": ["GET"] }, "action": "block:403" }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(ruleset.evaluate_request(&probe), Decision::Pass);
+
+        // First-match-wins between two overlapping blocking rules
+        let ruleset: Ruleset = serde_json::from_str(
+            &json!({
+                "requests": [
+                { "match": { "methods": ["GET"] }, "action": "block:451" },
+                { "match": { "methods": ["GET"] }, "action": "block:403" }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            ruleset.evaluate_request(&probe),
+            Decision::Block(StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS)
+        );
 
         let ruleset = json!({
             "requests": [
@@ -1229,43 +1693,12 @@ mod test {
                     "methods": ["DELETE"],
                 },
                 "action": "block:403",
-            }],
-
-            "responses": [
-            {
-                "match_req": {
-                    "methods": ["OPTIONS"],
-                },
-                "match_resp": {
-                    "status": ["100-200", "400-499", "599"],
-                },
-                "action": "block:499",
-            },
-            {
-                "match_resp": {
-                    "status": ["100-200", "400-499", "599"],
-                },
-                "action": "block:451",
-            },
-            {
-                "match_resp": {
-                    "status": ["500"],
-                    "headers": [{
-                        "name": "foo",
-                        "value": "bar.*",
-                    }]
-                },
-                "action": "block:401",
             }]
         })
         .to_string();
-
         let ruleset: Ruleset = serde_json::from_str(&ruleset).unwrap();
-        assert!(!ruleset.is_empty());
 
-        // Test requests
-
-        // Should always pass
+        // Should always pass (matches no rule)
         for _ in 0..1000 {
             let req = Request::builder().method(Method::OPTIONS).body("").unwrap();
             assert_eq!(ruleset.evaluate_request(&req), Decision::Pass);
@@ -1318,8 +1751,82 @@ mod test {
                 Decision::Throttle(_)
             ));
         }
+    }
 
-        // Test responses
+    #[test]
+    fn test_ruleset_evaluate_response() {
+        let probe_req = Request::builder().method(Method::POST).body(()).unwrap();
+        let probe_resp = Response::builder().status(200).body("").unwrap();
+
+        // Neither field set, or a present-but-empty responses field: both
+        // fall through to Decision::Pass from within evaluate_response
+        // itself.
+        let empty = Ruleset {
+            requests: None,
+            responses: None,
+        };
+        assert_eq!(
+            empty.evaluate_response(&probe_req, &probe_resp),
+            Decision::Pass
+        );
+
+        let empty_vec = Ruleset {
+            requests: None,
+            responses: Some(vec![]),
+        };
+        assert_eq!(
+            empty_vec.evaluate_response(&probe_req, &probe_resp),
+            Decision::Pass
+        );
+
+        // An earlier rule with an explicit `pass` action stops the scan
+        // before a later, also-matching, blocking rule is considered.
+        let ruleset: Ruleset = serde_json::from_str(
+            &json!({
+                "responses": [
+                { "match_resp": { "status": ["200"] }, "action": "pass" },
+                { "match_resp": { "status": ["200"] }, "action": "block:403" }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            ruleset.evaluate_response(&probe_req, &probe_resp),
+            Decision::Pass
+        );
+
+        let ruleset = json!({
+            "responses": [
+            {
+                "match_req": {
+                    "methods": ["OPTIONS"],
+                },
+                "match_resp": {
+                    "status": ["100-200", "400-499", "599"],
+                },
+                "action": "block:499",
+            },
+            {
+                "match_resp": {
+                    "status": ["100-200", "400-499", "599"],
+                },
+                "action": "block:451",
+            },
+            {
+                "match_resp": {
+                    "status": ["500"],
+                    "headers": [{
+                        "name": "foo",
+                        "value": "bar.*",
+                    }]
+                },
+                "action": "block:401",
+            }]
+        })
+        .to_string();
+        let ruleset: Ruleset = serde_json::from_str(&ruleset).unwrap();
+
         let req = Request::builder().method(Method::POST).body(()).unwrap();
 
         let resp = Response::builder()
@@ -1341,7 +1848,8 @@ mod test {
             );
         }
 
-        // Should always block with 499
+        // Should always block with 499 -- first-match-wins: this request
+        // also matches rule 2 (451), but rule 1 (OPTIONS-only) comes first.
         let req = Request::builder().method(Method::OPTIONS).body(()).unwrap();
 
         for _ in 0..1000 {
@@ -1418,6 +1926,281 @@ mod test {
         let req = Request::builder()
             .method(Method::OPTIONS)
             .body(Body::empty())
+            .unwrap();
+        let resp = router.call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_waf_fast_path_empty_ruleset() {
+        use axum::routing::get;
+
+        // With an empty ruleset, the Waf service should take its fast path
+        // and call straight through to the inner handler.
+        let layer = WafLayer::new(
+            Arc::new(ArcSwap::new(Arc::new(Ruleset::default()))),
+            None,
+            Duration::ZERO,
+        );
+        let mut router = Router::new()
+            .route("/", get(|| async { (StatusCode::IM_A_TEAPOT, "hi") }))
+            .layer(layer);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::IM_A_TEAPOT);
+    }
+
+    #[tokio::test]
+    async fn test_waf_blocks_via_response_rule() {
+        use axum::routing::get;
+
+        // A response-side rule must call through to the inner handler
+        // first, then evaluate (and can override) its actual response.
+        let ruleset = parse_ruleset(
+            b"responses:\n- match_resp:\n    status: [\"404\"]\n  action: block:451\n",
+        )
+        .unwrap();
+        let layer = WafLayer::new(
+            Arc::new(ArcSwap::new(Arc::new(ruleset))),
+            None,
+            Duration::ZERO,
+        );
+
+        let mut router = Router::new()
+            .route("/", get(|| async { StatusCode::NOT_FOUND }))
+            .layer(layer);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS);
+    }
+
+    #[test]
+    fn test_waflayer_new_from_cli() {
+        // Neither url nor file -> no fetcher
+        let cli = WafCli {
+            waf_enable: false,
+            waf_api: false,
+            waf_url: None,
+            waf_file: None,
+            waf_interval: Duration::from_secs(1),
+        };
+        let layer = WafLayer::new_from_cli(&cli, None).unwrap();
+        assert!(layer.fetcher.is_none());
+
+        // File source -> file fetcher, no HTTP client needed
+        let cli = WafCli {
+            waf_enable: false,
+            waf_api: false,
+            waf_url: None,
+            waf_file: Some(PathBuf::from("/tmp/does-not-need-to-exist.yaml")),
+            waf_interval: Duration::from_secs(1),
+        };
+        let layer = WafLayer::new_from_cli(&cli, None).unwrap();
+        assert!(layer.fetcher.is_some());
+
+        // URL source without an HTTP client -> error
+        let cli = WafCli {
+            waf_enable: false,
+            waf_api: false,
+            waf_url: Some(Url::parse("http://example.com/waf").unwrap()),
+            waf_file: None,
+            waf_interval: Duration::from_secs(1),
+        };
+        assert!(WafLayer::new_from_cli(&cli, None).is_err());
+
+        // URL source with an HTTP client -> URL fetcher
+        let client: Arc<dyn Client> = Arc::new(MockClient::new());
+        let layer = WafLayer::new_from_cli(&cli, Some(client)).unwrap();
+        assert!(layer.fetcher.is_some());
+    }
+
+    struct OkFetcher(&'static [u8]);
+
+    #[async_trait]
+    impl FetchesRuleset for OkFetcher {
+        async fn fetch_rules(&self) -> Result<Ruleset, Error> {
+            parse_ruleset(self.0)
+        }
+    }
+
+    struct ErrFetcher;
+
+    #[async_trait]
+    impl FetchesRuleset for ErrFetcher {
+        async fn fetch_rules(&self) -> Result<Ruleset, Error> {
+            Err(anyhow!("boom").into())
+        }
+    }
+
+    struct CountingFetcher(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl FetchesRuleset for CountingFetcher {
+        async fn fetch_rules(&self) -> Result<Ruleset, Error> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow!("no-op").into())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_waflayer_update_ruleset() {
+        // No fetcher configured -> no-op
+        let layer = WafLayer::new(
+            Arc::new(ArcSwap::new(Arc::new(Ruleset::default()))),
+            None,
+            Duration::ZERO,
+        );
+        layer.update_ruleset().await;
+        assert_eq!(layer.ruleset.load_full(), Arc::new(Ruleset::default()));
+
+        // Fetch error -> no-op, ruleset unchanged
+        let layer = WafLayer::new(
+            Arc::new(ArcSwap::new(Arc::new(Ruleset::default()))),
+            Some(Arc::new(ErrFetcher) as Arc<dyn FetchesRuleset>),
+            Duration::ZERO,
+        );
+        layer.update_ruleset().await;
+        assert_eq!(layer.ruleset.load_full(), Arc::new(Ruleset::default()));
+
+        // Fetch success -> ruleset applied
+        let yaml: &'static [u8] = b"requests:\n- action: block:403\n  match: {}\n";
+        let layer = WafLayer::new(
+            Arc::new(ArcSwap::new(Arc::new(Ruleset::default()))),
+            Some(Arc::new(OkFetcher(yaml)) as Arc<dyn FetchesRuleset>),
+            Duration::ZERO,
+        );
+        layer.update_ruleset().await;
+        assert_ne!(layer.ruleset.load_full(), Arc::new(Ruleset::default()));
+    }
+
+    #[tokio::test]
+    async fn test_waflayer_run_ticks_and_cancels() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let layer = WafLayer::new(
+            Arc::new(ArcSwap::new(Arc::new(Ruleset::default()))),
+            Some(Arc::new(CountingFetcher(counter.clone())) as Arc<dyn FetchesRuleset>),
+            Duration::from_millis(5),
+        );
+
+        let token = CancellationToken::new();
+        let task = tokio::spawn({
+            let token = token.clone();
+            async move { layer.run(token).await }
+        });
+
+        // Wait until the background loop has ticked at least once
+        let mut ticked = false;
+        for _ in 0..200 {
+            if counter.load(Ordering::SeqCst) > 0 {
+                ticked = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(ticked, "run() never invoked the fetcher");
+
+        token.cancel();
+        let res = tokio::time::timeout(Duration::from_secs(1), task).await;
+        assert!(
+            res.is_ok(),
+            "run() did not terminate promptly after cancellation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ruleset_fetcher_file() {
+        use std::io::Write;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(b"requests:\n- action: block:403\n  match: {}\n")
+            .unwrap();
+
+        let fetcher = RulesetFetcherFile {
+            path: file.path().to_path_buf(),
+        };
+        let ruleset = fetcher.fetch_rules().await.unwrap();
+        assert!(!ruleset.is_empty());
+
+        let fetcher = RulesetFetcherFile {
+            path: PathBuf::from("/nonexistent/path/does-not-exist.yaml"),
+        };
+        assert!(fetcher.fetch_rules().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_ruleset_fetcher_url() {
+        let mut mock = MockClient::new();
+        mock.expect_execute().returning(|_req| {
+            let resp: reqwest::Response =
+                Response::new("requests:\n- action: block:403\n  match: {}\n".to_string()).into();
+            Ok(resp)
+        });
+
+        let fetcher = RulesetFetcherUrl {
+            http_client: Arc::new(mock),
+            url: Url::parse("http://example.com/waf.yaml").unwrap(),
+        };
+        let ruleset = fetcher.fetch_rules().await.unwrap();
+        assert!(!ruleset.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_api_handler() {
+        let layer = WafLayer::new(
+            Arc::new(ArcSwap::new(Arc::new(Ruleset::default()))),
+            None,
+            Duration::ZERO,
+        );
+
+        // Invalid body -> 400
+        let resp = api_handler(
+            State(layer.clone()),
+            Bytes::from_static(b"{not valid at all"),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Valid body -> ruleset updated
+        let yaml = b"requests:\n- action: block:403\n  match: {}\n";
+        let resp = api_handler(State(layer.clone()), Bytes::from_static(yaml)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"Ruleset updated\n");
+
+        // Same body again -> reports no change
+        let resp = api_handler(State(layer.clone()), Bytes::from_static(yaml)).await;
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"Ruleset is the same, not updated\n");
+    }
+
+    #[tokio::test]
+    async fn test_create_router() {
+        let layer = WafLayer::new(
+            Arc::new(ArcSwap::new(Arc::new(Ruleset::default()))),
+            None,
+            Duration::ZERO,
+        );
+        let mut router: Router = create_router(layer);
+
+        let yaml = b"requests:\n- action: block:403\n  match: {}\n";
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/update")
+            .body(Body::from(yaml.to_vec()))
             .unwrap();
         let resp = router.call(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
