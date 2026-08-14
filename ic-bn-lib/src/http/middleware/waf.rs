@@ -42,7 +42,11 @@ use tracing::warn;
 use url::Url;
 
 use crate::{
-    http::{Error, client::Client, middleware::RemoteAddr},
+    http::{
+        Error,
+        client::Client,
+        middleware::{RemoteAddr, geoip::CountryCode},
+    },
     tasks::Run,
 };
 
@@ -195,6 +199,8 @@ pub struct RequestMatcher {
     #[serde_as(as = "Option<Vec<DisplayFromStr>>")]
     pub methods: Option<Vec<Method>>,
     pub headers: Option<Vec<HeaderMatcher>>,
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub country_code: Option<Regex>,
 }
 
 impl PartialEq for RequestMatcher {
@@ -211,6 +217,7 @@ impl PartialEq for RequestMatcher {
                     .map(|x| x.clone().into_iter().sorted().collect::<Vec<_>>())
             && self.host.as_ref().map(|x| x.as_str()) == other.host.as_ref().map(|x| x.as_str())
             && self.path.as_ref().map(|x| x.as_str()) == other.path.as_ref().map(|x| x.as_str())
+            && self.country_code.as_ref().map(|x| x.as_str()) == other.country_code.as_ref().map(|x| x.as_str())
     }
 }
 impl Eq for RequestMatcher {}
@@ -248,6 +255,17 @@ impl RequestMatcher {
             )
         {
             return false;
+        }
+
+        // Check if country code matches
+        if let Some(v) = &self.country_code {
+            // If country code matching is requested,
+            // but no CountryCode is in the request - then we fail the match
+            let Some(country_code) = req.extensions().get::<CountryCode>() else {
+                return false;
+            };
+
+            return v.is_match(country_code);
         }
 
         // Check if any methods match
@@ -821,6 +839,8 @@ mod test {
     use axum::{Router, body::Body};
     use serde_json::json;
 
+    use crate::{hname, regex};
+
     use super::*;
 
     #[test]
@@ -882,6 +902,7 @@ mod test {
             ],
             "host": "^lala",
             "path": "^/foo",
+            "country_code": "^(CH|DE)$",
         })
         .to_string();
 
@@ -892,46 +913,53 @@ mod test {
                 methods: Some(vec![Method::GET, Method::OPTIONS]),
                 headers: Some(vec![
                     HeaderMatcher {
-                        name: HeaderName::from_static("foo"),
-                        regex: Regex::from_str("^bar.*$").unwrap(),
+                        name: hname!("foo"),
+                        regex: regex!("^bar.*$"),
                     },
                     HeaderMatcher {
-                        name: HeaderName::from_static("dead"),
-                        regex: Regex::from_str("^beef.*$").unwrap(),
+                        name: hname!("dead"),
+                        regex: regex!("^beef.*$"),
                     }
                 ]),
-                host: Some(Regex::from_str("^lala").unwrap()),
-                path: Some(Regex::from_str("^/foo").unwrap()),
+                host: Some(regex!("^lala")),
+                path: Some(regex!("^/foo")),
+                country_code: Some(regex!("^(CH|DE)$")),
             }
         );
 
         // Test full matches
-        let req = Request::builder()
-            .header("foo", "barfuss")
-            .header("dead", "beefbeef")
-            .method(Method::GET)
-            .version(Version::HTTP_2)
-            .uri("https://lala/foo")
-            .body("")
-            .unwrap();
-        assert!(rule.evaluate(&req));
-
-        for http_ver in [Version::HTTP_09, Version::HTTP_10, Version::HTTP_11] {
+        for cc in ["CH", "DE"] {
             let req = Request::builder()
                 .header("foo", "barfuss")
                 .header("dead", "beefbeef")
-                .header("host", "lala")
-                .version(http_ver)
-                .method(Method::OPTIONS)
+                .extension(CountryCode(cc.into()))
+                .method(Method::GET)
+                .version(Version::HTTP_2)
                 .uri("https://lala/foo")
                 .body("")
                 .unwrap();
             assert!(rule.evaluate(&req));
         }
 
+        for http_ver in [Version::HTTP_09, Version::HTTP_10, Version::HTTP_11] {
+            let req = Request::builder()
+                .header("foo", "barfuss")
+                .header("dead", "beefbeef")
+                .header("host", "lala")
+                .extension(CountryCode("CH".into()))
+                .version(http_ver)
+                .method(Method::OPTIONS)
+                .uri("https://lala/foo")
+                .body("")
+                .unwrap();
+
+            assert!(rule.evaluate(&req));
+        }
+
         let req = Request::builder()
             .header("dead", "beefbeef")
             .header("foo", "barfuss")
+            .extension(CountryCode("CH".into()))
             .version(Version::HTTP_2)
             .method(Method::OPTIONS)
             .uri("https://lala/foo")
@@ -943,6 +971,7 @@ mod test {
         let req = Request::builder()
             .header("foo", "barfuss")
             .header("dead", "beefbeef")
+            .extension(CountryCode("CH".into()))
             .method(Method::POST)
             .uri("https://lala/foo")
             .body("")
@@ -952,6 +981,7 @@ mod test {
         let req = Request::builder()
             .header("foo", "barfuss")
             .header("dead", "beefbeef")
+            .extension(CountryCode("CH".into()))
             .method(Method::GET)
             .uri("https://lala/bar")
             .body("")
@@ -961,6 +991,7 @@ mod test {
         let req = Request::builder()
             .header("fox", "barfuss")
             .header("dead", "beefbeef")
+            .extension(CountryCode("CH".into()))
             .method(Method::GET)
             .uri("https://lala/foo")
             .body("")

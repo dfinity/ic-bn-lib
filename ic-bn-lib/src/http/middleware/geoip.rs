@@ -1,4 +1,4 @@
-use std::{net::IpAddr, path::PathBuf, sync::Arc, time::Instant};
+use std::{net::IpAddr, ops::Deref, path::PathBuf, sync::Arc, time::Instant};
 
 use anyhow::Error;
 use axum::{
@@ -13,6 +13,14 @@ use super::RemoteAddr;
 
 #[derive(Clone, Debug)]
 pub struct CountryCode(pub String);
+
+impl Deref for CountryCode {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 /// Looks up the client's country using his IP address
 pub struct GeoIp {

@@ -65,6 +65,13 @@ macro_rules! principal {
     ($id:expr) => {{ candid::Principal::from_text($id).unwrap() }};
 }
 
+/// Converts a string representation to a `regex::Regex`. Panics when an error occurs.
+/// Regex crate also has a regex! macro, but it returns a reference to a static value.
+#[macro_export]
+macro_rules! regex {
+    ($id:expr) => {{ regex::Regex::from_str($id).unwrap() }};
+}
+
 /// tdb26-jop6k-aogll-7ltgs-eruif-6kk7m-qpktf-gdiqx-mxtrf-vb5e6-eqe
 pub const MAINNET_ROOT_SUBNET_ID: Principal = Principal::from_slice(&[
     207, 242, 128, 227, 45, 127, 92, 205, 34, 70, 136, 47, 148, 175, 178, 15, 84, 202, 97, 162, 23,
