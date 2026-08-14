@@ -77,11 +77,8 @@ pub struct RateLimiter<S, K: KeyExtractor, R, C: Clock = DefaultClock> {
     key_extractor: K,
     limiter: Arc<GovRateLimiter<K::Key, C>>,
     rate_limited_response: R,
-    bypass_token: Option<String>,
+    bypass_token: Option<Arc<String>>,
     inner: S,
-    // Shared (rather than owned) because Axum reconstructs the `Service` via
-    // `Layer::layer()` for every request rather than once at startup, so an owned field
-    // would silently reset on each call and cleanup would never trigger.
     last_cleanup: Arc<ArcSwap<C::Instant>>,
 }
 
@@ -162,7 +159,7 @@ pub struct RateLimiterLayer<K: KeyExtractor, R, C: Clock = DefaultClock> {
     key_extractor: K,
     limiter: Arc<GovRateLimiter<K::Key, C>>,
     rate_limited_response: R,
-    bypass_token: Option<String>,
+    bypass_token: Option<Arc<String>>,
     last_cleanup: Arc<ArcSwap<C::Instant>>,
 }
 
@@ -267,7 +264,7 @@ fn layer_with_clock<K: KeyExtractor, R: IntoResponse + Clone + Send + Sync + 'st
         key_extractor,
         limiter,
         rate_limited_response,
-        bypass_token,
+        bypass_token.map(Arc::new),
         last_cleanup,
     ))
 }
