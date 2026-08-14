@@ -9,13 +9,15 @@ use std::{
 };
 
 use anyhow::{Error, anyhow};
+use arc_swap::ArcSwap;
 use axum::{extract::Request, response::IntoResponse, response::Response};
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use governor::{
     Quota,
-    clock::{Clock, DefaultClock},
+    clock::{Clock, DefaultClock, Reference},
     middleware::NoOpMiddleware,
+    nanos::Nanos,
     state::keyed::DashMapStateStore,
 };
 use http::{HeaderName, HeaderValue, StatusCode, header::RETRY_AFTER};
@@ -77,6 +79,10 @@ pub struct RateLimiter<S, K: KeyExtractor, R, C: Clock = DefaultClock> {
     rate_limited_response: R,
     bypass_token: Option<String>,
     inner: S,
+    // Shared (rather than owned) because Axum reconstructs the `Service` via
+    // `Layer::layer()` for every request rather than once at startup, so an owned field
+    // would silently reset on each call and cleanup would never trigger.
+    last_cleanup: Arc<ArcSwap<C::Instant>>,
 }
 
 /// Implement Tower Service for RateLimiter
@@ -98,12 +104,22 @@ where
     }
 
     fn call(&mut self, request: Request) -> Self::Future {
+        /// Stale entries cleanup interval - 5 minutes
+        const CLEANUP_INTERVAL: Nanos = Nanos::new(300_000_000_000);
+
         // Check that bypass token is configured, header was sent and it matches
         let bypass = request
             .headers()
             .get(BYPASS_TOKEN_HEADER)
             .zip(self.bypass_token.as_ref())
             .is_some_and(|(hdr, token)| constant_time_eq(hdr.as_bytes(), token.as_bytes()));
+
+        // Clean up stale entries from time to time
+        let now = self.limiter.clock().now();
+        if now.duration_since(*self.last_cleanup.load_full()) > CLEANUP_INTERVAL {
+            self.last_cleanup.store(Arc::new(now));
+            self.limiter.retain_recent();
+        }
 
         // If bypassing - call the wrapped service directly
         if bypass {
@@ -147,6 +163,7 @@ pub struct RateLimiterLayer<K: KeyExtractor, R, C: Clock = DefaultClock> {
     limiter: Arc<GovRateLimiter<K::Key, C>>,
     rate_limited_response: R,
     bypass_token: Option<String>,
+    last_cleanup: Arc<ArcSwap<C::Instant>>,
 }
 
 impl<S, K, R, C> Layer<S> for RateLimiterLayer<K, R, C>
@@ -165,6 +182,7 @@ where
             rate_limited_response: self.rate_limited_response.clone(),
             bypass_token: self.bypass_token.clone(),
             inner,
+            last_cleanup: self.last_cleanup.clone(),
         }
     }
 }
@@ -243,12 +261,14 @@ fn layer_with_clock<K: KeyExtractor, R: IntoResponse + Clone + Send + Sync + 'st
     let limiter = Arc::new(GovRateLimiter::<K::Key, C>::dashmap_with_clock(
         quota, clock,
     ));
+    let last_cleanup = Arc::new(ArcSwap::new(limiter.clock().now().into()));
 
     Ok(RateLimiterLayer::new(
         key_extractor,
         limiter,
         rate_limited_response,
         bypass_token,
+        last_cleanup,
     ))
 }
 
@@ -556,6 +576,46 @@ mod test {
             let res = app.call(req).await.unwrap();
             assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_rate_limiter_cleans_up_stale_entries() {
+        let clock = FakeRelativeClock::default();
+        let rate_limiter_mw = layer_with_clock(
+            1,
+            1,
+            IpKeyExtractor,
+            (StatusCode::TOO_MANY_REQUESTS, "foo"),
+            None,
+            clock.clone(),
+        )
+        .expect("failed to build middleware");
+
+        // Keep a handle to the underlying governor limiter so we can observe how many
+        // keys it's tracking, independently of the middleware wrapping it.
+        let limiter = rate_limiter_mw.limiter.clone();
+
+        let mut app = Router::new()
+            .route("/", post(handler))
+            .layer(rate_limiter_mw);
+
+        // Two distinct keys get tracked in the limiter's state
+        send_request(&mut app, "1.1.1.1").await.unwrap();
+        send_request(&mut app, "2.2.2.2").await.unwrap();
+        assert_eq!(limiter.len(), 2);
+
+        // Advancing by less than the cleanup interval (10 minutes) leaves stale
+        // entries in place, even though their buckets have long since refilled.
+        clock.advance(Duration::from_secs(60));
+        send_request(&mut app, "3.3.3.3").await.unwrap();
+        assert_eq!(limiter.len(), 3);
+
+        // Once the cleanup interval has elapsed, the next request triggers a sweep
+        // that drops entries indistinguishable from a fresh bucket -- i.e. all three
+        // previously-seen keys -- before the new key is inserted.
+        clock.advance(Duration::from_secs(600));
+        send_request(&mut app, "4.4.4.4").await.unwrap();
+        assert_eq!(limiter.len(), 1);
     }
 
     #[tokio::test(start_paused = true)]
