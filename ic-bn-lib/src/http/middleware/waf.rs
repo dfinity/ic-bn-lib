@@ -45,7 +45,7 @@ use crate::{
     http::{
         Error,
         client::Client,
-        middleware::{RemoteAddr, geoip::CountryCode},
+        middleware::{RemoteAddr, request_meta::CountryCode},
     },
     tasks::Run,
 };
@@ -1121,7 +1121,7 @@ mod test {
             Request::builder()
                 .method(method)
                 .header("foo", header)
-                .extension(CountryCode(cc.into()))
+                .extension(CountryCode(cc.try_into().unwrap()))
                 .body("")
                 .unwrap()
         };
@@ -1171,7 +1171,7 @@ mod test {
                 .uri(uri)
                 .header("foo", "barfuss")
                 .header("dead", "beefbeef")
-                .extension(CountryCode("CH".into()))
+                .extension(CountryCode("CH".try_into().unwrap()))
                 .body("")
                 .unwrap()
         };
@@ -1190,13 +1190,14 @@ mod test {
             .uri("https://lala/foo")
             .header("fox", "barfuss")
             .header("dead", "beefbeef")
-            .extension(CountryCode("CH".into()))
+            .extension(CountryCode("CH".try_into().unwrap()))
             .body("")
             .unwrap();
         assert!(!rule.evaluate(&req));
 
         let mut req = build(Method::GET, "https://lala/foo");
-        req.extensions_mut().insert(CountryCode("US".into()));
+        req.extensions_mut()
+            .insert(CountryCode("US".try_into().unwrap()));
         assert!(!rule.evaluate(&req));
     }
 
