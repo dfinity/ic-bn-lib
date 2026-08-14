@@ -254,7 +254,7 @@ pub(crate) mod test {
         drop(h)
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_distributor_lor() {
         let backends = vec![
             (2, "foo".to_string()),

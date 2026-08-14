@@ -135,7 +135,7 @@ mod test {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_add_runs_task_once() {
         let count = Arc::new(AtomicUsize::new(0));
 
@@ -150,7 +150,7 @@ mod test {
         assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_add_interval_runs_task_repeatedly() {
         let count = Arc::new(AtomicUsize::new(0));
 
@@ -172,7 +172,7 @@ mod test {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_stop_cancels_running_tasks() {
         let count = Arc::new(AtomicUsize::new(0));
 

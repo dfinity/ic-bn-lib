@@ -858,7 +858,7 @@ mod test {
     }
 
     /// Make sure we can drain when the endpoint is down
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_vector_drain_dead() {
         let client = Arc::new(TestClientDead);
         let vector = Vector::new(make_opts(), client, "", &Registry::new());

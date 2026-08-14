@@ -1391,7 +1391,7 @@ mod tests {
         assert_eq!(cache.len(), 4);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_proxy_cache_lock() {
         let cache = Arc::new(
             CacheBuilder::new(KeyExtractorTest)

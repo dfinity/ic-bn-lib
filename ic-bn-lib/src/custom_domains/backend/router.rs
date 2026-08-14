@@ -120,7 +120,7 @@ pub fn create_router(
 
 #[cfg(test)]
 mod tests {
-    use std::{str::FromStr, sync::Arc};
+    use std::{net::IpAddr, str::FromStr, sync::Arc};
 
     use axum::{
         body::{Body, to_bytes},
@@ -132,18 +132,21 @@ mod tests {
     use serde_json::Value;
     use tower::{Service, util::ServiceExt};
 
-    use crate::custom_domains::{
-        backend::router::{RateLimitConfig, create_router},
-        base::{
-            traits::{
-                repository::{MockRepository, RepositoryError},
-                validation::{MockValidatesDomains, ValidationError},
-            },
-            types::{
-                domain::{DomainStatus, RegistrationStatus},
-                task::{InputTask, TaskKind},
+    use crate::{
+        custom_domains::{
+            backend::router::{RateLimitConfig, create_router},
+            base::{
+                traits::{
+                    repository::{MockRepository, RepositoryError},
+                    validation::{MockValidatesDomains, ValidationError},
+                },
+                types::{
+                    domain::{DomainStatus, RegistrationStatus},
+                    task::{InputTask, TaskKind},
+                },
             },
         },
+        http::middleware::RemoteAddr,
     };
 
     const BODY_LIMIT: usize = 5000;
@@ -1028,7 +1031,7 @@ mod tests {
 
         let router =
             create_test_router_with_rate_limiter(mock_repository, mock_validator, rate_limits);
-        let test_ip = "192.168.1.100";
+        let test_ip = IpAddr::from_str("192.168.1.100").unwrap();
 
         // Create a service that maintains state between calls (needed for rate limiting)
         let mut service = router.into_service();
@@ -1036,14 +1039,14 @@ mod tests {
         let request1 = Request::builder()
             .method("POST")
             .uri("/v1/example1.org")
-            .header("x-real-ip", test_ip)
+            .extension(RemoteAddr(test_ip))
             .body(Body::empty())
             .unwrap();
 
         let request2 = Request::builder()
             .method("POST")
             .uri("/v1/example2.org")
-            .header("x-real-ip", test_ip)
+            .extension(RemoteAddr(test_ip))
             .body(Body::empty())
             .unwrap();
 
@@ -1051,7 +1054,7 @@ mod tests {
         let request3 = Request::builder()
             .method("POST")
             .uri("/v1/example3.org")
-            .header("x-real-ip", test_ip)
+            .extension(RemoteAddr(test_ip))
             .body(Body::empty())
             .unwrap();
 
