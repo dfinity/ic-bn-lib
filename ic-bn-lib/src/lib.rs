@@ -65,11 +65,14 @@ macro_rules! principal {
     ($id:expr) => {{ candid::Principal::from_text($id).unwrap() }};
 }
 
+#[doc(hidden)]
+pub use regex as __regex;
+
 /// Converts a string representation to a `regex::Regex`. Panics when an error occurs.
 /// Regex crate also has a regex! macro, but it returns a reference to a static value.
 #[macro_export]
 macro_rules! regex {
-    ($id:expr) => {{ regex::Regex::from_str($id).unwrap() }};
+    ($id:expr) => {{ $crate::__regex::Regex::new($id).unwrap() }};
 }
 
 /// tdb26-jop6k-aogll-7ltgs-eruif-6kk7m-qpktf-gdiqx-mxtrf-vb5e6-eqe
@@ -381,7 +384,7 @@ pub fn truncate(s: &str, n: usize) -> &str {
     &s[..m]
 }
 
-/// Best-effort (w/o assembly) constant-time comaprison for byte slices
+/// Best-effort (w/o assembly) constant-time comparison for byte slices
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;

@@ -146,7 +146,7 @@ impl RequestMetaState {
             .flatten()
     }
 
-    /// Extracts request ID address from the `x-request-id` header if remote is trusted & header exists.
+    /// Extracts a request ID from the `x-request-id` header if the remote is trusted and the header exists.
     fn extract_request_id(
         &self,
         headers: &HeaderMap,
