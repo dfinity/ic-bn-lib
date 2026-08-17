@@ -23,7 +23,7 @@ async-trait = "0.1.83"
 axum = "0.8.1"
 axum-extra = { version = "0.12.6", features = ["middleware"] }
 axum-server = "0.8.0"
-base64 = "0.22.1"
+base64 = "0.23.1"
 bytes = "1.10.0"
 candid = "0.10.10"
 candid_parser = "0.4"
@@ -77,19 +77,19 @@ instant-acme = { version = "0.8.5", default-features = false, features = [
     "hyper-rustls",
 ] }
 itertools = "0.15.0"
-mail-auth = "0.11.0"
+mail-auth = "0.12.0"
 mail-parser = { version = "0.11.3", features = ["full_encoding"] }
 mail-send = { version = "0.6.0", default-features = false, features = [
     "builder",
 ] }
 maxminddb = "0.29"
-mockall = "0.13.0"
+mockall = "0.15"
 mock-io = { version = "0.3.2", features = ["full"] }
 moka = { version = "0.12.15", features = ["sync"] }
 nix = { version = "0.31.0", features = ["signal"] }
 ppp = "2.3.0"
 parse-size = { version = "1.1.0", features = ["std"] }
-pem = "3.0.5"
+pem = "4"
 pocket-ic = "=12.0.0"
 prometheus = "0.14.0"
 prost = { version = "0.14.1" }
