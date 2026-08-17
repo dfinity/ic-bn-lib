@@ -1,4 +1,5 @@
 use std::{
+    fmt::Display,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     ops::Deref,
     path::PathBuf,
@@ -46,6 +47,12 @@ impl Deref for RemoteAddr {
     }
 }
 
+impl Display for RemoteAddr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Request ID (UUID)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestId(pub Uuid);
@@ -55,6 +62,12 @@ impl Deref for RequestId {
 
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+impl Display for RequestId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -68,6 +81,12 @@ impl Deref for CountryCode {
 
     fn deref(&self) -> &Self::Target {
         self.0.as_str()
+    }
+}
+
+impl Display for CountryCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
