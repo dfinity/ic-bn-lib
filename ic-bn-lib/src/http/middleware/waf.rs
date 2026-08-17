@@ -838,6 +838,8 @@ impl Run for WafLayer {
 
 #[cfg(test)]
 mod test {
+    #![allow(clippy::trivial_regex)]
+
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use axum::{Router, body::Body};

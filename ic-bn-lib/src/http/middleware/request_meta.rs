@@ -198,10 +198,17 @@ pub async fn middleware(
     if let Some(v) = country_code {
         request.extensions_mut().insert(v);
     }
+    if let Some(v) = remote_addr {
+        // SAFETY: Any IP is a valid HeaderValue
+        request.headers_mut().insert(
+            X_REAL_IP,
+            HeaderValue::from_maybe_shared(Bytes::from(v.to_string())).unwrap(),
+        );
+    }
 
+    // SAFETY: UUID is a valid HeaderValue
     let request_id_hdr =
         HeaderValue::from_maybe_shared(Bytes::from(request_id.to_string())).unwrap();
-
     request.extensions_mut().insert(request_id);
     request
         .headers_mut()
@@ -238,6 +245,7 @@ mod test {
     const X_TEST_REQUEST_ID: &str = "x-test-request-id";
     const X_TEST_REMOTE_ADDR: &str = "x-test-remote-addr";
     const X_TEST_COUNTRY_CODE: &str = "x-test-country-code";
+    const X_TEST_REAL_IP: &str = "x-test-real-ip";
 
     // Known entries in the MaxMind test DB
     const IP_KNOWN: Ipv4Addr = Ipv4Addr::new(89, 160, 20, 112);
@@ -408,6 +416,7 @@ mod test {
         let request_id = req.extensions().get::<RequestId>().copied();
         let remote_addr = req.extensions().get::<RemoteAddr>().copied();
         let country_code = req.extensions().get::<CountryCode>().copied();
+        let x_real_ip = req.headers().get(X_REAL_IP).cloned();
 
         let mut resp = StatusCode::OK.into_response();
         if let Some(v) = request_id {
@@ -427,6 +436,9 @@ mod test {
                 hname!(X_TEST_COUNTRY_CODE),
                 HeaderValue::from_str(&v.0).unwrap(),
             );
+        }
+        if let Some(v) = x_real_ip {
+            resp.headers_mut().insert(hname!(X_TEST_REAL_IP), v);
         }
         resp
     }
@@ -553,6 +565,14 @@ mod test {
             header_ip.to_string()
         );
         assert_eq!(resp.extensions().get::<RemoteAddr>().unwrap().0, header_ip);
+        assert_eq!(
+            resp.headers()
+                .get(X_TEST_REAL_IP)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            header_ip.to_string()
+        );
 
         // No GeoIP configured => no country code either.
         assert!(resp.headers().get(X_TEST_COUNTRY_CODE).is_none());
