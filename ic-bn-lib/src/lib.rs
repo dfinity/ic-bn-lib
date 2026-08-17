@@ -26,6 +26,7 @@ pub mod tests;
 pub mod tls;
 #[cfg(feature = "vector")]
 pub mod vector;
+
 use std::{fs::File, net::IpAddr, path::Path};
 
 use anyhow::{Context, anyhow};
@@ -52,6 +53,7 @@ pub use reqwest;
 pub use rustls;
 #[cfg(feature = "acme-alpn")]
 pub use rustls_acme;
+pub use show_option;
 pub use uuid;
 
 /// Converts a string representation to an `EmailAddress`. Panics when an error occurs.

@@ -36,7 +36,7 @@ pub const ALL_NETWORKS: [IpNet; 2] = [
 ];
 
 /// Client address
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct RemoteAddr(pub IpAddr);
 
 impl Deref for RemoteAddr {
