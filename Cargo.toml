@@ -163,7 +163,7 @@ tower-http = { version = "0.7", features = ["trace"] }
 tracing = { version = "0.1.40", features = ["attributes"] }
 url = "2.5.3"
 utoipa = { version = "5.4.0", features = ["axum_extras"] }
-utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum", "vendored"] }
 # DO NOT upgrade, this breaks monorepo compatibility
 # Read https://github.com/uuid-rs/uuid/releases/tag/1.13.0
 uuid = { version = "=1.12.1", features = ["v7", "serde"] }

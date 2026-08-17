@@ -420,6 +420,12 @@ mod test {
         pub fn insecure_http_client() -> reqwest::Client {
             reqwest::Client::builder()
                 .danger_accept_invalid_certs(true)
+                // Retry tests reuse the same client across immediate, zero-backoff retries.
+                // A pooled keep-alive connection can be mid-teardown at that instant, which
+                // surfaces as a spurious "connection closed" error before the request ever
+                // reaches the mock server. Disabling pooling makes every attempt a fresh
+                // connection, so retry counts in tests are deterministic.
+                .pool_max_idle_per_host(0)
                 .build()
                 .unwrap()
         }
