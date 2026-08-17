@@ -71,15 +71,19 @@ impl KeyExtractor for GlobalKeyExtractor {
     }
 }
 
+struct RateLimiterState<K: KeyExtractor, R, C: Clock> {
+    key_extractor: K,
+    limiter: GovRateLimiter<K::Key, C>,
+    rate_limited_response: R,
+    bypass_token: Option<String>,
+    last_cleanup: ArcSwap<C::Instant>,
+}
+
 /// Ratelimiter that implements Tower Service
 #[derive(Clone)]
 pub struct RateLimiter<S, K: KeyExtractor, R, C: Clock = DefaultClock> {
-    key_extractor: K,
-    limiter: Arc<GovRateLimiter<K::Key, C>>,
-    rate_limited_response: R,
-    bypass_token: Option<Arc<String>>,
+    state: Arc<RateLimiterState<K, R, C>>,
     inner: S,
-    last_cleanup: Arc<ArcSwap<C::Instant>>,
 }
 
 /// Implement Tower Service for RateLimiter
@@ -108,14 +112,14 @@ where
         let bypass = request
             .headers()
             .get(BYPASS_TOKEN_HEADER)
-            .zip(self.bypass_token.as_ref())
+            .zip(self.state.bypass_token.as_ref())
             .is_some_and(|(hdr, token)| constant_time_eq(hdr.as_bytes(), token.as_bytes()));
 
         // Clean up stale entries from time to time
-        let now = self.limiter.clock().now();
-        if now.duration_since(*self.last_cleanup.load_full()) > CLEANUP_INTERVAL {
-            self.last_cleanup.store(Arc::new(now));
-            self.limiter.retain_recent();
+        let now = self.state.limiter.clock().now();
+        if now.duration_since(*self.state.last_cleanup.load_full()) > CLEANUP_INTERVAL {
+            self.state.last_cleanup.store(Arc::new(now));
+            self.state.limiter.retain_recent();
         }
 
         // If bypassing - call the wrapped service directly
@@ -125,7 +129,7 @@ where
         }
 
         // Fail if we can't determine a rate-limiting key for the request
-        let Some(key) = self.key_extractor.extract(&request) else {
+        let Some(key) = self.state.key_extractor.extract(&request) else {
             let response = (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Unable to extract rate limiting key",
@@ -135,14 +139,14 @@ where
             return Box::pin(ready(Ok(response)));
         };
 
-        match self.limiter.check_key(&key) {
+        match self.state.limiter.check_key(&key) {
             Ok(()) => Box::pin(self.inner.call(request)),
 
             Err(not_until) => {
-                let wait_time = not_until.wait_time_from(self.limiter.clock().now());
+                let wait_time = not_until.wait_time_from(self.state.limiter.clock().now());
                 let retry_secs = retry_after_seconds(wait_time);
 
-                let mut response = self.rate_limited_response.clone().into_response();
+                let mut response = self.state.rate_limited_response.clone().into_response();
                 let header_value =
                     HeaderValue::from_maybe_shared(Bytes::from(retry_secs.to_string())).unwrap();
                 response.headers_mut().insert(RETRY_AFTER, header_value);
@@ -156,11 +160,7 @@ where
 /// Layer usable as an Axum middleware
 #[derive(Clone, derive_new::new)]
 pub struct RateLimiterLayer<K: KeyExtractor, R, C: Clock = DefaultClock> {
-    key_extractor: K,
-    limiter: Arc<GovRateLimiter<K::Key, C>>,
-    rate_limited_response: R,
-    bypass_token: Option<Arc<String>>,
-    last_cleanup: Arc<ArcSwap<C::Instant>>,
+    state: Arc<RateLimiterState<K, R, C>>,
 }
 
 impl<S, K, R, C> Layer<S> for RateLimiterLayer<K, R, C>
@@ -174,12 +174,8 @@ where
 
     fn layer(&self, inner: S) -> Self::Service {
         RateLimiter {
-            key_extractor: self.key_extractor.clone(),
-            limiter: self.limiter.clone(),
-            rate_limited_response: self.rate_limited_response.clone(),
-            bypass_token: self.bypass_token.clone(),
             inner,
-            last_cleanup: self.last_cleanup.clone(),
+            state: self.state.clone(),
         }
     }
 }
@@ -255,18 +251,18 @@ fn layer_with_clock<K: KeyExtractor, R: IntoResponse + Clone + Send + Sync + 'st
         .ok_or_else(|| anyhow!("period is zero"))?
         .allow_burst(burst);
 
-    let limiter = Arc::new(GovRateLimiter::<K::Key, C>::dashmap_with_clock(
-        quota, clock,
-    ));
-    let last_cleanup = Arc::new(ArcSwap::new(limiter.clock().now().into()));
+    let limiter = GovRateLimiter::<K::Key, C>::dashmap_with_clock(quota, clock);
+    let last_cleanup = ArcSwap::new(limiter.clock().now().into());
 
-    Ok(RateLimiterLayer::new(
-        key_extractor,
-        limiter,
-        rate_limited_response,
-        bypass_token.map(Arc::new),
-        last_cleanup,
-    ))
+    Ok(RateLimiterLayer {
+        state: Arc::new(RateLimiterState {
+            key_extractor,
+            limiter,
+            rate_limited_response,
+            bypass_token,
+            last_cleanup,
+        }),
+    })
 }
 
 #[cfg(test)]
@@ -590,7 +586,8 @@ mod test {
 
         // Keep a handle to the underlying governor limiter so we can observe how many
         // keys it's tracking, independently of the middleware wrapping it.
-        let limiter = rate_limiter_mw.limiter.clone();
+        let state = rate_limiter_mw.state.clone();
+        let limiter = &state.limiter;
 
         let mut app = Router::new()
             .route("/", post(handler))
