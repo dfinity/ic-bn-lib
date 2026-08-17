@@ -17,6 +17,7 @@ use bytes::Bytes;
 use http::{HeaderMap, header::HeaderValue};
 use ipnet::IpNet;
 use maxminddb::geoip2;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     Error,
@@ -45,7 +46,8 @@ impl Deref for RemoteAddr {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Request ID (UUID)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestId(pub Uuid);
 
 impl Deref for RequestId {
@@ -58,7 +60,7 @@ impl Deref for RequestId {
 
 /// Two-letter country code.
 /// See https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Deserialize, Serialize)]
 pub struct CountryCode(pub ArrayString<2>);
 
 impl Deref for CountryCode {
@@ -119,12 +121,16 @@ impl RequestMetaState {
     pub fn new_with_geoip(
         trust_ip_from: Vec<IpNet>,
         trust_request_id_from: Vec<IpNet>,
-        geoip_db_path: &PathBuf,
+        geoip_db_path: Option<PathBuf>,
     ) -> Result<Self, Error> {
-        let geoip = GeoIp::new(geoip_db_path).context("unable to init GeoIP")?;
+        let geoip = if let Some(v) = geoip_db_path {
+            Some(GeoIp::new(&v).context("unable to init GeoIP")?)
+        } else {
+            None
+        };
 
         Ok(Self {
-            geoip: Some(geoip),
+            geoip,
             trust_ip_from,
             trust_request_id_from,
         })
@@ -632,7 +638,7 @@ mod test {
 
     #[tokio::test]
     async fn middleware_geoip_unknown_ip_no_country_code() {
-        let state = RequestMetaState::new_with_geoip(vec![], vec![], &test_db_path()).unwrap();
+        let state = RequestMetaState::new_with_geoip(vec![], vec![], Some(test_db_path())).unwrap();
         let mut app = app(state);
 
         let req = Request::builder().body(Body::empty()).unwrap();
@@ -646,7 +652,7 @@ mod test {
 
     #[tokio::test]
     async fn middleware_geoip_known_ip_attaches_country_code_to_request_and_response() {
-        let state = RequestMetaState::new_with_geoip(vec![], vec![], &test_db_path()).unwrap();
+        let state = RequestMetaState::new_with_geoip(vec![], vec![], Some(test_db_path())).unwrap();
         let mut app = app(state);
 
         let req = Request::builder().body(Body::empty()).unwrap();

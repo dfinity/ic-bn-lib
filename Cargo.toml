@@ -17,7 +17,7 @@ categories = []
 ahash = "0.8.11"
 anyhow = "1.0.93"
 arc-swap = "1.7.1"
-arrayvec = "0.7"
+arrayvec = { version = "0.7", features = ["serde"] }
 async-channel = "2.3.1"
 async-trait = "0.1.83"
 axum = "0.8.1"
