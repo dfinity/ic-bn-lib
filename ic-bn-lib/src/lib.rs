@@ -27,7 +27,7 @@ pub mod tls;
 #[cfg(feature = "vector")]
 pub mod vector;
 
-use std::{fs::File, net::IpAddr, path::Path};
+use std::{fmt::Display, fs::File, net::IpAddr, path::Path, time::Duration};
 
 use anyhow::{Context, anyhow};
 use bytes::Bytes;
@@ -399,6 +399,78 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         == 0
 }
 
+/// Implements display for Duration
+pub trait DurationDisplay<'a> {
+    /// Implements Display for Duration in a human-friendly format
+    fn display(&'a self) -> DisplayDuration<'a>;
+}
+
+/// Displays Duration in a human-friendly format
+pub struct DisplayDuration<'a>(&'a Duration);
+
+impl DurationDisplay<'_> for Duration {
+    fn display(&self) -> DisplayDuration<'_> {
+        DisplayDuration(self)
+    }
+}
+
+impl Display for DisplayDuration<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut secs = self.0.as_secs();
+        // If the duration is shorter than a second - use a distinct approach
+        if secs == 0 {
+            let nanos = self.0.as_nanos();
+            if nanos < 1000 {
+                return write!(f, "{nanos}ns");
+            }
+
+            let micros = self.0.as_micros();
+            if micros < 1000 {
+                return write!(f, "{micros}us");
+            }
+
+            return write!(f, "{}ms", self.0.as_millis());
+        }
+
+        // If the duration is shorter than a minute,
+        // use floating point seconds
+        if self.0.as_secs() < 60 {
+            return write!(f, "{:.2}s", self.0.as_secs_f32());
+        }
+
+        // Average year is 365.24 days...
+        let years = secs / 365 / 86400;
+        if years > 0 {
+            secs -= years * 86400 * 365;
+            write!(f, "{years}y")?;
+        }
+
+        let days = secs / 86400;
+        if days > 0 {
+            secs -= days * 86400;
+            write!(f, "{days}d")?;
+        }
+
+        let hours = secs / 3600;
+        if hours > 0 {
+            secs -= hours * 3600;
+            write!(f, "{hours}h")?;
+        }
+
+        let mins = secs / 60;
+        if mins > 0 {
+            secs -= mins * 60;
+            write!(f, "{mins}m")?;
+        }
+
+        if secs > 0 {
+            write!(f, "{secs}s")?;
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -450,5 +522,30 @@ mod test {
         assert!(constant_time_eq(b"foo", b"foo"));
         assert!(!constant_time_eq(b"foo", b"bar"));
         assert!(!constant_time_eq(b"foobar", b"bar"));
+    }
+
+    #[test]
+    fn test_duration_display() {
+        assert_eq!(
+            Duration::from_secs(31626061).display().to_string(),
+            "1y1d1h1m1s"
+        );
+        assert_eq!(Duration::from_hours(72).display().to_string(), "3d");
+        assert_eq!(Duration::from_hours(80).display().to_string(), "3d8h");
+        assert_eq!(Duration::from_mins(4812).display().to_string(), "3d8h12m");
+        assert_eq!(
+            Duration::from_secs(288735).display().to_string(),
+            "3d8h12m15s"
+        );
+        assert_eq!(
+            Duration::from_millis(288735123).display().to_string(),
+            "3d8h12m15s"
+        );
+        assert_eq!(Duration::from_nanos(999).display().to_string(), "999ns");
+        assert_eq!(Duration::from_micros(999).display().to_string(), "999us");
+        assert_eq!(Duration::from_millis(999).display().to_string(), "999ms");
+        assert_eq!(Duration::from_millis(1001).display().to_string(), "1.00s");
+        assert_eq!(Duration::from_millis(60001).display().to_string(), "1m");
+        assert_eq!(Duration::from_millis(59494).display().to_string(), "59.49s");
     }
 }

@@ -36,7 +36,7 @@ type GovRateLimiter<K, C> =
 /// Converts a `governor` wait-time into a whole-second `Retry-After` value. Rounds down, but
 /// never advertises less than 1 second.
 fn retry_after_seconds(wait_time: Duration) -> u32 {
-    wait_time.as_secs().max(1) as u32
+    std::cmp::max(wait_time.as_secs(), 1) as u32
 }
 
 /// Extracts a rate-limiting key from the request. Returns `None` if a key cannot be
