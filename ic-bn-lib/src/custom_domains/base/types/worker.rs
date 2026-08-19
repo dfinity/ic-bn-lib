@@ -28,6 +28,7 @@ use tracing::{Span, debug, error, info, instrument, warn};
 use x509_parser::{parse_x509_certificate, prelude::GeneralName};
 
 use crate::{
+    DurationDisplay,
     custom_domains::base::{
         helpers::{format_error_chain, retry_async},
         traits::{repository::Repository, time::UtcTimestamp, validation::ValidatesDomains},
@@ -185,7 +186,7 @@ impl Worker {
                 info!("Certificate revocation starts now");
             } else {
                 info!(
-                    delay_secs = delay.as_secs(),
+                    delay = %delay.display(),
                     "Certificate revocation scheduled"
                 );
             }
@@ -304,7 +305,7 @@ impl Worker {
                 };
 
                 info!(
-                    duration = task_result.duration.as_secs(),
+                    duration = %task_result.duration.display(),
                     not_before = validity.as_ref().map(|x| &x.0),
                     not_after = validity.as_ref().map(|x| &x.1),
                     "Task execution succeeded"
@@ -313,7 +314,7 @@ impl Worker {
 
             TaskOutcome::Failure(err) => {
                 error!(
-                    duration = task_result.duration.as_secs(),
+                    duration = %task_result.duration.display(),
                     error = ?err,
                     "Task execution failed"
                 );
@@ -410,7 +411,7 @@ impl Worker {
             Err(err) => {
                 error!(
                     error = ?err,
-                    duration_secs = self.config.task_fetch_retry_interval.as_secs(),
+                    duration = %self.config.task_fetch_retry_interval.display(),
                     "Failed to fetch pending task, sleeping before retry"
                 );
                 self.shared_metrics
@@ -517,7 +518,7 @@ impl Worker {
                         let attempts = err.attempts.to_string();
 
                         error!(
-                            duration_secs = self.config.task_submit_timeout.as_secs(),
+                            duration = %self.config.task_submit_timeout.display(),
                             "Failed to submit task result after {attempts} attempts: {err:?}",
                         );
 
@@ -544,7 +545,7 @@ impl Worker {
     /// Handles no available tasks, returning whether the worker should continue running
     async fn handle_no_tasks(&self) -> Result<(), WorkerStopped> {
         debug!(
-            duration_secs = self.config.polling_interval_no_tasks.as_secs(),
+            duration = %self.config.polling_interval_no_tasks.display(),
             "No pending tasks found, sleeping"
         );
 

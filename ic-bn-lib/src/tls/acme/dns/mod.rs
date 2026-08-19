@@ -420,6 +420,10 @@ mod test {
         pub fn insecure_http_client() -> reqwest::Client {
             reqwest::Client::builder()
                 .danger_accept_invalid_certs(true)
+                // Sometimes the connection is torn down during a request execution
+                // and that causes test flakiness. Setting 0 here disables idle connections
+                // and forces it to open a new one for each request.
+                .pool_max_idle_per_host(0)
                 .build()
                 .unwrap()
         }

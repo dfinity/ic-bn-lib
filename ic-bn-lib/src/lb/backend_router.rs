@@ -217,7 +217,7 @@ mod test {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_request_router_somewhat_healthy() {
         let executor = Arc::new(TestExecutor(Duration::ZERO, Mutex::new(HashMap::new())));
 
@@ -252,7 +252,7 @@ mod test {
         drop(h)
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_request_router_unhealthy() {
         let executor = Arc::new(TestExecutor(Duration::ZERO, Mutex::new(HashMap::new())));
 

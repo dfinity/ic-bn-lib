@@ -26,7 +26,8 @@ pub mod tests;
 pub mod tls;
 #[cfg(feature = "vector")]
 pub mod vector;
-use std::{fs::File, net::IpAddr, path::Path};
+
+use std::{fmt::Display, fs::File, net::IpAddr, path::Path, time::Duration};
 
 use anyhow::{Context, anyhow};
 use bytes::Bytes;
@@ -41,6 +42,8 @@ pub use hickory_resolver;
 pub use hyper;
 pub use hyper_util;
 pub use ic_agent;
+pub use ic_transport_types;
+pub use ipnet;
 #[cfg(feature = "smtp")]
 pub use mail_auth;
 pub use prometheus;
@@ -50,6 +53,7 @@ pub use reqwest;
 pub use rustls;
 #[cfg(feature = "acme-alpn")]
 pub use rustls_acme;
+pub use show_option;
 pub use uuid;
 
 /// Converts a string representation to an `EmailAddress`. Panics when an error occurs.
@@ -62,6 +66,16 @@ macro_rules! email {
 #[macro_export]
 macro_rules! principal {
     ($id:expr) => {{ candid::Principal::from_text($id).unwrap() }};
+}
+
+#[doc(hidden)]
+pub use regex as __regex;
+
+/// Converts a string representation to a `regex::Regex`. Panics when an error occurs.
+/// Regex crate also has a regex! macro, but it returns a reference to a static value.
+#[macro_export]
+macro_rules! regex {
+    ($id:expr) => {{ $crate::__regex::Regex::new($id).unwrap() }};
 }
 
 /// tdb26-jop6k-aogll-7ltgs-eruif-6kk7m-qpktf-gdiqx-mxtrf-vb5e6-eqe
@@ -373,6 +387,93 @@ pub fn truncate(s: &str, n: usize) -> &str {
     &s[..m]
 }
 
+/// Best-effort (w/o assembly) constant-time comparison for byte slices
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
+/// Implements display for Duration
+pub trait DurationDisplay<'a> {
+    /// Implements Display for Duration in a human-friendly format
+    fn display(&self) -> DisplayDuration;
+}
+
+/// Displays Duration in a human-friendly format
+pub struct DisplayDuration(Duration);
+
+impl DurationDisplay<'_> for Duration {
+    fn display(&self) -> DisplayDuration {
+        DisplayDuration(*self)
+    }
+}
+
+impl Display for DisplayDuration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut secs = self.0.as_secs();
+        // If the duration is shorter than a second - use a distinct approach
+        if secs == 0 {
+            let nanos = self.0.as_nanos();
+            if nanos < 1000 {
+                return write!(f, "{nanos}ns");
+            }
+
+            let micros = self.0.as_micros();
+            if micros < 1000 {
+                return write!(f, "{micros}us");
+            }
+
+            return write!(f, "{}ms", self.0.as_millis());
+        }
+
+        // If the duration is shorter than a minute,
+        // use seconds with a fractional part.
+        // Truncate (rather than round) the fraction so that e.g. 59.999s
+        // doesn't get displayed as "60.00s".
+        if secs < 60 {
+            let hundredths = self.0.subsec_millis() / 10;
+            return write!(f, "{secs}.{hundredths:02}s");
+        }
+
+        // Average year is 365.24 days...
+        let years = secs / 365 / 86400;
+        if years > 0 {
+            secs -= years * 86400 * 365;
+            write!(f, "{years}y")?;
+        }
+
+        let days = secs / 86400;
+        if days > 0 {
+            secs -= days * 86400;
+            write!(f, "{days}d")?;
+        }
+
+        let hours = secs / 3600;
+        if hours > 0 {
+            secs -= hours * 3600;
+            write!(f, "{hours}h")?;
+        }
+
+        let mins = secs / 60;
+        if mins > 0 {
+            secs -= mins * 60;
+            write!(f, "{mins}m")?;
+        }
+
+        if secs > 0 {
+            write!(f, "{secs}s")?;
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -417,5 +518,55 @@ mod test {
             elapsed < timeout + Duration::from_millis(100),
             "retry_async! ran for {elapsed:?}, expected to stay close to the {timeout:?} budget"
         );
+    }
+
+    #[test]
+    fn test_constant_time_eq() {
+        assert!(constant_time_eq(b"foo", b"foo"));
+        assert!(!constant_time_eq(b"foo", b"bar"));
+        assert!(!constant_time_eq(b"foobar", b"bar"));
+    }
+
+    #[test]
+    fn test_duration_display() {
+        assert_eq!(
+            Duration::from_secs(31626061).display().to_string(),
+            "1y1d1h1m1s"
+        );
+        assert_eq!(Duration::from_hours(72).display().to_string(), "3d");
+        assert_eq!(Duration::from_hours(80).display().to_string(), "3d8h");
+        assert_eq!(Duration::from_mins(4812).display().to_string(), "3d8h12m");
+        assert_eq!(
+            Duration::from_secs(288735).display().to_string(),
+            "3d8h12m15s"
+        );
+        assert_eq!(
+            Duration::from_millis(288735123).display().to_string(),
+            "3d8h12m15s"
+        );
+
+        // Sub-second formatting
+        assert_eq!(Duration::ZERO.display().to_string(), "0ns");
+        assert_eq!(Duration::from_nanos(999).display().to_string(), "999ns");
+        assert_eq!(Duration::from_micros(1).display().to_string(), "1us");
+        assert_eq!(Duration::from_micros(999).display().to_string(), "999us");
+        // Exactly 1000us should roll over to the ms branch, not stay "1000us"
+        assert_eq!(Duration::from_micros(1000).display().to_string(), "1ms");
+        assert_eq!(Duration::from_millis(1).display().to_string(), "1ms");
+        assert_eq!(Duration::from_millis(999).display().to_string(), "999ms");
+
+        // Sub-minute fractional seconds
+        assert_eq!(Duration::from_millis(1001).display().to_string(), "1.00s");
+        assert_eq!(Duration::from_millis(59494).display().to_string(), "59.49s");
+        assert_eq!(Duration::from_millis(59999).display().to_string(), "59.99s");
+
+        // Minute/hour/day/year boundaries, exact and with skipped middle units
+        assert_eq!(Duration::from_millis(60001).display().to_string(), "1m");
+        assert_eq!(Duration::from_secs(60).display().to_string(), "1m");
+        assert_eq!(Duration::from_secs(3600).display().to_string(), "1h");
+        assert_eq!(Duration::from_secs(3605).display().to_string(), "1h5s");
+        assert_eq!(Duration::from_secs(86400).display().to_string(), "1d");
+        assert_eq!(Duration::from_secs(86400 + 5).display().to_string(), "1d5s");
+        assert_eq!(Duration::from_secs(365 * 86400).display().to_string(), "1y");
     }
 }

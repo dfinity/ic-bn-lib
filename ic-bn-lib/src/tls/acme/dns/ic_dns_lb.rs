@@ -113,6 +113,7 @@ impl DnsManager for IcDnsLb {
             let mut url = url.clone();
 
             // Strip trailing slash if exists & add path
+            // SAFETY: cannot-be-a-base is checked in new()
             url.path_segments_mut()
                 .unwrap()
                 .pop_if_empty()
@@ -139,6 +140,7 @@ impl DnsManager for IcDnsLb {
             let mut url = url.clone();
 
             // Strip trailing slash if exists & add path
+            // SAFETY: cannot-be-a-base is checked in new()
             url.path_segments_mut().unwrap().pop_if_empty().extend([
                 "acme-challenge",
                 "unset",

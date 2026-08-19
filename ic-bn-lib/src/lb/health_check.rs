@@ -314,7 +314,7 @@ mod test {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_health_checker() {
         // Some are healthy
         let target_checker = Arc::new(TestChecker);

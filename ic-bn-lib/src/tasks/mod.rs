@@ -5,6 +5,8 @@ use derive_new::new;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{error, warn};
 
+use crate::DurationDisplay;
+
 // A runnable task that can be cancelled by a token
 #[async_trait]
 pub trait Run: Send + Sync {
@@ -27,9 +29,9 @@ struct IntervalRunner(Duration, Task);
 impl Run for IntervalRunner {
     async fn run(&self, token: CancellationToken) -> Result<(), anyhow::Error> {
         warn!(
-            "Task '{}': running with interval {}s",
+            "Task '{}': running with interval {}",
             self.1,
-            self.0.as_secs()
+            self.0.display()
         );
 
         let mut interval = tokio::time::interval(self.0);
@@ -135,7 +137,7 @@ mod test {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_add_runs_task_once() {
         let count = Arc::new(AtomicUsize::new(0));
 
@@ -150,7 +152,7 @@ mod test {
         assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_add_interval_runs_task_repeatedly() {
         let count = Arc::new(AtomicUsize::new(0));
 
@@ -172,7 +174,7 @@ mod test {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_stop_cancels_running_tasks() {
         let count = Arc::new(AtomicUsize::new(0));
 

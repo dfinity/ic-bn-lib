@@ -1,44 +1,50 @@
 use std::{
+    future::ready,
+    hash::Hash,
     net::IpAddr,
+    num::NonZeroU32,
     sync::Arc,
     task::{Context, Poll},
     time::Duration,
 };
 
-use ::governor::{clock::QuantaInstant, middleware::NoOpMiddleware};
 use anyhow::{Error, anyhow};
-use axum::{body::Body, extract::Request, response::IntoResponse, response::Response};
+use arc_swap::ArcSwap;
+use axum::{extract::Request, response::IntoResponse, response::Response};
 use bytes::Bytes;
 use futures::future::BoxFuture;
-use http::{HeaderName, HeaderValue, StatusCode};
-use tower::{Layer, Service};
-use tower_governor::{
-    GovernorError, GovernorLayer,
-    governor::{Governor, GovernorConfig, GovernorConfigBuilder},
-    key_extractor::{GlobalKeyExtractor, KeyExtractor},
+use governor::{
+    Quota,
+    clock::{Clock, DefaultClock, Reference},
+    middleware::NoOpMiddleware,
+    nanos::Nanos,
+    state::keyed::DashMapStateStore,
 };
+use http::{HeaderName, HeaderValue, StatusCode, header::RETRY_AFTER};
+use tower::{Layer, Service};
 
-use crate::{hname, http::middleware::extract_ip_from_request};
+use crate::{constant_time_eq, hname, http::middleware::RemoteAddr};
 
-pub type GovernorLayerAxum<K> = GovernorLayer<K, NoOpMiddleware<QuantaInstant>, Body>;
+const BYPASS_TOKEN_HEADER: HeaderName = hname!("x-ratelimit-bypass-token");
 
-const BYPASS_HEADER: HeaderName = hname!("x-ratelimit-bypass-token");
+/// The `governor` rate limiter type that backs this middleware, generic over the clock so
+/// that tests can inject `governor::clock::FakeRelativeClock` instead of the real-time
+/// default clock.
+type GovRateLimiter<K, C> =
+    governor::RateLimiter<K, DashMapStateStore<K>, C, NoOpMiddleware<<C as Clock>::Instant>>;
 
-/// Constant-time comparison of the bypass header against the configured
-/// token, so that a network timing side-channel can't be used to recover the
-/// token byte-by-byte.
-fn bypass_token_matches(hdr: &HeaderValue, token: &str) -> bool {
-    let a = hdr.as_bytes();
-    let b = token.as_bytes();
+/// Converts a `governor` wait-time into a whole-second `Retry-After` value. Rounds down, but
+/// never advertises less than 1 second.
+fn retry_after_seconds(wait_time: Duration) -> u32 {
+    std::cmp::max(wait_time.as_secs(), 1) as u32
+}
 
-    if a.len() != b.len() {
-        return false;
-    }
+/// Extracts a rate-limiting key from the request. Returns `None` if a key cannot be
+/// determined, in which case the request is rejected rather than let through unlimited.
+pub trait KeyExtractor: Clone + Send + Sync + 'static {
+    type Key: Clone + Eq + Hash + Send + Sync + 'static;
 
-    a.iter()
-        .zip(b.iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
+    fn extract<B>(&self, req: &Request<B>) -> Option<Self::Key>;
 }
 
 /// Extracts an IP from the request as a rate-limiting key
@@ -48,25 +54,47 @@ pub struct IpKeyExtractor;
 impl KeyExtractor for IpKeyExtractor {
     type Key = IpAddr;
 
-    fn extract<B>(&self, req: &Request<B>) -> Result<Self::Key, GovernorError> {
-        extract_ip_from_request(req).ok_or(GovernorError::UnableToExtractKey)
+    fn extract<B>(&self, req: &Request<B>) -> Option<Self::Key> {
+        req.extensions().get::<RemoteAddr>().map(|x| x.0)
     }
+}
+
+/// Extracts a constant key so that all requests share a single rate-limiting bucket
+#[derive(Clone)]
+pub struct GlobalKeyExtractor;
+
+impl KeyExtractor for GlobalKeyExtractor {
+    type Key = ();
+
+    fn extract<B>(&self, _req: &Request<B>) -> Option<Self::Key> {
+        Some(())
+    }
+}
+
+struct RateLimiterState<K: KeyExtractor, R, C: Clock> {
+    key_extractor: K,
+    limiter: GovRateLimiter<K::Key, C>,
+    rate_limited_response: R,
+    bypass_token: Option<String>,
+    last_cleanup: ArcSwap<C::Instant>,
 }
 
 /// Ratelimiter that implements Tower Service
 #[derive(Clone)]
-pub struct RateLimiter<S, K: KeyExtractor> {
-    governor: Governor<K, NoOpMiddleware<QuantaInstant>, S, Body>,
-    bypass_token: Option<String>,
+pub struct RateLimiter<S, K: KeyExtractor, R, C: Clock = DefaultClock> {
+    state: Arc<RateLimiterState<K, R, C>>,
     inner: S,
 }
 
 /// Implement Tower Service for RateLimiter
-impl<S, K> Service<Request> for RateLimiter<S, K>
+impl<S, K, R, C> Service<Request> for RateLimiter<S, K, R, C>
 where
     S: Service<Request, Response = Response> + Send + 'static,
     S::Future: Send + 'static,
+    S::Error: Send + 'static,
     K: KeyExtractor,
+    R: IntoResponse + Clone + Send + Sync + 'static,
+    C: Clock + Send + Sync + 'static,
 {
     type Response = S::Response;
     type Error = S::Error;
@@ -77,13 +105,22 @@ where
     }
 
     fn call(&mut self, request: Request) -> Self::Future {
+        /// Stale entries cleanup interval - 5 minutes
+        const CLEANUP_INTERVAL: Nanos = Nanos::new(300_000_000_000);
+
         // Check that bypass token is configured, header was sent and it matches
         let bypass = request
             .headers()
-            .get(BYPASS_HEADER)
-            .zip(self.bypass_token.as_ref())
-            .map(|(hdr, token)| bypass_token_matches(hdr, token))
-            == Some(true);
+            .get(BYPASS_TOKEN_HEADER)
+            .zip(self.state.bypass_token.as_ref())
+            .is_some_and(|(hdr, token)| constant_time_eq(hdr.as_bytes(), token.as_bytes()));
+
+        // Clean up stale entries from time to time
+        let now = self.state.limiter.clock().now();
+        if now.duration_since(*self.state.last_cleanup.load_full()) > CLEANUP_INTERVAL {
+            self.state.last_cleanup.store(Arc::new(now));
+            self.state.limiter.retain_recent();
+        }
 
         // If bypassing - call the wrapped service directly
         if bypass {
@@ -91,61 +128,54 @@ where
             return Box::pin(fut);
         }
 
-        // Otherwise go through Governor
-        let fut = self.governor.call(request);
-        Box::pin(fut)
+        // Fail if we can't determine a rate-limiting key for the request
+        let Some(key) = self.state.key_extractor.extract(&request) else {
+            let response = (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to extract rate limiting key",
+            )
+                .into_response();
+
+            return Box::pin(ready(Ok(response)));
+        };
+
+        match self.state.limiter.check_key(&key) {
+            Ok(()) => Box::pin(self.inner.call(request)),
+
+            Err(not_until) => {
+                let wait_time = not_until.wait_time_from(self.state.limiter.clock().now());
+                let retry_secs = retry_after_seconds(wait_time);
+
+                let mut response = self.state.rate_limited_response.clone().into_response();
+                let header_value =
+                    HeaderValue::from_maybe_shared(Bytes::from(retry_secs.to_string())).unwrap();
+                response.headers_mut().insert(RETRY_AFTER, header_value);
+
+                Box::pin(ready(Ok(response)))
+            }
+        }
     }
 }
 
 /// Layer usable as an Axum middleware
 #[derive(Clone, derive_new::new)]
-pub struct RateLimiterLayer<K: KeyExtractor, R> {
-    config: Arc<GovernorConfig<K, NoOpMiddleware<QuantaInstant>>>,
-    rate_limited_response: R,
-    bypass_token: Option<String>,
+pub struct RateLimiterLayer<K: KeyExtractor, R, C: Clock = DefaultClock> {
+    state: Arc<RateLimiterState<K, R, C>>,
 }
 
-impl<S, K, R> Layer<S> for RateLimiterLayer<K, R>
+impl<S, K, R, C> Layer<S> for RateLimiterLayer<K, R, C>
 where
     S: Clone,
     K: KeyExtractor,
     R: IntoResponse + Clone + Send + Sync + 'static,
+    C: Clock + Send + Sync + 'static,
 {
-    type Service = RateLimiter<S, K>;
+    type Service = RateLimiter<S, K, R, C>;
 
     fn layer(&self, inner: S) -> Self::Service {
-        let rate_limited_response = self.rate_limited_response.clone();
-
-        let governor = Governor::new(inner.clone(), &self.config).error_handler(move |err| {
-            match err {
-                GovernorError::TooManyRequests { wait_time, headers: _ } => {
-                    let mut response = rate_limited_response.clone().into_response();
-                    // Add Retry-After header using timing from governor
-                    // wait_time is in milliseconds, convert to seconds (minimum 1 second)
-                    let retry_secs = ((wait_time / 1000).max(1)) as u32;
-                    let header_value = HeaderValue::from_maybe_shared(Bytes::from(retry_secs.to_string())).unwrap();
-                    response.headers_mut().insert(http::header::RETRY_AFTER, header_value);
-                    response
-                },
-                GovernorError::UnableToExtractKey => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Unable to extract rate limiting key",
-                )
-                    .into_response(),
-                GovernorError::Other { code, msg, headers } => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!(
-                        "Rate limiter failed unexpectedly: code={code}, msg={msg:?}, headers={headers:?}"
-                    ),
-                )
-                    .into_response()
-            }
-        });
-
         RateLimiter {
-            governor,
-            bypass_token: self.bypass_token.clone(),
             inner,
+            state: self.state.clone(),
         }
     }
 }
@@ -190,28 +220,53 @@ pub fn layer<K: KeyExtractor, R: IntoResponse + Clone + Send + Sync + 'static>(
     rate_limited_response: R,
     bypass_token: Option<String>,
 ) -> Result<RateLimiterLayer<K, R>, Error> {
+    layer_with_clock(
+        rps,
+        burst_size,
+        key_extractor,
+        rate_limited_response,
+        bypass_token,
+        DefaultClock::default(),
+    )
+}
+
+/// Create a ratelimiter with a provided key extractor and clock. This custom clock is there so
+/// that tests can supply a `FakeRelativeClock` and drive the rate limiter's
+/// time deterministically, without depending on real wall-clock delays.
+fn layer_with_clock<K: KeyExtractor, R: IntoResponse + Clone + Send + Sync + 'static, C: Clock>(
+    rps: u32,
+    burst_size: u32,
+    key_extractor: K,
+    rate_limited_response: R,
+    bypass_token: Option<String>,
+    clock: C,
+) -> Result<RateLimiterLayer<K, R, C>, Error> {
     let period = Duration::from_secs(1)
         .checked_div(rps)
         .ok_or_else(|| anyhow!("RPS is zero"))?;
 
-    let config = GovernorConfigBuilder::default()
-        .period(period)
-        .burst_size(burst_size)
-        .key_extractor(key_extractor)
-        .finish()
-        .ok_or_else(|| anyhow!("unable to build governor config"))?;
+    let burst = NonZeroU32::new(burst_size).ok_or_else(|| anyhow!("burst size is zero"))?;
 
-    Ok(RateLimiterLayer::new(
-        Arc::new(config),
-        rate_limited_response,
-        bypass_token,
-    ))
+    let quota = Quota::with_period(period)
+        .ok_or_else(|| anyhow!("period is zero"))?
+        .allow_burst(burst);
+
+    let limiter = GovRateLimiter::<K::Key, C>::dashmap_with_clock(quota, clock);
+    let last_cleanup = ArcSwap::new(limiter.clock().now().into());
+
+    Ok(RateLimiterLayer {
+        state: Arc::new(RateLimiterState {
+            key_extractor,
+            limiter,
+            rate_limited_response,
+            bypass_token,
+            last_cleanup,
+        }),
+    })
 }
 
 #[cfg(test)]
 mod test {
-    use crate::http::server::conn::ConnInfo;
-
     use super::*;
 
     use axum::{
@@ -221,9 +276,9 @@ mod test {
         response::IntoResponse,
         routing::post,
     };
+    use governor::clock::FakeRelativeClock;
     use http::{Method, StatusCode};
-    use std::{sync::Arc, time::Duration};
-    use tokio::time::sleep;
+    use std::str::FromStr;
     use tower::Service;
 
     async fn handler(_request: Request<Body>) -> impl IntoResponse {
@@ -232,24 +287,83 @@ mod test {
 
     async fn send_request(
         router: &mut Router,
+        ip: &str,
     ) -> Result<http::Response<Body>, std::convert::Infallible> {
-        let conn_info = ConnInfo::default();
         let mut request = Request::post("/").body(Body::from("".to_string())).unwrap();
-        request.extensions_mut().insert(Arc::new(conn_info));
+        request
+            .extensions_mut()
+            .insert(RemoteAddr(IpAddr::from_str(ip).unwrap()));
         router.call(request).await
     }
 
-    #[tokio::test]
+    fn retry_after_header(response: &http::Response<Body>) -> u32 {
+        response
+            .headers()
+            .get(http::header::RETRY_AFTER)
+            .expect("Retry-After header missing on 429 response")
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_retry_after_seconds() {
+        // Rounds down, but never below 1 second
+        assert_eq!(retry_after_seconds(Duration::from_millis(0)), 1);
+        assert_eq!(retry_after_seconds(Duration::from_millis(500)), 1);
+        assert_eq!(retry_after_seconds(Duration::from_millis(999)), 1);
+        assert_eq!(retry_after_seconds(Duration::from_millis(1000)), 1);
+        assert_eq!(retry_after_seconds(Duration::from_millis(1999)), 1);
+        assert_eq!(retry_after_seconds(Duration::from_millis(2000)), 2);
+        assert_eq!(retry_after_seconds(Duration::from_millis(2999)), 2);
+        assert_eq!(retry_after_seconds(Duration::from_secs(10)), 10);
+    }
+
+    #[test]
+    fn test_layer_rejects_zero_rps() {
+        assert!(
+            layer(
+                0,
+                5,
+                IpKeyExtractor,
+                (StatusCode::TOO_MANY_REQUESTS, "foo"),
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_layer_rejects_zero_burst_size() {
+        assert!(
+            layer(
+                5,
+                0,
+                IpKeyExtractor,
+                (StatusCode::TOO_MANY_REQUESTS, "foo"),
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    // Uses a `FakeRelativeClock` so token refills are driven by explicit
+    // advances rather than sleeps
+    #[tokio::test(start_paused = true)]
     async fn test_rate_limiter_rps_limit() {
         let rps = 5;
         let burst_size = 5; // how many requests can go through at once (without delay)
+        let period = Duration::from_secs(1) / rps; // time for one token to refill
 
-        let rate_limiter_mw = layer(
+        let clock = FakeRelativeClock::default();
+        let rate_limiter_mw = layer_with_clock(
             rps,
             burst_size,
             IpKeyExtractor,
             (StatusCode::TOO_MANY_REQUESTS, "foo"),
             None,
+            clock.clone(),
         )
         .expect("failed to build middleware");
 
@@ -257,66 +371,122 @@ mod test {
             .route("/", post(handler))
             .layer(rate_limiter_mw);
 
-        // Test cases: (delay_ms, expected_status)
-        let delay_for_token_ms = 230; // when a token should become available ~ 1000ms/rps=200ms (we add some delta=30 ms to avoid flakiness)
-        let test_cases = vec![
-            // Initial burst of 5 requests should succeed and fills full burst capacity
-            (0, StatusCode::OK),
-            (0, StatusCode::OK),
-            (0, StatusCode::OK),
-            (0, StatusCode::OK),
-            (0, StatusCode::OK),
-            // For 6th request no tokens left => 429
-            (0, StatusCode::TOO_MANY_REQUESTS),
-            // Wait for 1 token to be available
-            (delay_for_token_ms, StatusCode::OK),
-            // Bucket is empty again, request should fail
-            (0, StatusCode::TOO_MANY_REQUESTS),
-            // Wait for 2 tokens to be available, next 2 requests succeed
-            (2 * delay_for_token_ms, StatusCode::OK),
-            (0, StatusCode::OK),
-            // Bucket is empty again, request should fail
-            (0, StatusCode::TOO_MANY_REQUESTS),
-            // Wait for 5 tokens, next 5 requests succeed
-            (5 * delay_for_token_ms, StatusCode::OK),
-            (0, StatusCode::OK),
-            (0, StatusCode::OK),
-            (0, StatusCode::OK),
-            (0, StatusCode::OK),
-            // Bucket is empty again, requests should fail
-            (0, StatusCode::TOO_MANY_REQUESTS),
-            (0, StatusCode::TOO_MANY_REQUESTS),
-        ];
+        // Initial burst of 5 requests should succeed and fills full burst capacity
+        for _ in 0..5 {
+            let result = send_request(&mut app, "1.1.1.1").await.unwrap();
+            assert_eq!(result.status(), StatusCode::OK);
+        }
 
-        // Execute all tests
-        for (idx, (delay_ms, expected_status)) in test_cases.into_iter().enumerate() {
-            if delay_ms > 0 {
-                sleep(Duration::from_millis(delay_ms)).await;
-            }
-            let result = send_request(&mut app).await.unwrap();
-            assert_eq!(result.status(), expected_status, "test {idx} failed");
+        // For 6th request no tokens left => 429
+        let result = send_request(&mut app, "1.1.1.1").await.unwrap();
+        assert_eq!(result.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(retry_after_header(&result), 1);
 
-            // Verify Retry-After header is present on rate-limited responses
-            if expected_status == StatusCode::TOO_MANY_REQUESTS {
-                let retry_after = result.headers().get(http::header::RETRY_AFTER);
-                assert!(
-                    retry_after.is_some(),
-                    "test {idx}: Retry-After header missing on 429 response"
-                );
+        // Advance the fake clock by exactly one token's worth of time (no real waiting)
+        clock.advance(period);
+        let result = send_request(&mut app, "1.1.1.1").await.unwrap();
+        assert_eq!(result.status(), StatusCode::OK);
 
-                // Verify the header value is a valid number and reasonable (between 1 and 10 seconds)
-                if let Some(header_value) = retry_after {
-                    let retry_secs: u32 = header_value.to_str().unwrap().parse().unwrap();
-                    assert!(
-                        (1..=10).contains(&retry_secs),
-                        "test {idx}: Retry-After value {retry_secs} is outside expected range [1, 10]"
-                    );
-                }
-            }
+        // Bucket is empty again, request should fail
+        let result = send_request(&mut app, "1.1.1.1").await.unwrap();
+        assert_eq!(result.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // Advance for 2 tokens to be available, next 2 requests succeed
+        clock.advance(2 * period);
+        for _ in 0..2 {
+            let result = send_request(&mut app, "1.1.1.1").await.unwrap();
+            assert_eq!(result.status(), StatusCode::OK);
+        }
+
+        // Bucket is empty again, request should fail
+        let result = send_request(&mut app, "1.1.1.1").await.unwrap();
+        assert_eq!(result.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // Advance for 5 tokens (full burst), next 5 requests succeed
+        clock.advance(5 * period);
+        for _ in 0..5 {
+            let result = send_request(&mut app, "1.1.1.1").await.unwrap();
+            assert_eq!(result.status(), StatusCode::OK);
+        }
+
+        // Bucket is empty again, requests should fail
+        for _ in 0..2 {
+            let result = send_request(&mut app, "1.1.1.1").await.unwrap();
+            assert_eq!(result.status(), StatusCode::TOO_MANY_REQUESTS);
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
+    async fn test_rate_limiter_retry_after_decreases_as_clock_advances() {
+        let clock = FakeRelativeClock::default();
+        let rate_limiter_mw = layer_with_clock(
+            1,
+            1,
+            IpKeyExtractor,
+            (StatusCode::TOO_MANY_REQUESTS, "foo"),
+            None,
+            clock.clone(),
+        )
+        .expect("failed to build middleware");
+
+        let mut app = Router::new()
+            .route("/", post(handler))
+            .layer(rate_limiter_mw);
+
+        // Consume the only token
+        let result = send_request(&mut app, "1.1.1.1").await.unwrap();
+        assert_eq!(result.status(), StatusCode::OK);
+
+        // Full period (1s) remaining
+        let result = send_request(&mut app, "1.1.1.1").await.unwrap();
+        assert_eq!(result.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(retry_after_header(&result), 1);
+
+        // Once the period has fully elapsed the token is available again
+        clock.advance(Duration::from_secs(1));
+        let result = send_request(&mut app, "1.1.1.1").await.unwrap();
+        assert_eq!(result.status(), StatusCode::OK);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_rate_limiter_per_key_independence() {
+        let clock = FakeRelativeClock::default();
+        let rate_limiter_mw = layer_with_clock(
+            1,
+            1,
+            IpKeyExtractor,
+            (StatusCode::TOO_MANY_REQUESTS, "foo"),
+            None,
+            clock.clone(),
+        )
+        .expect("failed to build middleware");
+
+        let mut app = Router::new()
+            .route("/", post(handler))
+            .layer(rate_limiter_mw);
+
+        // IP A consumes its only token and gets rate-limited
+        assert_eq!(
+            send_request(&mut app, "1.1.1.1").await.unwrap().status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            send_request(&mut app, "1.1.1.1").await.unwrap().status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+
+        // IP B has its own independent bucket and is unaffected
+        assert_eq!(
+            send_request(&mut app, "2.2.2.2").await.unwrap().status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            send_request(&mut app, "2.2.2.2").await.unwrap().status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn test_rate_limiter_returns_server_error() {
         let rps = 1;
         let burst_size = 1;
@@ -343,26 +513,7 @@ mod test {
         assert_eq!(body, b"Unable to extract rate limiting key");
     }
 
-    #[test]
-    fn test_bypass_token_matches() {
-        let token = "top_secret_token";
-        assert!(bypass_token_matches(
-            &HeaderValue::from_static("top_secret_token"),
-            token
-        ));
-        assert!(!bypass_token_matches(
-            &HeaderValue::from_static("not_very_secret"),
-            token
-        ));
-        // Different length must not match either, and must not panic.
-        assert!(!bypass_token_matches(
-            &HeaderValue::from_static("short"),
-            token
-        ));
-        assert!(!bypass_token_matches(&HeaderValue::from_static(""), token));
-    }
-
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_rate_limiter_bypass_token() {
         let rate_limiter_mw = layer(
             1,
@@ -401,7 +552,7 @@ mod test {
         for _ in 0..100 {
             let req = Request::builder()
                 .method(Method::POST)
-                .header(BYPASS_HEADER, "top_secret_token")
+                .header(BYPASS_TOKEN_HEADER, "top_secret_token")
                 .body(Body::empty())
                 .unwrap();
             let res = app.call(req).await.unwrap();
@@ -412,11 +563,96 @@ mod test {
         for _ in 0..100 {
             let req = Request::builder()
                 .method(Method::POST)
-                .header(BYPASS_HEADER, "not_very_secret")
+                .header(BYPASS_TOKEN_HEADER, "not_very_secret")
                 .body(Body::empty())
                 .unwrap();
             let res = app.call(req).await.unwrap();
             assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_rate_limiter_cleans_up_stale_entries() {
+        let clock = FakeRelativeClock::default();
+        let rate_limiter_mw = layer_with_clock(
+            1,
+            1,
+            IpKeyExtractor,
+            (StatusCode::TOO_MANY_REQUESTS, "foo"),
+            None,
+            clock.clone(),
+        )
+        .expect("failed to build middleware");
+
+        // Keep a handle to the underlying governor limiter so we can observe how many
+        // keys it's tracking, independently of the middleware wrapping it.
+        let state = rate_limiter_mw.state.clone();
+        let limiter = &state.limiter;
+
+        let mut app = Router::new()
+            .route("/", post(handler))
+            .layer(rate_limiter_mw);
+
+        // Two distinct keys get tracked in the limiter's state
+        send_request(&mut app, "1.1.1.1").await.unwrap();
+        send_request(&mut app, "2.2.2.2").await.unwrap();
+        assert_eq!(limiter.len(), 2);
+
+        // Advancing by less than the cleanup interval (10 minutes) leaves stale
+        // entries in place, even though their buckets have long since refilled.
+        clock.advance(Duration::from_secs(60));
+        send_request(&mut app, "3.3.3.3").await.unwrap();
+        assert_eq!(limiter.len(), 3);
+
+        // Once the cleanup interval has elapsed, the next request triggers a sweep
+        // that drops entries indistinguishable from a fresh bucket -- i.e. all three
+        // previously-seen keys -- before the new key is inserted.
+        clock.advance(Duration::from_secs(600));
+        send_request(&mut app, "4.4.4.4").await.unwrap();
+        assert_eq!(limiter.len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_layer_global_wrapper() {
+        let rate_limiter_mw =
+            layer_global(2, 2, (StatusCode::TOO_MANY_REQUESTS, "foo"), None).unwrap();
+
+        let mut app = Router::new()
+            .route("/", post(handler))
+            .layer(rate_limiter_mw);
+
+        for _ in 0..2 {
+            let req = Request::builder()
+                .method(Method::POST)
+                .body(Body::empty())
+                .unwrap();
+            let res = app.call(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+        }
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .body(Body::empty())
+            .unwrap();
+        let res = app.call(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_layer_by_ip_wrapper() {
+        let rate_limiter_mw =
+            layer_by_ip(2, 2, (StatusCode::TOO_MANY_REQUESTS, "foo"), None).unwrap();
+
+        let mut app = Router::new()
+            .route("/", post(handler))
+            .layer(rate_limiter_mw);
+
+        for _ in 0..2 {
+            let result = send_request(&mut app, "1.1.1.1").await.unwrap();
+            assert_eq!(result.status(), StatusCode::OK);
+        }
+
+        let result = send_request(&mut app, "1.1.1.1").await.unwrap();
+        assert_eq!(result.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 }
