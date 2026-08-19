@@ -28,6 +28,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, info, warn};
 
 use crate::{
+    DurationDisplay,
     http::{Error, server::metrics::Metrics},
     network::{Addr, AsyncReadWrite, ListenerOpts, listener::Listener},
     tasks::Run,
@@ -323,7 +324,7 @@ impl Server {
                     // Stop accepting new connections
                     drop(listener);
 
-                    warn!("{self}: shutting down, waiting for the active connections to close for {}s", self.options.grace_period.as_secs());
+                    warn!("{self}: shutting down, waiting for the active connections to close for {}", self.options.grace_period.display());
                     self.tracker.close();
 
                     select! {

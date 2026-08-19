@@ -32,6 +32,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
 
 use crate::{
+    DurationDisplay,
     custom_domains::{
         CustomDomain, ProvidesCustomDomains,
         base::{
@@ -49,8 +50,7 @@ use crate::{
     },
     ic_agent::Agent,
     tasks::Run,
-    tls::Pem,
-    tls::ProvidesCertificates,
+    tls::{Pem, ProvidesCertificates},
 };
 
 #[derive(new)]
@@ -426,9 +426,9 @@ impl Run for CanisterClient {
         interval_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         warn!(
-            "Started polling every {}s, full refresh every {}s",
-            self.poll_interval.as_secs_f64(),
-            self.refresh_interval.as_secs_f64()
+            "Started polling every {}, full refresh every {}",
+            self.poll_interval.display(),
+            self.refresh_interval.display()
         );
 
         loop {

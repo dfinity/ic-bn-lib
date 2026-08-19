@@ -23,6 +23,7 @@ use tracing::{debug, warn};
 use url::Url;
 
 use crate::{
+    DurationDisplay,
     http::{Client as HttpClient, client::basic_auth, headers::CONTENT_TYPE_OCTET_STREAM},
     hval,
     vector::{self, VectorOptions},
@@ -540,9 +541,9 @@ impl Flusher {
                     .inc();
 
                 warn!(
-                    "{self}: unable to send (try {}, retry interval {}s): {e:#}",
+                    "{self}: unable to send (try {}, retry interval {}): {e:#}",
                     retries,
-                    interval.as_secs_f64()
+                    interval.display()
                 );
             } else {
                 self.metrics
@@ -558,7 +559,7 @@ impl Flusher {
                     .with_label_values(&[self.namespace.as_str(), "yes"])
                     .inc();
 
-                debug!("{self}: batch sent in {}s", start.elapsed().as_secs_f64());
+                debug!("{self}: batch sent in {}", start.elapsed().display());
                 return Ok(());
             }
 

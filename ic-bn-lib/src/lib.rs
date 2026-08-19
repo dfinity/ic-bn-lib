@@ -402,19 +402,19 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// Implements display for Duration
 pub trait DurationDisplay<'a> {
     /// Implements Display for Duration in a human-friendly format
-    fn display(&'a self) -> DisplayDuration<'a>;
+    fn display(&self) -> DisplayDuration;
 }
 
 /// Displays Duration in a human-friendly format
-pub struct DisplayDuration<'a>(&'a Duration);
+pub struct DisplayDuration(Duration);
 
 impl DurationDisplay<'_> for Duration {
-    fn display(&self) -> DisplayDuration<'_> {
-        DisplayDuration(self)
+    fn display(&self) -> DisplayDuration {
+        DisplayDuration(*self)
     }
 }
 
-impl Display for DisplayDuration<'_> {
+impl Display for DisplayDuration {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut secs = self.0.as_secs();
         // If the duration is shorter than a second - use a distinct approach
@@ -433,9 +433,12 @@ impl Display for DisplayDuration<'_> {
         }
 
         // If the duration is shorter than a minute,
-        // use floating point seconds
-        if self.0.as_secs() < 60 {
-            return write!(f, "{:.2}s", self.0.as_secs_f32());
+        // use seconds with a fractional part.
+        // Truncate (rather than round) the fraction so that e.g. 59.999s
+        // doesn't get displayed as "60.00s".
+        if secs < 60 {
+            let hundredths = self.0.subsec_millis() / 10;
+            return write!(f, "{secs}.{hundredths:02}s");
         }
 
         // Average year is 365.24 days...
@@ -541,11 +544,29 @@ mod test {
             Duration::from_millis(288735123).display().to_string(),
             "3d8h12m15s"
         );
+
+        // Sub-second formatting
+        assert_eq!(Duration::ZERO.display().to_string(), "0ns");
         assert_eq!(Duration::from_nanos(999).display().to_string(), "999ns");
+        assert_eq!(Duration::from_micros(1).display().to_string(), "1us");
         assert_eq!(Duration::from_micros(999).display().to_string(), "999us");
+        // Exactly 1000us should roll over to the ms branch, not stay "1000us"
+        assert_eq!(Duration::from_micros(1000).display().to_string(), "1ms");
+        assert_eq!(Duration::from_millis(1).display().to_string(), "1ms");
         assert_eq!(Duration::from_millis(999).display().to_string(), "999ms");
+
+        // Sub-minute fractional seconds
         assert_eq!(Duration::from_millis(1001).display().to_string(), "1.00s");
-        assert_eq!(Duration::from_millis(60001).display().to_string(), "1m");
         assert_eq!(Duration::from_millis(59494).display().to_string(), "59.49s");
+        assert_eq!(Duration::from_millis(59999).display().to_string(), "59.99s");
+
+        // Minute/hour/day/year boundaries, exact and with skipped middle units
+        assert_eq!(Duration::from_millis(60001).display().to_string(), "1m");
+        assert_eq!(Duration::from_secs(60).display().to_string(), "1m");
+        assert_eq!(Duration::from_secs(3600).display().to_string(), "1h");
+        assert_eq!(Duration::from_secs(3605).display().to_string(), "1h5s");
+        assert_eq!(Duration::from_secs(86400).display().to_string(), "1d");
+        assert_eq!(Duration::from_secs(86400 + 5).display().to_string(), "1d5s");
+        assert_eq!(Duration::from_secs(365 * 86400).display().to_string(), "1y");
     }
 }
