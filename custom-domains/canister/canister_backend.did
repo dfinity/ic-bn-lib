@@ -361,6 +361,33 @@ type ListDomainsPageResult = variant {
   Err: ListDomainsPageError;
 };
 
+// Input for modifying the entry of an existing domain.
+// Fields left null keep their currently stored value.
+type ModifyDomainEntryInput = record {
+  // Domain whose entry should be modified
+  domain: Domain;
+  // New canister ID the domain should point to
+  canister_id: opt principal;
+};
+
+// Errors that can occur when modifying a domain entry
+type ModifyDomainEntryError = variant {
+  // Indicates an unauthorized operation
+  Unauthorized;
+  // The specified domain was not found
+  DomainNotFound: text;
+  // Internal error with details
+  InternalError: text;
+};
+
+// Result of modifying a domain entry
+type ModifyDomainEntryResult = variant {
+  // Entry successfully modified
+  Ok;
+  // Error occurred while modifying the entry
+  Err: ModifyDomainEntryError;
+};
+
 type HttpRequest = record {
   method: text;
   url: text;
@@ -432,6 +459,17 @@ service: (InitArg) -> {
   // Default limit: 100 domains per page
   // Maximum limit: 400 domains per page
   list_domains_page: (input: ListDomainsPageInput) -> (ListDomainsPageResult) query;
+
+  // Modifies the entry of an existing domain out-of-band, i.e. without going through a
+  // task. It is meant for operational fixes, e.g. repointing a domain at a different
+  // canister without re-issuing its certificate.
+  //
+  // Fields left null in the input keep their currently stored value. Changing the
+  // domain-to-canister mapping bumps the timestamp returned by `get_last_change_time`.
+  //
+  // Note: a task that is already in flight for the domain is left untouched, so a worker
+  // submitting an `Update` result afterwards overwrites the canister ID set here.
+  modify_domain_entry: (input: ModifyDomainEntryInput) -> (ModifyDomainEntryResult);
 
   // Canister metrics (Http Interface)
   http_request: (HttpRequest) -> (HttpResponse) query;

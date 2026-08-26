@@ -8,8 +8,9 @@ use ic_custom_domains_canister_api::{
     GetDomainStatusError, GetDomainStatusResult, GetLastChangeTimeError, GetLastChangeTimeResult,
     HasNextTaskError, HasNextTaskResult, InitArg, InputTask, ListCertificatesPageError,
     ListCertificatesPageInput, ListCertificatesPageResult, ListDomainsPageError,
-    ListDomainsPageInput, ListDomainsPageResult, STALE_DOMAINS_CLEANUP_INTERVAL, SubmitTaskError,
-    SubmitTaskResult, TaskResult, TryAddTaskError, TryAddTaskResult,
+    ListDomainsPageInput, ListDomainsPageResult, ModifyDomainEntryError, ModifyDomainEntryInput,
+    ModifyDomainEntryResult, STALE_DOMAINS_CLEANUP_INTERVAL, SubmitTaskError, SubmitTaskResult,
+    TaskResult, TryAddTaskError, TryAddTaskResult,
 };
 use ic_http_types::{HttpRequest, HttpResponse, HttpResponseBuilder};
 
@@ -113,6 +114,15 @@ async fn try_add_task(task: InputTask) -> TryAddTaskResult {
     validate_caller(TryAddTaskError::Unauthorized)?;
     let now = get_time_secs();
     with_state_mut(|state| state.try_add_task_with_metrics(task, now))
+}
+
+/// Modifies the entry of an existing domain without going through a task, e.g. to
+/// repoint a domain at a different canister without re-issuing its certificate.
+#[update]
+async fn modify_domain_entry(input: ModifyDomainEntryInput) -> ModifyDomainEntryResult {
+    validate_caller(ModifyDomainEntryError::Unauthorized)?;
+    let now = get_time_secs();
+    with_state_mut(|state| state.modify_domain_entry_with_metrics(input, now))
 }
 
 #[query]

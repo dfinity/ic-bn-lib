@@ -4,8 +4,9 @@ use anyhow::{Context, anyhow};
 use candid::{Decode, Encode};
 use hex::encode;
 use ic_custom_domains_canister_api::{
-    FetchTaskResult, GetDomainEntryResult, GetDomainStatusResult, HasNextTaskResult, InitArg,
-    InputTask, SubmitTaskResult, TaskKind, TaskResult, TryAddTaskResult,
+    FetchTaskResult, GetDomainEntryResult, GetDomainStatusResult, GetLastChangeTimeResult,
+    HasNextTaskResult, InitArg, InputTask, ModifyDomainEntryInput, ModifyDomainEntryResult,
+    SubmitTaskResult, TaskKind, TaskResult, TryAddTaskResult,
 };
 use pocket_ic::{PocketIcBuilder, nonblocking::PocketIc};
 use tracing::info;
@@ -154,6 +155,38 @@ impl TestEnv {
             .map_err(|e| anyhow!("update call failed: {e}"))?;
 
         Decode!(&result, SubmitTaskResult).map_err(|_| anyhow!("decoding failed"))
+    }
+
+    pub async fn modify_domain_entry(
+        &self,
+        domain: &str,
+        canister_id: Option<Principal>,
+    ) -> anyhow::Result<ModifyDomainEntryResult> {
+        let input = ModifyDomainEntryInput {
+            domain: domain.to_string(),
+            canister_id,
+        };
+        let arg = Encode!(&input)?;
+
+        let result = self
+            .pic
+            .update_call(self.canister_id, self.sender, "modify_domain_entry", arg)
+            .await
+            .map_err(|e| anyhow!("update call failed: {e}"))?;
+
+        Decode!(&result, ModifyDomainEntryResult).map_err(|_| anyhow!("decoding failed"))
+    }
+
+    pub async fn get_last_change_time(&self) -> anyhow::Result<GetLastChangeTimeResult> {
+        let arg = Encode!(&())?;
+
+        let result = self
+            .pic
+            .query_call(self.canister_id, self.sender, "get_last_change_time", arg)
+            .await
+            .map_err(|e| anyhow!("query call failed: {e}"))?;
+
+        Decode!(&result, GetLastChangeTimeResult).map_err(|_| anyhow!("decoding failed"))
     }
 
     pub async fn fetch_next_task(&self) -> anyhow::Result<FetchTaskResult> {

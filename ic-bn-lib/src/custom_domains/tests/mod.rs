@@ -2,10 +2,10 @@ use anyhow::anyhow;
 use candid::{Decode, Encode, Principal};
 use ic_custom_domains_canister_api::{
     CERTIFICATE_VALIDITY_FRACTION, DomainStatus, HasNextTaskError, HasNextTaskResult,
-    IssueCertificateOutput, MAX_TASK_FAILURES, MIN_TASK_RETRY_DELAY, RegistrationStatus,
-    STALE_DOMAINS_CLEANUP_INTERVAL, ScheduledTask as ScheduledTaskApi, ScheduledTask,
-    SubmitTaskError, TASK_TIMEOUT, TaskFailReason, TaskKind, TaskOutcome, TaskOutput, TaskResult,
-    UNREGISTERED_DOMAIN_EXPIRATION_TIME,
+    IssueCertificateOutput, MAX_TASK_FAILURES, MIN_TASK_RETRY_DELAY, ModifyDomainEntryError,
+    RegistrationStatus, STALE_DOMAINS_CLEANUP_INTERVAL, ScheduledTask as ScheduledTaskApi,
+    ScheduledTask, SubmitTaskError, TASK_TIMEOUT, TaskFailReason, TaskKind, TaskOutcome,
+    TaskOutput, TaskResult, UNREGISTERED_DOMAIN_EXPIRATION_TIME,
 };
 use pocket_ic::nonblocking::PocketIc;
 use std::time::Duration;
@@ -271,6 +271,97 @@ async fn verify_certificate_renewal_tasks_scheduled(env: &TestEnv) -> anyhow::Re
     .await;
     // Now there should be renewal tasks available, we don't fetch the yet
     assert_has_next_task(env).await?;
+    Ok(())
+}
+
+/// Test that a registered domain can be repointed at another canister through
+/// `modify_domain_entry`, without touching its certificate.
+#[ignore]
+#[tokio::test]
+async fn test_modify_domain_entry() -> anyhow::Result<()> {
+    init_logging();
+
+    let sender = Principal::from_text("oqjvn-fqaaa-aaaab-qab5q-cai")?;
+    let authorized_principal = Some(sender);
+    let env = TestEnv::new(authorized_principal, sender).await?;
+
+    let domain = "example.com";
+    let canister_id = Principal::from_text("qoctq-giaaa-aaaaa-aaaea-cai")?;
+    let new_canister_id = Principal::from_text("rdmx6-jaaaa-aaaaa-aaadq-cai")?;
+
+    info!("Step 1: Register domain {domain} pointing at {canister_id}");
+    add_task(&env, domain, TaskKind::Issue).await?;
+    let task = fetch_next_task(&env).await?;
+    submit_successful_task_result(&env, &task, canister_id).await?;
+    verify_domain_status(
+        &env,
+        domain,
+        Some(canister_id),
+        RegistrationStatus::Registered,
+    )
+    .await?;
+
+    let entry_before = env
+        .get_domain_entry(domain)
+        .await?
+        .map_err(|err| anyhow!("Failed to get domain entry for {domain}: {err:?}"))?
+        .ok_or_else(|| anyhow!("Domain {domain} not found"))?;
+    let last_change_before = env
+        .get_last_change_time()
+        .await?
+        .map_err(|err| anyhow!("Failed to get last change time: {err:?}"))?;
+
+    info!("Step 2: Repoint {domain} at {new_canister_id}");
+    // Advance the time so that a bumped last change time is distinguishable
+    advance_time_and_tick(&env, Duration::from_secs(60), TICKS_AFTER_TIME_ADVANCE).await;
+
+    env.modify_domain_entry(domain, Some(new_canister_id))
+        .await?
+        .map_err(|err| anyhow!("Failed to modify entry of {domain}: {err:?}"))?;
+
+    info!("Step 3: Verify the new canister ID is stored and the certificate is untouched");
+    verify_domain_status(
+        &env,
+        domain,
+        Some(new_canister_id),
+        RegistrationStatus::Registered,
+    )
+    .await?;
+
+    let entry_after = env
+        .get_domain_entry(domain)
+        .await?
+        .map_err(|err| anyhow!("Failed to get domain entry for {domain}: {err:?}"))?
+        .ok_or_else(|| anyhow!("Domain {domain} not found"))?;
+
+    assert_eq!(entry_after.canister_id, Some(new_canister_id));
+    assert_eq!(entry_after.enc_cert, entry_before.enc_cert);
+    assert_eq!(entry_after.enc_priv_key, entry_before.enc_priv_key);
+    assert_eq!(entry_after.not_before, entry_before.not_before);
+    assert_eq!(entry_after.not_after, entry_before.not_after);
+    assert_eq!(entry_after.task, None);
+
+    info!("Step 4: Verify clients are told to refetch the domains");
+    let last_change_after = env
+        .get_last_change_time()
+        .await?
+        .map_err(|err| anyhow!("Failed to get last change time: {err:?}"))?;
+    assert!(
+        last_change_after > last_change_before,
+        "Expected the last change time to be bumped, got {last_change_after} <= {last_change_before}"
+    );
+
+    info!("Step 5: Verify modifying an unknown domain fails");
+    let result = env
+        .modify_domain_entry("unknown.com", Some(new_canister_id))
+        .await?;
+    assert_eq!(
+        result,
+        Err(ModifyDomainEntryError::DomainNotFound(
+            "unknown.com".to_string()
+        ))
+    );
+
     Ok(())
 }
 

@@ -16,6 +16,7 @@ use crate::state::{UtcTimestamp, with_state};
 pub const TRY_ADD_TASK_FUNC: &str = "try_add_task";
 pub const FETCH_NEXT_TASK_FUNC: &str = "fetch_next_task";
 pub const SUBMIT_TASK_RESULT_FUNC: &str = "submit_task_result";
+pub const MODIFY_DOMAIN_ENTRY_FUNC: &str = "modify_domain_entry";
 pub const SUCCESS_STATUS: &str = "success";
 pub const FAILURE_STATUS: &str = "failure";
 

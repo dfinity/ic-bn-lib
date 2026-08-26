@@ -7,7 +7,8 @@ use ic_custom_domains_canister_api::{
     EXPIRED_DOMAIN_EXPIRATION_TIME, FetchTaskResult, GetDomainEntryResult, GetDomainStatusResult,
     GetLastChangeTimeResult, HasNextTaskResult, InputTask, ListCertificatesPageInput,
     ListCertificatesPageResult, ListDomainsPageInput, ListDomainsPageResult, ListedDomainEntry,
-    MAX_PAGE_LIMIT, MAX_TASK_FAILURES, MIN_TASK_RETRY_DELAY, RegisteredDomain, RegistrationStatus,
+    MAX_PAGE_LIMIT, MAX_TASK_FAILURES, MIN_TASK_RETRY_DELAY, ModifyDomainEntryError,
+    ModifyDomainEntryInput, ModifyDomainEntryResult, RegisteredDomain, RegistrationStatus,
     ScheduledTask, SubmitTaskError, SubmitTaskResult, TASK_TIMEOUT, TaskFailReason, TaskKind,
     TaskOutcome, TaskOutput, TaskResult, TryAddTaskError, TryAddTaskResult,
     UNREGISTERED_DOMAIN_EXPIRATION_TIME,
@@ -23,8 +24,8 @@ use strum::{EnumIter, IntoEnumIterator, IntoStaticStr};
 
 use crate::{
     metrics::{
-        FAILURE_STATUS, FETCH_NEXT_TASK_FUNC, METRICS, SUBMIT_TASK_RESULT_FUNC, SUCCESS_STATUS,
-        TRY_ADD_TASK_FUNC,
+        FAILURE_STATUS, FETCH_NEXT_TASK_FUNC, METRICS, MODIFY_DOMAIN_ENTRY_FUNC,
+        SUBMIT_TASK_RESULT_FUNC, SUCCESS_STATUS, TRY_ADD_TASK_FUNC,
     },
     storage::STATE,
 };
@@ -384,6 +385,61 @@ impl CanisterState {
 
         let cert = self.certificates.get(&domain);
         Ok(Some(domain_entry_to_api(entry, cert)))
+    }
+
+    pub fn modify_domain_entry_with_metrics(
+        &mut self,
+        input: ModifyDomainEntryInput,
+        now: UtcTimestamp,
+    ) -> ModifyDomainEntryResult {
+        let result = self.modify_domain_entry(input, now);
+
+        // Update metrics based on result
+        let (status, error) = match &result {
+            Ok(()) => (SUCCESS_STATUS, ""),
+            Err(err) => (FAILURE_STATUS, err.into()),
+        };
+
+        METRICS.with(|cell| {
+            let metrics = cell.borrow();
+            metrics
+                .canister_api_calls
+                .with_label_values(&[MODIFY_DOMAIN_ENTRY_FUNC, status, "", error])
+                .inc();
+        });
+
+        result
+    }
+
+    /// Modifies the entry of an existing domain out-of-band, i.e. without going through
+    /// a task. Fields left as `None` in the input keep their currently stored value.
+    ///
+    /// Note that a task that is already in flight for the domain is left untouched, so a
+    /// worker submitting an `Update` result later on overwrites the canister ID set here.
+    fn modify_domain_entry(
+        &mut self,
+        input: ModifyDomainEntryInput,
+        now: UtcTimestamp,
+    ) -> ModifyDomainEntryResult {
+        let domain = input.domain;
+
+        let mut entry = self
+            .domains
+            .get(&domain)
+            .ok_or_else(|| ModifyDomainEntryError::DomainNotFound(domain.clone()))?;
+
+        // Nothing was requested to change, or the entry already holds the requested value
+        if input.canister_id.is_none() || input.canister_id == entry.canister_id {
+            return Ok(());
+        }
+
+        entry.canister_id = input.canister_id;
+        self.domains.insert(domain, entry);
+
+        // The domain-to-canister mapping changed, so clients need to refetch the domains
+        self.last_change.set(now);
+
+        Ok(())
     }
 
     /// Removes unregistered domains that have been in the system for too long
@@ -1863,6 +1919,119 @@ mod tests {
             let entry = state.domains.get(&"renew.com".to_string()).unwrap();
             assert_eq!(entry.task, Some(TaskKind::Renew));
         }
+    }
+
+    #[test]
+    fn test_modify_domain_entry_updates_canister_id() {
+        let mut state = create_test_populated_state();
+        let domain = "example.com".to_string();
+        let new_canister_id = Principal::from_text("aaaaa-aa").unwrap();
+        let now = 5000;
+
+        let before = state.domains.get(&domain).unwrap();
+        let cert_before = state.certificates.get(&domain);
+        assert_ne!(before.canister_id, Some(new_canister_id));
+
+        let result = state.modify_domain_entry(
+            ModifyDomainEntryInput {
+                domain: domain.clone(),
+                canister_id: Some(new_canister_id),
+            },
+            now,
+        );
+        assert!(result.is_ok());
+
+        let after = state.domains.get(&domain).unwrap();
+        assert_eq!(after.canister_id, Some(new_canister_id));
+
+        // The certificate and the rest of the entry must be left alone
+        assert_eq!(state.certificates.get(&domain), cert_before);
+        assert_eq!(after.not_before, before.not_before);
+        assert_eq!(after.not_after, before.not_after);
+        assert_eq!(after.created_at, before.created_at);
+
+        // Clients must learn that the domain-to-canister mapping changed
+        assert_eq!(*state.last_change.get(), now);
+    }
+
+    #[test]
+    fn test_modify_domain_entry_unknown_domain() {
+        let mut state = create_test_populated_state();
+
+        let result = state.modify_domain_entry(
+            ModifyDomainEntryInput {
+                domain: "unknown.com".to_string(),
+                canister_id: Some(Principal::from_text("aaaaa-aa").unwrap()),
+            },
+            5000,
+        );
+
+        assert_eq!(
+            result,
+            Err(ModifyDomainEntryError::DomainNotFound(
+                "unknown.com".to_string()
+            ))
+        );
+        assert_eq!(*state.last_change.get(), 0);
+    }
+
+    #[test]
+    fn test_modify_domain_entry_no_op_keeps_last_change() {
+        let mut state = create_test_populated_state();
+        let domain = "example.com".to_string();
+        let stored_canister_id = state.domains.get(&domain).unwrap().canister_id;
+
+        // Nothing requested to change
+        let result = state.modify_domain_entry(
+            ModifyDomainEntryInput {
+                domain: domain.clone(),
+                canister_id: None,
+            },
+            5000,
+        );
+        assert!(result.is_ok());
+        assert_eq!(
+            state.domains.get(&domain).unwrap().canister_id,
+            stored_canister_id
+        );
+        assert_eq!(*state.last_change.get(), 0);
+
+        // Requested canister ID is already the stored one
+        let result = state.modify_domain_entry(
+            ModifyDomainEntryInput {
+                domain: domain.clone(),
+                canister_id: stored_canister_id,
+            },
+            5000,
+        );
+        assert!(result.is_ok());
+        assert_eq!(*state.last_change.get(), 0);
+    }
+
+    #[test]
+    fn test_modify_domain_entry_leaves_in_flight_task_untouched() {
+        let mut state = create_test_populated_state();
+        let domain = "pending.net".to_string();
+        let new_canister_id = Principal::from_text("aaaaa-aa").unwrap();
+
+        // Domain with a pending Issue task
+        let before = state.domains.get(&domain).unwrap();
+        assert_eq!(before.task, Some(TaskKind::Issue));
+
+        let result = state.modify_domain_entry(
+            ModifyDomainEntryInput {
+                domain: domain.clone(),
+                canister_id: Some(new_canister_id),
+            },
+            5000,
+        );
+        assert!(result.is_ok());
+
+        let after = state.domains.get(&domain).unwrap();
+        assert_eq!(after.canister_id, Some(new_canister_id));
+        assert_eq!(after.task, Some(TaskKind::Issue));
+        assert_eq!(after.task_created_at, before.task_created_at);
+        assert_eq!(after.taken_at, before.taken_at);
     }
 
     #[test]

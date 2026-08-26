@@ -58,6 +58,7 @@ pub type GetLastChangeTimeResult = Result<UtcTimestamp, GetLastChangeTimeError>;
 pub type ListCertificatesPageResult = Result<CertificatesPage, ListCertificatesPageError>;
 pub type ListDomainsPageResult = Result<DomainsPage, ListDomainsPageError>;
 pub type HasNextTaskResult = Result<bool, HasNextTaskError>;
+pub type ModifyDomainEntryResult = Result<(), ModifyDomainEntryError>;
 
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug)]
 pub struct InitArg {
@@ -289,6 +290,16 @@ impl Default for ListDomainsPageInput {
     }
 }
 
+/// Fields of an existing domain entry that can be modified out-of-band,
+/// i.e. without going through a task. A field left as `None` keeps its stored value.
+#[derive(CandidType, Clone, Deserialize, Serialize, Debug)]
+pub struct ModifyDomainEntryInput {
+    /// Domain whose entry should be modified
+    pub domain: String,
+    /// New canister ID the domain should point to
+    pub canister_id: Option<Principal>,
+}
+
 #[derive(CandidType, Deserialize, Serialize, Debug, Clone, Error)]
 pub enum ListDomainsPageError {
     #[error("Unauthorized")]
@@ -355,6 +366,17 @@ pub enum SubmitTaskError {
 pub enum HasNextTaskError {
     #[error("Unauthorized")]
     Unauthorized,
+    #[error("Internal error: {0}")]
+    InternalError(String),
+}
+
+#[derive(CandidType, Deserialize, Serialize, Debug, Clone, IntoStaticStr, Error, PartialEq, Eq)]
+#[strum(serialize_all = "snake_case")]
+pub enum ModifyDomainEntryError {
+    #[error("Unauthorized")]
+    Unauthorized,
+    #[error("Domain not found: {0}")]
+    DomainNotFound(String),
     #[error("Internal error: {0}")]
     InternalError(String),
 }
