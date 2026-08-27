@@ -126,7 +126,6 @@ mod tests {
         body::{Body, to_bytes},
         http::{Request, StatusCode},
     };
-    use candid::Principal;
     use fqdn::FQDN;
     use prometheus::Registry;
     use serde_json::Value;
@@ -147,6 +146,7 @@ mod tests {
             },
         },
         http::middleware::RemoteAddr,
+        principal,
     };
 
     const BODY_LIMIT: usize = 5000;
@@ -202,7 +202,7 @@ mod tests {
     async fn test_post_domain_success_accepted() {
         // Arrange
         let mut mock_validator = MockValidatesDomains::new();
-        let expected_canister_id = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
+        let expected_canister_id = principal!("rrkah-fqaaa-aaaaa-aaaaq-cai");
         mock_validator
             .expect_validate()
             .returning(move |_| Box::pin(async move { Ok(expected_canister_id) }));
@@ -264,7 +264,7 @@ mod tests {
         // Arrange
         let mut mock_validator = MockValidatesDomains::new();
         mock_validator.expect_validate().returning(|_| {
-            Box::pin(async { Ok(Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap()) })
+            Box::pin(async { Ok(principal!("rrkah-fqaaa-aaaaa-aaaaq-cai")) })
         });
 
         let domain = "example.org";
@@ -300,7 +300,7 @@ mod tests {
         // Arrange
         let mut mock_validator = MockValidatesDomains::new();
         mock_validator.expect_validate().returning(|_| {
-            Box::pin(async { Ok(Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap()) })
+            Box::pin(async { Ok(principal!("rrkah-fqaaa-aaaaa-aaaaq-cai")) })
         });
 
         let domain = "example.org";
@@ -383,7 +383,7 @@ mod tests {
         // Arrange
         let mut mock_validator = MockValidatesDomains::new();
         mock_validator.expect_validate().returning(|_| {
-            Box::pin(async { Ok(Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap()) })
+            Box::pin(async { Ok(principal!("rrkah-fqaaa-aaaaa-aaaaq-cai")) })
         });
 
         let mut mock_repository = MockRepository::new();
@@ -460,7 +460,7 @@ mod tests {
                 let mut mock_repository = MockRepository::new();
 
                 let expected_canister_id =
-                    Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
+                    principal!("rrkah-fqaaa-aaaaa-aaaaq-cai");
                 let domain_status = DomainStatus {
                     domain: FQDN::from_str(domain).unwrap(),
                     canister_id: Some(expected_canister_id),
@@ -727,7 +727,7 @@ mod tests {
         for domain in &domains {
             // Arrange
             let mut mock_validator = MockValidatesDomains::new();
-            let expected_canister_id = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
+            let expected_canister_id = principal!("rrkah-fqaaa-aaaaa-aaaaq-cai");
 
             mock_validator
                 .expect_validate()
@@ -808,7 +808,7 @@ mod tests {
     async fn test_post_domain_update_success_accepted() {
         // Arrange
         let mut mock_validator = MockValidatesDomains::new();
-        let expected_canister_id = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
+        let expected_canister_id = principal!("rrkah-fqaaa-aaaaa-aaaaq-cai");
         mock_validator
             .expect_validate()
             .returning(move |_| Box::pin(async move { Ok(expected_canister_id) }));
@@ -870,7 +870,7 @@ mod tests {
         // Arrange
         let mut mock_validator = MockValidatesDomains::new();
         mock_validator.expect_validate().returning(|_| {
-            Box::pin(async { Ok(Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap()) })
+            Box::pin(async { Ok(principal!("rrkah-fqaaa-aaaaa-aaaaq-cai")) })
         });
 
         let mut mock_repository = MockRepository::new();
@@ -1011,7 +1011,7 @@ mod tests {
 
         // Arrange
         let mut mock_validator = MockValidatesDomains::new();
-        let expected_canister_id = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
+        let expected_canister_id = principal!("rrkah-fqaaa-aaaaa-aaaaq-cai");
         mock_validator
             .expect_validate()
             .returning(move |_| Box::pin(async move { Ok(expected_canister_id) }))
@@ -1072,5 +1072,580 @@ mod tests {
         assert_eq!(status3, StatusCode::TOO_MANY_REQUESTS);
         let body_bytes = to_bytes(response3.into_body(), BODY_LIMIT).await.unwrap();
         assert_eq!(body_bytes.to_vec(), b"Too many requests");
+    }
+
+    // --- Bypass token & custom canister_id tests ---
+
+    const BYPASS_TOKEN: &str = "s3cr3t-bypass-token";
+    const OVERRIDE_CANISTER_ID: &str = "aaaaa-aa";
+
+    /// Helper function to create a router with a bypass token configured on the backend service.
+    fn create_test_router_with_bypass_token(
+        mock_repository: MockRepository,
+        mock_validator: MockValidatesDomains,
+        bypass_token: Option<String>,
+    ) -> axum::Router {
+        let registry = Registry::new_custom(Some("custom_domains".into()), None).unwrap();
+        create_router(
+            Arc::new(mock_repository),
+            Arc::new(mock_validator),
+            registry,
+            RateLimitConfig::default(),
+            true,
+            bypass_token,
+        )
+    }
+
+    /// Helper function to make a request to /v1/{domain} with an optional query string and an
+    /// optional `Authorization` header, parsing the response body as JSON.
+    async fn domain_request_with_query_and_auth(
+        router: axum::Router,
+        method: &str,
+        domain: &str,
+        query: Option<&str>,
+        auth_header: Option<&str>,
+    ) -> (StatusCode, Value) {
+        let uri = query.map_or_else(
+            || format!("/v1/{domain}"),
+            |query| format!("/v1/{domain}?{query}"),
+        );
+        let mut builder = Request::builder().method(method).uri(uri);
+        if let Some(auth) = auth_header {
+            builder = builder.header("authorization", auth);
+        }
+        let request = builder.body(Body::empty()).unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        let status = response.status();
+        let body_bytes = to_bytes(response.into_body(), BODY_LIMIT).await.unwrap();
+        let body_json: Value = serde_json::from_slice(&body_bytes).unwrap();
+        (status, body_json)
+    }
+
+    #[tokio::test]
+    async fn test_post_domain_bypass_token_and_canister_id_uses_limited_validation() {
+        // Arrange
+        let mut mock_validator = MockValidatesDomains::new();
+        mock_validator
+            .expect_validate_limited()
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(()) }));
+        // `validate()` is intentionally left unmocked: it must not be called on the bypass path.
+
+        let domain = "example.org";
+        let expected_task =
+            InputTask::new(TaskKind::Issue, FQDN::from_str(domain).unwrap(), false);
+        let mut mock_repository = MockRepository::new();
+        mock_repository
+            .expect_try_add_task()
+            .withf(move |task| *task == expected_task)
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(()) }));
+
+        let router = create_test_router_with_bypass_token(
+            mock_repository,
+            mock_validator,
+            Some(BYPASS_TOKEN.to_string()),
+        );
+
+        // Act
+        let (status, response_json) = domain_request_with_query_and_auth(
+            router,
+            "POST",
+            domain,
+            Some(&format!("canister_id={OVERRIDE_CANISTER_ID}")),
+            Some(&format!("Bearer {BYPASS_TOKEN}")),
+        )
+        .await;
+
+        // Assert
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(response_json["status"], "success");
+        assert_eq!(response_json["data"]["domain"], domain);
+        assert_eq!(response_json["data"]["canister_id"], OVERRIDE_CANISTER_ID);
+    }
+
+    #[tokio::test]
+    async fn test_post_domain_wrong_bypass_token_falls_back_to_full_validation() {
+        // Arrange
+        let mut mock_validator = MockValidatesDomains::new();
+        let derived_canister_id = principal!("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        mock_validator
+            .expect_validate()
+            .times(1)
+            .returning(move |_| Box::pin(async move { Ok(derived_canister_id) }));
+        // `validate_limited()` is intentionally left unmocked: it must not be called when the
+        // provided token doesn't match the configured bypass token.
+
+        let domain = "example.org";
+        let expected_task =
+            InputTask::new(TaskKind::Issue, FQDN::from_str(domain).unwrap(), false);
+        let mut mock_repository = MockRepository::new();
+        mock_repository
+            .expect_try_add_task()
+            .withf(move |task| *task == expected_task)
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(()) }));
+
+        let router = create_test_router_with_bypass_token(
+            mock_repository,
+            mock_validator,
+            Some(BYPASS_TOKEN.to_string()),
+        );
+
+        // Act
+        let (status, response_json) = domain_request_with_query_and_auth(
+            router,
+            "POST",
+            domain,
+            Some(&format!("canister_id={OVERRIDE_CANISTER_ID}")),
+            Some("Bearer this-is-not-the-right-token"),
+        )
+        .await;
+
+        // Assert
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            response_json["data"]["canister_id"],
+            "rrkah-fqaaa-aaaaa-aaaaq-cai"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_post_domain_canister_id_without_auth_header_uses_full_validation() {
+        // Arrange
+        let mut mock_validator = MockValidatesDomains::new();
+        let derived_canister_id = principal!("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        mock_validator
+            .expect_validate()
+            .times(1)
+            .returning(move |_| Box::pin(async move { Ok(derived_canister_id) }));
+
+        let domain = "example.org";
+        let mut mock_repository = MockRepository::new();
+        mock_repository
+            .expect_try_add_task()
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(()) }));
+
+        let router = create_test_router_with_bypass_token(
+            mock_repository,
+            mock_validator,
+            Some(BYPASS_TOKEN.to_string()),
+        );
+
+        // Act: canister_id is provided but there's no Authorization header at all
+        let (status, response_json) = domain_request_with_query_and_auth(
+            router,
+            "POST",
+            domain,
+            Some(&format!("canister_id={OVERRIDE_CANISTER_ID}")),
+            None,
+        )
+        .await;
+
+        // Assert
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            response_json["data"]["canister_id"],
+            "rrkah-fqaaa-aaaaa-aaaaq-cai"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_post_domain_valid_bypass_token_without_canister_id_uses_full_validation() {
+        // Arrange
+        let mut mock_validator = MockValidatesDomains::new();
+        let derived_canister_id = principal!("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        mock_validator
+            .expect_validate()
+            .times(1)
+            .returning(move |_| Box::pin(async move { Ok(derived_canister_id) }));
+
+        let domain = "example.org";
+        let mut mock_repository = MockRepository::new();
+        mock_repository
+            .expect_try_add_task()
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(()) }));
+
+        let router = create_test_router_with_bypass_token(
+            mock_repository,
+            mock_validator,
+            Some(BYPASS_TOKEN.to_string()),
+        );
+
+        // Act: correct bypass token, but no canister_id query param
+        let (status, response_json) = domain_request_with_query_and_auth(
+            router,
+            "POST",
+            domain,
+            None,
+            Some(&format!("Bearer {BYPASS_TOKEN}")),
+        )
+        .await;
+
+        // Assert
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            response_json["data"]["canister_id"],
+            "rrkah-fqaaa-aaaaa-aaaaq-cai"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_post_domain_no_bypass_token_configured_ignores_header_and_canister_id() {
+        // Arrange: backend service has no bypass token configured at all
+        let mut mock_validator = MockValidatesDomains::new();
+        let derived_canister_id = principal!("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        mock_validator
+            .expect_validate()
+            .times(1)
+            .returning(move |_| Box::pin(async move { Ok(derived_canister_id) }));
+
+        let domain = "example.org";
+        let mut mock_repository = MockRepository::new();
+        mock_repository
+            .expect_try_add_task()
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(()) }));
+
+        let router =
+            create_test_router_with_bypass_token(mock_repository, mock_validator, None);
+
+        // Act
+        let (status, response_json) = domain_request_with_query_and_auth(
+            router,
+            "POST",
+            domain,
+            Some(&format!("canister_id={OVERRIDE_CANISTER_ID}")),
+            Some(&format!("Bearer {BYPASS_TOKEN}")),
+        )
+        .await;
+
+        // Assert
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            response_json["data"]["canister_id"],
+            "rrkah-fqaaa-aaaaa-aaaaq-cai"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_post_domain_bypass_token_validate_limited_error() {
+        // Arrange
+        let mut mock_validator = MockValidatesDomains::new();
+        mock_validator
+            .expect_validate_limited()
+            .times(1)
+            .returning(|_| {
+                Box::pin(async {
+                    Err(ValidationError::MissingDnsCname {
+                        src: "_acme-challenge.example.org.".to_string(),
+                        dst: "_acme-challenge.example.org.icp2.io.".to_string(),
+                    })
+                })
+            });
+
+        let mock_repository = MockRepository::new();
+        let router = create_test_router_with_bypass_token(
+            mock_repository,
+            mock_validator,
+            Some(BYPASS_TOKEN.to_string()),
+        );
+
+        // Act
+        let (status, response_json) = domain_request_with_query_and_auth(
+            router,
+            "POST",
+            "example.org",
+            Some(&format!("canister_id={OVERRIDE_CANISTER_ID}")),
+            Some(&format!("Bearer {BYPASS_TOKEN}")),
+        )
+        .await;
+
+        // Assert
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(response_json["status"], "error");
+        assert_eq!(
+            response_json["errors"].as_str().unwrap(),
+            "bad_request: missing DNS CNAME record from _acme-challenge.example.org. to _acme-challenge.example.org.icp2.io."
+        );
+    }
+
+    #[tokio::test]
+    async fn test_post_domain_malformed_authorization_header_is_rejected() {
+        // Arrange: a non-Bearer Authorization header should be rejected by the extractor
+        // itself, before the bypass logic ever runs.
+        let mock_validator = MockValidatesDomains::new();
+        let mock_repository = MockRepository::new();
+        let router = create_test_router_with_bypass_token(
+            mock_repository,
+            mock_validator,
+            Some(BYPASS_TOKEN.to_string()),
+        );
+
+        // Act
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/v1/example.org?canister_id={OVERRIDE_CANISTER_ID}"))
+            .header("authorization", "Basic dXNlcjpwYXNz")
+            .body(Body::empty())
+            .unwrap();
+        let response = router.oneshot(request).await.unwrap();
+
+        // Assert
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_patch_domain_bypass_token_and_canister_id_uses_limited_validation() {
+        // Arrange
+        let mut mock_validator = MockValidatesDomains::new();
+        mock_validator
+            .expect_validate_limited()
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(()) }));
+        // `validate()` is intentionally left unmocked: it must not be called on the bypass path.
+
+        let domain = "example.org";
+        let expected_task =
+            InputTask::new(TaskKind::Update, FQDN::from_str(domain).unwrap(), false);
+        let mut mock_repository = MockRepository::new();
+        mock_repository
+            .expect_try_add_task()
+            .withf(move |task| *task == expected_task)
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(()) }));
+
+        let router = create_test_router_with_bypass_token(
+            mock_repository,
+            mock_validator,
+            Some(BYPASS_TOKEN.to_string()),
+        );
+
+        // Act
+        let (status, response_json) = domain_request_with_query_and_auth(
+            router,
+            "PATCH",
+            domain,
+            Some(&format!("canister_id={OVERRIDE_CANISTER_ID}")),
+            Some(&format!("Bearer {BYPASS_TOKEN}")),
+        )
+        .await;
+
+        // Assert
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(response_json["status"], "success");
+        assert_eq!(response_json["data"]["domain"], domain);
+        assert_eq!(response_json["data"]["canister_id"], OVERRIDE_CANISTER_ID);
+    }
+
+    #[tokio::test]
+    async fn test_patch_domain_wrong_bypass_token_falls_back_to_full_validation() {
+        // Arrange
+        let mut mock_validator = MockValidatesDomains::new();
+        let derived_canister_id = principal!("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        mock_validator
+            .expect_validate()
+            .times(1)
+            .returning(move |_| Box::pin(async move { Ok(derived_canister_id) }));
+        // `validate_limited()` is intentionally left unmocked: it must not be called when the
+        // provided token doesn't match the configured bypass token.
+
+        let domain = "example.org";
+        let expected_task =
+            InputTask::new(TaskKind::Update, FQDN::from_str(domain).unwrap(), false);
+        let mut mock_repository = MockRepository::new();
+        mock_repository
+            .expect_try_add_task()
+            .withf(move |task| *task == expected_task)
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(()) }));
+
+        let router = create_test_router_with_bypass_token(
+            mock_repository,
+            mock_validator,
+            Some(BYPASS_TOKEN.to_string()),
+        );
+
+        // Act
+        let (status, response_json) = domain_request_with_query_and_auth(
+            router,
+            "PATCH",
+            domain,
+            Some(&format!("canister_id={OVERRIDE_CANISTER_ID}")),
+            Some("Bearer this-is-not-the-right-token"),
+        )
+        .await;
+
+        // Assert
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            response_json["data"]["canister_id"],
+            "rrkah-fqaaa-aaaaa-aaaaq-cai"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_patch_domain_canister_id_without_auth_header_uses_full_validation() {
+        // Arrange
+        let mut mock_validator = MockValidatesDomains::new();
+        let derived_canister_id = principal!("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        mock_validator
+            .expect_validate()
+            .times(1)
+            .returning(move |_| Box::pin(async move { Ok(derived_canister_id) }));
+
+        let domain = "example.org";
+        let mut mock_repository = MockRepository::new();
+        mock_repository
+            .expect_try_add_task()
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(()) }));
+
+        let router = create_test_router_with_bypass_token(
+            mock_repository,
+            mock_validator,
+            Some(BYPASS_TOKEN.to_string()),
+        );
+
+        // Act: canister_id is provided but there's no Authorization header at all
+        let (status, response_json) = domain_request_with_query_and_auth(
+            router,
+            "PATCH",
+            domain,
+            Some(&format!("canister_id={OVERRIDE_CANISTER_ID}")),
+            None,
+        )
+        .await;
+
+        // Assert
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            response_json["data"]["canister_id"],
+            "rrkah-fqaaa-aaaaa-aaaaq-cai"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_patch_domain_valid_bypass_token_without_canister_id_uses_full_validation() {
+        // Arrange
+        let mut mock_validator = MockValidatesDomains::new();
+        let derived_canister_id = principal!("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        mock_validator
+            .expect_validate()
+            .times(1)
+            .returning(move |_| Box::pin(async move { Ok(derived_canister_id) }));
+
+        let domain = "example.org";
+        let mut mock_repository = MockRepository::new();
+        mock_repository
+            .expect_try_add_task()
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(()) }));
+
+        let router = create_test_router_with_bypass_token(
+            mock_repository,
+            mock_validator,
+            Some(BYPASS_TOKEN.to_string()),
+        );
+
+        // Act: correct bypass token, but no canister_id query param
+        let (status, response_json) = domain_request_with_query_and_auth(
+            router,
+            "PATCH",
+            domain,
+            None,
+            Some(&format!("Bearer {BYPASS_TOKEN}")),
+        )
+        .await;
+
+        // Assert
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            response_json["data"]["canister_id"],
+            "rrkah-fqaaa-aaaaa-aaaaq-cai"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_patch_domain_no_bypass_token_configured_ignores_header_and_canister_id() {
+        // Arrange: backend service has no bypass token configured at all
+        let mut mock_validator = MockValidatesDomains::new();
+        let derived_canister_id = principal!("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        mock_validator
+            .expect_validate()
+            .times(1)
+            .returning(move |_| Box::pin(async move { Ok(derived_canister_id) }));
+
+        let domain = "example.org";
+        let mut mock_repository = MockRepository::new();
+        mock_repository
+            .expect_try_add_task()
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(()) }));
+
+        let router =
+            create_test_router_with_bypass_token(mock_repository, mock_validator, None);
+
+        // Act
+        let (status, response_json) = domain_request_with_query_and_auth(
+            router,
+            "PATCH",
+            domain,
+            Some(&format!("canister_id={OVERRIDE_CANISTER_ID}")),
+            Some(&format!("Bearer {BYPASS_TOKEN}")),
+        )
+        .await;
+
+        // Assert
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            response_json["data"]["canister_id"],
+            "rrkah-fqaaa-aaaaa-aaaaq-cai"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_patch_domain_bypass_token_validate_limited_error() {
+        // Arrange
+        let mut mock_validator = MockValidatesDomains::new();
+        mock_validator
+            .expect_validate_limited()
+            .times(1)
+            .returning(|_| {
+                Box::pin(async {
+                    Err(ValidationError::MissingDnsCname {
+                        src: "_acme-challenge.example.org.".to_string(),
+                        dst: "_acme-challenge.example.org.icp2.io.".to_string(),
+                    })
+                })
+            });
+
+        let mock_repository = MockRepository::new();
+        let router = create_test_router_with_bypass_token(
+            mock_repository,
+            mock_validator,
+            Some(BYPASS_TOKEN.to_string()),
+        );
+
+        // Act
+        let (status, response_json) = domain_request_with_query_and_auth(
+            router,
+            "PATCH",
+            "example.org",
+            Some(&format!("canister_id={OVERRIDE_CANISTER_ID}")),
+            Some(&format!("Bearer {BYPASS_TOKEN}")),
+        )
+        .await;
+
+        // Assert
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(response_json["status"], "error");
+        assert_eq!(
+            response_json["errors"].as_str().unwrap(),
+            "bad_request: missing DNS CNAME record from _acme-challenge.example.org. to _acme-challenge.example.org.icp2.io."
+        );
     }
 }
