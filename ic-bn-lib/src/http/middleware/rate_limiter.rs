@@ -20,7 +20,10 @@ use governor::{
     nanos::Nanos,
     state::keyed::DashMapStateStore,
 };
-use http::{HeaderName, HeaderValue, StatusCode, header::RETRY_AFTER};
+use http::{
+    HeaderName, HeaderValue, StatusCode,
+    header::{AUTHORIZATION, RETRY_AFTER},
+};
 use tower::{Layer, Service};
 
 use crate::{constant_time_eq, hname, http::middleware::RemoteAddr};
@@ -108,12 +111,21 @@ where
         /// Stale entries cleanup interval - 5 minutes
         const CLEANUP_INTERVAL: Nanos = Nanos::new(300_000_000_000);
 
-        // Check that bypass token is configured, header was sent and it matches
+        // Check that bypass token is configured, header was sent and it matches.
+        // Checks both the custom header and the Authorization.
         let bypass = request
             .headers()
             .get(BYPASS_TOKEN_HEADER)
+            .map(|x| x.as_bytes())
+            .or_else(|| {
+                request
+                    .headers()
+                    .get(AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.trim_start_matches("Bearer ").as_bytes())
+            })
             .zip(self.state.bypass_token.as_ref())
-            .is_some_and(|(hdr, token)| constant_time_eq(hdr.as_bytes(), token.as_bytes()));
+            .is_some_and(|(hdr, token)| constant_time_eq(hdr, token.as_bytes()));
 
         // Clean up stale entries from time to time
         let now = self.state.limiter.clock().now();

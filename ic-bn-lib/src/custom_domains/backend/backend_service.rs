@@ -19,9 +19,11 @@ use crate::custom_domains::base::{
 #[derive(Clone, new)]
 pub struct BackendService {
     /// Repository for storing domain data (e.g. certificates) and tasks
-    pub repository: Arc<dyn Repository>,
+    repository: Arc<dyn Repository>,
     /// Domain validator for DNS and canister ownership checks
-    pub validator: Arc<dyn ValidatesDomains>,
+    validator: Arc<dyn ValidatesDomains>,
+    /// Token that allows to bypass certain validation steps & specify the canister ID directly
+    pub bypass_token: Option<String>,
 }
 
 impl BackendService {
@@ -34,9 +36,19 @@ impl BackendService {
         domain: &str,
         task: TaskKind,
         wildcard: bool,
+        canister_id: Option<Principal>,
     ) -> Result<Principal, ApiError> {
         let fqdn = parse_domain(domain)?;
-        let canister_id = self.validator.validate(&fqdn).await?;
+
+        // If the canister ID is provided - use limited validation, otherwise full one
+        // that derives the canister ID from the DNS TXT record
+        let canister_id = if let Some(canister_id) = canister_id {
+            self.validator.validate_limited(&fqdn).await?;
+            canister_id
+        } else {
+            self.validator.validate(&fqdn).await?
+        };
+
         let task = InputTask::new(task, fqdn, wildcard);
 
         match self.repository.try_add_task(task).await {

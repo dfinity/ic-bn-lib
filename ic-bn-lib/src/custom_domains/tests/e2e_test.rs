@@ -131,6 +131,10 @@ impl ValidatesDomains for MockValidator {
         Ok("laqa6-raaaa-aaaam-aehzq-cai".parse().unwrap())
     }
 
+    async fn validate_limited(&self, _domain: &FQDN) -> Result<(), ValidationError> {
+        Ok(())
+    }
+
     async fn validate_deletion(&self, _domain: &FQDN) -> Result<(), ValidationError> {
         Ok(())
     }

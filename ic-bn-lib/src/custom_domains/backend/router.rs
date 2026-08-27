@@ -49,7 +49,7 @@ pub fn create_router(
     with_metrics_endpoint: bool,
     bypass_token: Option<String>,
 ) -> Router {
-    let backend_service = BackendService::new(repository, validator);
+    let backend_service = BackendService::new(repository, validator, bypass_token.clone());
     let response = (StatusCode::TOO_MANY_REQUESTS, "Too many requests");
 
     // Use ic-bn-lib rate limiting middleware, with key by IP address.

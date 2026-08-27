@@ -45,6 +45,11 @@ pub trait ValidatesDomains: Send + Sync {
     /// canister ownership verification, and ACME challenge setup.
     async fn validate(&self, domain: &FQDN) -> Result<Principal, ValidationError>;
 
+    /// Validates that a domain can be registered or updated.
+    ///
+    /// Skips certain checks compared to validate()
+    async fn validate_limited(&self, domain: &FQDN) -> Result<(), ValidationError>;
+
     /// Validates that a domain can be safely deleted.
     ///
     /// Ensures DNS records are properly cleaned up before certificate revocation.
