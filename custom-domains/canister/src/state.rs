@@ -299,6 +299,7 @@ impl CanisterState {
                     now,
                     enc_cert,
                     Some(domain_entry.wildcard),
+                    None,
                 )))
             }
             None => Ok(None),
@@ -1539,6 +1540,7 @@ mod tests {
                 domain: domain_name.clone(),
                 kind: TaskKind::Issue,
                 wildcard: None,
+                canister_id: None,
             };
             let result = state.try_add_task(task, now);
             assert!(result.is_ok());
@@ -1558,6 +1560,7 @@ mod tests {
                 domain: "new.example.com".to_string(),
                 kind: TaskKind::Update,
                 wildcard: None,
+                canister_id: None,
             };
             let result = state.try_add_task(task, now);
             assert!(matches!(result, Err(TryAddTaskError::DomainNotFound(_))));
@@ -1577,6 +1580,7 @@ mod tests {
                     domain: domain.clone(),
                     kind: TaskKind::Issue,
                     wildcard: Some(true),
+                    canister_id: None,
                 },
                 now,
             )
@@ -1597,6 +1601,7 @@ mod tests {
                     domain: domain.clone(),
                     kind: TaskKind::Update,
                     wildcard: Some(false),
+                    canister_id: None,
                 },
                 now,
             )
@@ -1623,6 +1628,7 @@ mod tests {
                 domain: domain.clone(),
                 kind: TaskKind::Update,
                 wildcard: None,
+                canister_id: None,
             };
             let result = state.try_add_task(task, now);
             assert!(matches!(
@@ -1642,6 +1648,7 @@ mod tests {
                 domain: domain.clone(),
                 kind: task_kind,
                 wildcard: None,
+                canister_id: None,
             };
             let result = state.try_add_task(task, now);
             assert!(matches!(
@@ -1675,6 +1682,7 @@ mod tests {
                 domain: domain.clone(),
                 kind: TaskKind::Update,
                 wildcard: None,
+                canister_id: None,
             };
             let result = state.try_add_task(task, now);
             assert!(result.is_ok());
@@ -1700,6 +1708,7 @@ mod tests {
                 domain: "issue.com".to_string(),
                 kind: TaskKind::Issue,
                 wildcard: None,
+                canister_id: None,
             };
             let result = state.try_add_task(task, now);
             assert!(result.is_ok());
@@ -1721,6 +1730,7 @@ mod tests {
                 domain: "update.com".to_string(),
                 kind: TaskKind::Update,
                 wildcard: None,
+                canister_id: None,
             };
             let result = state.try_add_task(task, now);
             assert!(result.is_ok());
@@ -1742,6 +1752,7 @@ mod tests {
                 domain: "delete.com".to_string(),
                 kind: TaskKind::Delete,
                 wildcard: None,
+                canister_id: None,
             };
             let result = state.try_add_task(task, now);
             assert!(result.is_ok());
@@ -1763,6 +1774,7 @@ mod tests {
                 domain: "renew.com".to_string(),
                 kind: TaskKind::Renew,
                 wildcard: None,
+                canister_id: None,
             };
             let result = state.try_add_task(task, now);
             assert!(result.is_ok());
@@ -1790,6 +1802,7 @@ mod tests {
                 domain: "update.com".to_string(),
                 kind: TaskKind::Update,
                 wildcard: None,
+                canister_id: None,
             };
             let result = state.try_add_task(task, now);
             // Should fail because certificate is required for Update
@@ -1811,6 +1824,7 @@ mod tests {
                 domain: "delete.com".to_string(),
                 kind: TaskKind::Delete,
                 wildcard: None,
+                canister_id: None,
             };
             let result = state.try_add_task(task, now);
             // Should succeed as Delete can work with just canister_id
@@ -1833,6 +1847,7 @@ mod tests {
                 domain: "issue.com".to_string(),
                 kind: TaskKind::Issue,
                 wildcard: None,
+                canister_id: None,
             };
             let result = state.try_add_task(task, now);
             // Should fail because Issue on already registered domain is not allowed
@@ -1855,6 +1870,7 @@ mod tests {
                 domain: "renew.com".to_string(),
                 kind: TaskKind::Renew,
                 wildcard: None,
+                canister_id: None,
             };
             let result = state.try_add_task(task, now);
             // Should succeed because Renew on registered domain is allowed
@@ -1893,11 +1909,13 @@ mod tests {
             domain: "task1.com".to_string(),
             kind: TaskKind::Issue,
             wildcard: None,
+            canister_id: None,
         };
         let task_2 = InputTask {
             domain: "task2.com".to_string(),
             kind: TaskKind::Issue,
             wildcard: None,
+            canister_id: None,
         };
         state
             .try_add_task(task_1, now)
@@ -1914,6 +1932,7 @@ mod tests {
             now,
             None,
             Some(false),
+            None,
         ));
         assert_eq!(task, expected_task);
         let task = state.fetch_next_task(now).unwrap();
@@ -1923,6 +1942,7 @@ mod tests {
             now,
             None,
             Some(false),
+            None,
         ));
         assert_eq!(task, expected_task);
         let task = state.fetch_next_task(now).unwrap();
@@ -1958,6 +1978,7 @@ mod tests {
             now - 3000,
             Some(b"cert_data".to_vec()),
             Some(false),
+            None,
         ));
         assert_eq!(result, expected_task);
     }
@@ -2467,11 +2488,13 @@ mod tests {
             domain: "example.com".to_string(),
             kind: TaskKind::Issue,
             wildcard: None,
+            canister_id: None,
         };
         let task2 = InputTask {
             domain: "example1.com".to_string(),
             kind: TaskKind::Issue,
             wildcard: None,
+            canister_id: None,
         };
 
         // First task should succeed

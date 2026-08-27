@@ -49,24 +49,20 @@ impl BackendService {
             self.validator.validate(&fqdn).await?
         };
 
-        let task = InputTask::new(task, fqdn, wildcard);
+        let task = InputTask::new(task, fqdn, wildcard, Some(canister_id));
 
-        match self.repository.try_add_task(task).await {
-            Ok(()) => Ok(canister_id),
-            Err(err) => Err(err.into()),
-        }
+        self.repository.try_add_task(task).await?;
+        Ok(canister_id)
     }
 
     /// Validates domain can be deleted and submits a delete task
     pub async fn submit_delete_task(&self, domain: &str) -> Result<(), ApiError> {
         let fqdn = parse_domain(domain)?;
         self.validator.validate_deletion(&fqdn).await?;
-        let task = InputTask::new(TaskKind::Delete, fqdn, false);
+        let task = InputTask::new(TaskKind::Delete, fqdn, false, None);
 
-        match self.repository.try_add_task(task).await {
-            Ok(()) => Ok(()),
-            Err(err) => Err(err.into()),
-        }
+        self.repository.try_add_task(task).await?;
+        Ok(())
     }
 
     /// Retrieves the current status of a domain registration

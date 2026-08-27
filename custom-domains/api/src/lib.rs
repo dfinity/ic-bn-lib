@@ -79,8 +79,10 @@ pub enum TaskKind {
 pub struct InputTask {
     pub kind: TaskKind,
     pub domain: String,
-    // Whether to also include a `*.domain` wildcard SAN in the certificate
+    /// Whether to also include a `*.domain` wildcard SAN in the certificate
     pub wildcard: Option<bool>,
+    /// The canister ID associated with the domain (if known at submission time)
+    pub canister_id: Option<Principal>,
 }
 
 #[derive(CandidType, Deserialize, Serialize, Debug, Clone, PartialEq, Eq, new)]
@@ -91,6 +93,8 @@ pub struct ScheduledTask {
     pub enc_cert: Option<Vec<u8>>,
     // Whether to also include a `*.domain` wildcard SAN in the certificate
     pub wildcard: Option<bool>,
+    /// The canister ID associated with the domain (if known at submission time)
+    pub canister_id: Option<Principal>,
 }
 
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug)]

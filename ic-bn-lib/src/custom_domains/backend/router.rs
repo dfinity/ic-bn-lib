@@ -215,11 +215,13 @@ mod tests {
             TaskKind::Issue,
             FQDN::from_str(domain_normal).unwrap(),
             false,
+            Some(expected_canister_id),
         );
         let expected_task_unicode = InputTask::new(
             TaskKind::Issue,
             FQDN::from_str(subdomain_unicode).unwrap(),
             false,
+            Some(expected_canister_id),
         );
         mock_repository
             .expect_try_add_task()
@@ -263,9 +265,9 @@ mod tests {
     async fn test_post_domain_conflict_certificate_already_issued() {
         // Arrange
         let mut mock_validator = MockValidatesDomains::new();
-        mock_validator.expect_validate().returning(|_| {
-            Box::pin(async { Ok(principal!("rrkah-fqaaa-aaaaa-aaaaq-cai")) })
-        });
+        mock_validator
+            .expect_validate()
+            .returning(|_| Box::pin(async { Ok(principal!("rrkah-fqaaa-aaaaa-aaaaq-cai")) }));
 
         let domain = "example.org";
         let mut mock_repository = MockRepository::new();
@@ -299,9 +301,9 @@ mod tests {
     async fn test_post_domain_conflict_another_task_in_progress() {
         // Arrange
         let mut mock_validator = MockValidatesDomains::new();
-        mock_validator.expect_validate().returning(|_| {
-            Box::pin(async { Ok(principal!("rrkah-fqaaa-aaaaa-aaaaq-cai")) })
-        });
+        mock_validator
+            .expect_validate()
+            .returning(|_| Box::pin(async { Ok(principal!("rrkah-fqaaa-aaaaa-aaaaq-cai")) }));
 
         let domain = "example.org";
         let mut mock_repository = MockRepository::new();
@@ -382,9 +384,9 @@ mod tests {
     async fn test_post_domain_internal_server_error_repository_failure() {
         // Arrange
         let mut mock_validator = MockValidatesDomains::new();
-        mock_validator.expect_validate().returning(|_| {
-            Box::pin(async { Ok(principal!("rrkah-fqaaa-aaaaa-aaaaq-cai")) })
-        });
+        mock_validator
+            .expect_validate()
+            .returning(|_| Box::pin(async { Ok(principal!("rrkah-fqaaa-aaaaa-aaaaq-cai")) }));
 
         let mut mock_repository = MockRepository::new();
         mock_repository.expect_try_add_task().returning(|_| {
@@ -459,8 +461,7 @@ mod tests {
                 let mock_validator = MockValidatesDomains::new();
                 let mut mock_repository = MockRepository::new();
 
-                let expected_canister_id =
-                    principal!("rrkah-fqaaa-aaaaa-aaaaq-cai");
+                let expected_canister_id = principal!("rrkah-fqaaa-aaaaa-aaaaq-cai");
                 let domain_status = DomainStatus {
                     domain: FQDN::from_str(domain).unwrap(),
                     canister_id: Some(expected_canister_id),
@@ -821,11 +822,13 @@ mod tests {
             TaskKind::Update,
             FQDN::from_str(domain_normal).unwrap(),
             false,
+            Some(expected_canister_id),
         );
         let expected_task_unicode = InputTask::new(
             TaskKind::Update,
             FQDN::from_str(subdomain_unicode).unwrap(),
             false,
+            Some(expected_canister_id),
         );
         mock_repository
             .expect_try_add_task()
@@ -869,9 +872,9 @@ mod tests {
     async fn test_post_domain_update_bad_request_missing_certificate() {
         // Arrange
         let mut mock_validator = MockValidatesDomains::new();
-        mock_validator.expect_validate().returning(|_| {
-            Box::pin(async { Ok(principal!("rrkah-fqaaa-aaaaa-aaaaq-cai")) })
-        });
+        mock_validator
+            .expect_validate()
+            .returning(|_| Box::pin(async { Ok(principal!("rrkah-fqaaa-aaaaa-aaaaq-cai")) }));
 
         let mut mock_repository = MockRepository::new();
         mock_repository.expect_try_add_task().returning(|_| {
@@ -931,11 +934,13 @@ mod tests {
             TaskKind::Delete,
             FQDN::from_str(domain_normal).unwrap(),
             false,
+            None,
         );
         let expected_task_unicode = InputTask::new(
             TaskKind::Delete,
             FQDN::from_str(subdomain_unicode).unwrap(),
             false,
+            None,
         );
         mock_repository
             .expect_try_add_task()
@@ -1133,8 +1138,12 @@ mod tests {
         // `validate()` is intentionally left unmocked: it must not be called on the bypass path.
 
         let domain = "example.org";
-        let expected_task =
-            InputTask::new(TaskKind::Issue, FQDN::from_str(domain).unwrap(), false);
+        let expected_task = InputTask::new(
+            TaskKind::Issue,
+            FQDN::from_str(domain).unwrap(),
+            false,
+            Some(principal!(OVERRIDE_CANISTER_ID)),
+        );
         let mut mock_repository = MockRepository::new();
         mock_repository
             .expect_try_add_task()
@@ -1178,8 +1187,12 @@ mod tests {
         // provided token doesn't match the configured bypass token.
 
         let domain = "example.org";
-        let expected_task =
-            InputTask::new(TaskKind::Issue, FQDN::from_str(domain).unwrap(), false);
+        let expected_task = InputTask::new(
+            TaskKind::Issue,
+            FQDN::from_str(domain).unwrap(),
+            false,
+            Some(derived_canister_id),
+        );
         let mut mock_repository = MockRepository::new();
         mock_repository
             .expect_try_add_task()
@@ -1310,8 +1323,7 @@ mod tests {
             .times(1)
             .returning(|_| Box::pin(async { Ok(()) }));
 
-        let router =
-            create_test_router_with_bypass_token(mock_repository, mock_validator, None);
+        let router = create_test_router_with_bypass_token(mock_repository, mock_validator, None);
 
         // Act
         let (status, response_json) = domain_request_with_query_and_auth(
@@ -1388,7 +1400,9 @@ mod tests {
         // Act
         let request = Request::builder()
             .method("POST")
-            .uri(format!("/v1/example.org?canister_id={OVERRIDE_CANISTER_ID}"))
+            .uri(format!(
+                "/v1/example.org?canister_id={OVERRIDE_CANISTER_ID}"
+            ))
             .header("authorization", "Basic dXNlcjpwYXNz")
             .body(Body::empty())
             .unwrap();
@@ -1409,8 +1423,12 @@ mod tests {
         // `validate()` is intentionally left unmocked: it must not be called on the bypass path.
 
         let domain = "example.org";
-        let expected_task =
-            InputTask::new(TaskKind::Update, FQDN::from_str(domain).unwrap(), false);
+        let expected_task = InputTask::new(
+            TaskKind::Update,
+            FQDN::from_str(domain).unwrap(),
+            false,
+            Some(principal!(OVERRIDE_CANISTER_ID)),
+        );
         let mut mock_repository = MockRepository::new();
         mock_repository
             .expect_try_add_task()
@@ -1454,8 +1472,12 @@ mod tests {
         // provided token doesn't match the configured bypass token.
 
         let domain = "example.org";
-        let expected_task =
-            InputTask::new(TaskKind::Update, FQDN::from_str(domain).unwrap(), false);
+        let expected_task = InputTask::new(
+            TaskKind::Update,
+            FQDN::from_str(domain).unwrap(),
+            false,
+            Some(derived_canister_id),
+        );
         let mut mock_repository = MockRepository::new();
         mock_repository
             .expect_try_add_task()
@@ -1586,8 +1608,7 @@ mod tests {
             .times(1)
             .returning(|_| Box::pin(async { Ok(()) }));
 
-        let router =
-            create_test_router_with_bypass_token(mock_repository, mock_validator, None);
+        let router = create_test_router_with_bypass_token(mock_repository, mock_validator, None);
 
         // Act
         let (status, response_json) = domain_request_with_query_and_auth(

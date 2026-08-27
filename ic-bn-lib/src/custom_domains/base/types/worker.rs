@@ -868,6 +868,7 @@ mod tests {
     use tokio::{spawn, task, time::sleep};
     use tokio_util::sync::CancellationToken;
 
+    use crate::principal;
     use crate::tls::acme::Error as AcmeError;
     use crate::{
         custom_domains::base::{
@@ -950,6 +951,7 @@ mod tests {
                         123,
                         None,
                         false,
+                        Some(principal!("rrkah-fqaaa-aaaaa-aaaaq-cai")),
                     )))
                 })
             });
@@ -960,9 +962,9 @@ mod tests {
             .returning(|_| Box::pin(async { Ok(()) }));
 
         let mut validator = MockValidatesDomains::new();
-        validator.expect_validate().returning(|_| {
-            Box::pin(async { Ok(Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap()) })
-        });
+        validator
+            .expect_validate()
+            .returning(|_| Box::pin(async { Ok(principal!("rrkah-fqaaa-aaaaa-aaaaq-cai")) }));
 
         // Create worker with short polling interval to speed up the test
         let config =
@@ -1038,6 +1040,7 @@ mod tests {
                 123,
                 certificate.clone(),
                 false,
+                Some(principal!("rrkah-fqaaa-aaaaa-aaaaq-cai")),
             );
 
             // Act
@@ -1095,6 +1098,7 @@ mod tests {
             123,
             None,
             false,
+            None,
         );
 
         // Act
@@ -1145,6 +1149,7 @@ mod tests {
             123,
             None,
             false,
+            Some(principal!("rrkah-fqaaa-aaaaa-aaaaq-cai")),
         );
 
         // Act
@@ -1189,6 +1194,7 @@ mod tests {
             123,
             None,
             false,
+            Some(principal!("rrkah-fqaaa-aaaaa-aaaaq-cai")),
         );
 
         let task_result = TaskResult::success(
@@ -1281,6 +1287,7 @@ mod tests {
             456,
             None,
             false,
+            None,
         );
 
         let task_result = TaskResult::failure(
@@ -1359,6 +1366,7 @@ mod tests {
             123,
             None,
             false,
+            Some(principal!("rrkah-fqaaa-aaaaa-aaaaq-cai")),
         );
 
         let task_result = TaskResult::success(
@@ -1415,6 +1423,7 @@ mod tests {
             123,
             Some(vec![]),
             false,
+            None,
         );
 
         let task_result = TaskResult::success(
