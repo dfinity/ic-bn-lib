@@ -31,7 +31,11 @@ use crate::{
     DurationDisplay,
     custom_domains::base::{
         helpers::{format_error_chain, retry_async},
-        traits::{repository::Repository, time::UtcTimestamp, validation::ValidatesDomains},
+        traits::{
+            repository::Repository,
+            time::UtcTimestamp,
+            validation::{ValidatesDomains, ValidationError},
+        },
         types::task::{
             IssueCertificateOutput, ScheduledTask, TaskFailReason, TaskKind, TaskOutcome,
             TaskOutput, TaskResult,
@@ -217,6 +221,7 @@ impl Worker {
         let task_kind = task.kind;
         let certificate = task.cert;
         let wildcard = task.wildcard;
+        let canister_id = task.canister_id;
 
         info!("Task execution started");
 
@@ -232,6 +237,7 @@ impl Worker {
                         task_id,
                         task_kind,
                         wildcard,
+                        canister_id,
                     )
                     .await
                 }
@@ -247,6 +253,7 @@ impl Worker {
                         task_id,
                         task_kind,
                         wildcard,
+                        canister_id,
                     )
                     .await;
 
@@ -266,7 +273,14 @@ impl Worker {
                 }
 
                 TaskKind::Update => {
-                    update_task(domain, self.validator.clone(), task_id, task_kind).await
+                    update_task(
+                        domain,
+                        self.validator.clone(),
+                        task_id,
+                        task_kind,
+                        canister_id,
+                    )
+                    .await
                 }
 
                 TaskKind::Delete => {
@@ -617,29 +631,43 @@ async fn issue_task(
     task_id: UtcTimestamp,
     task_kind: TaskKind,
     wildcard: bool,
+    canister_id: Option<Principal>,
 ) -> TaskResult {
-    match validator.validate(&domain).await {
-        Ok(canister_id) => {
-            Span::current().record("canister_id", canister_id.to_string());
-
-            match issue_certificate(&domain, canister_id, wildcard, acme_client).await {
-                Ok(output) => TaskResult::success(domain.clone(), output, task_id, task_kind),
-                Err(err) => {
-                    let failure = match err.downcast_ref::<AcmeError>() {
-                        Some(err) if err.rate_limited() => TaskFailReason::RateLimited,
-                        _ => TaskFailReason::GenericFailure(format_error_chain(&err)),
-                    };
-                    TaskResult::failure(domain, failure, task_id, task_kind)
-                }
-            }
-        }
-
-        Err(err) => TaskResult::failure(
-            domain,
-            TaskFailReason::ValidationFailed(err.to_string()),
+    let failure = |e: ValidationError| {
+        TaskResult::failure(
+            domain.clone(),
+            TaskFailReason::ValidationFailed(e.to_string()),
             task_id,
             task_kind,
-        ),
+        )
+    };
+
+    let canister_id = if let Some(v) = canister_id {
+        if let Err(e) = validator.validate_limited(&domain).await {
+            return failure(e);
+        };
+
+        v
+    } else {
+        match validator.validate(&domain).await {
+            Ok(v) => v,
+            Err(e) => {
+                return failure(e);
+            }
+        }
+    };
+
+    Span::current().record("canister_id", canister_id.to_string());
+
+    match issue_certificate(&domain, canister_id, wildcard, acme_client).await {
+        Ok(output) => TaskResult::success(domain.clone(), output, task_id, task_kind),
+        Err(err) => {
+            let failure = match err.downcast_ref::<AcmeError>() {
+                Some(err) if err.rate_limited() => TaskFailReason::RateLimited,
+                _ => TaskFailReason::GenericFailure(format_error_chain(&err)),
+            };
+            TaskResult::failure(domain, failure, task_id, task_kind)
+        }
     }
 }
 
@@ -722,20 +750,34 @@ async fn update_task(
     validator: Arc<dyn ValidatesDomains>,
     task_id: UtcTimestamp,
     task_kind: TaskKind,
+    canister_id: Option<Principal>,
 ) -> TaskResult {
-    match validator.validate(&domain).await {
-        Ok(canister_id) => {
-            Span::current().record("canister_id", canister_id.to_string());
-            TaskResult::success(domain, TaskOutput::Update(canister_id), task_id, task_kind)
-        }
-
-        Err(err) => TaskResult::failure(
-            domain,
-            TaskFailReason::ValidationFailed(err.to_string()),
+    let failure = |e: ValidationError| {
+        TaskResult::failure(
+            domain.clone(),
+            TaskFailReason::ValidationFailed(e.to_string()),
             task_id,
             task_kind,
-        ),
-    }
+        )
+    };
+
+    let canister_id = if let Some(v) = canister_id {
+        if let Err(e) = validator.validate_limited(&domain).await {
+            return failure(e);
+        };
+
+        v
+    } else {
+        match validator.validate(&domain).await {
+            Ok(v) => v,
+            Err(e) => {
+                return failure(e);
+            }
+        }
+    };
+
+    Span::current().record("canister_id", canister_id.to_string());
+    TaskResult::success(domain, TaskOutput::Update(canister_id), task_id, task_kind)
 }
 
 /// Revokes a certificate using the ACME protocol.
@@ -862,9 +904,9 @@ mod tests {
     use anyhow;
     use async_trait::async_trait;
     use candid::Principal;
-    use fqdn::FQDN;
+    use fqdn::fqdn;
     use prometheus::Registry;
-    use std::{str::FromStr, sync::Arc, time::Duration};
+    use std::{sync::Arc, time::Duration};
     use tokio::{spawn, task, time::sleep};
     use tokio_util::sync::CancellationToken;
 
@@ -947,7 +989,7 @@ mod tests {
                 Box::pin(async {
                     Ok(Some(ScheduledTask::new(
                         TaskKind::Issue,
-                        FQDN::from_str("example.org").unwrap(),
+                        fqdn!("example.org"),
                         123,
                         None,
                         false,
@@ -963,8 +1005,8 @@ mod tests {
 
         let mut validator = MockValidatesDomains::new();
         validator
-            .expect_validate()
-            .returning(|_| Box::pin(async { Ok(principal!("rrkah-fqaaa-aaaaa-aaaaq-cai")) }));
+            .expect_validate_limited()
+            .returning(|_| Box::pin(async { Ok(()) }));
 
         // Create worker with short polling interval to speed up the test
         let config =
@@ -1006,9 +1048,12 @@ mod tests {
         // Arrange
         let repository = MockRepository::new();
         let mut validator = MockValidatesDomains::new();
-        validator.expect_validate().returning(|_| {
-            Box::pin(async { Ok(Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap()) })
-        });
+        validator
+            .expect_validate()
+            .returning(|_| Box::pin(async { Ok(principal!("rrkah-fqaaa-aaaaa-aaaaq-cai")) }));
+        validator
+            .expect_validate_limited()
+            .returning(|_| Box::pin(async { Ok(()) }));
         validator
             .expect_validate_deletion()
             .returning(|_| Box::pin(async { Ok(()) }));
@@ -1028,19 +1073,22 @@ mod tests {
         let mut certificate = None;
 
         // Test all task kinds
-        for task_kind in [
-            TaskKind::Issue,
-            TaskKind::Renew,
-            TaskKind::Update,
-            TaskKind::Delete,
+        for (task_kind, canister_id) in [
+            (
+                TaskKind::Issue,
+                Some(principal!("rrkah-fqaaa-aaaaa-aaaaq-cai")),
+            ),
+            (TaskKind::Renew, None),
+            (TaskKind::Update, None),
+            (TaskKind::Delete, None),
         ] {
             let task = ScheduledTask::new(
                 task_kind,
-                FQDN::from_str("example.org").unwrap(),
+                fqdn!("example.org"),
                 123,
                 certificate.clone(),
                 false,
-                Some(principal!("rrkah-fqaaa-aaaaa-aaaaq-cai")),
+                canister_id,
             );
 
             // Act
@@ -1094,7 +1142,7 @@ mod tests {
 
         let task = ScheduledTask::new(
             TaskKind::Issue,
-            FQDN::from_str("example.org").unwrap(),
+            fqdn!("example.org"),
             123,
             None,
             false,
@@ -1123,11 +1171,11 @@ mod tests {
         // Arrange
         let repository = MockRepository::new();
         let mut validator = MockValidatesDomains::new();
-        validator.expect_validate().returning(|_| {
+        validator.expect_validate_limited().returning(|_| {
             Box::pin(async {
                 // Slow validation causing task timeout
                 sleep(Duration::from_millis(100)).await;
-                Ok(Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap())
+                Ok(())
             })
         });
 
@@ -1145,7 +1193,7 @@ mod tests {
 
         let task = ScheduledTask::new(
             TaskKind::Issue,
-            FQDN::from_str("example.org").unwrap(),
+            fqdn!("example.org"),
             123,
             None,
             false,
@@ -1190,7 +1238,7 @@ mod tests {
 
         let task = ScheduledTask::new(
             TaskKind::Issue,
-            FQDN::from_str("example.org").unwrap(),
+            fqdn!("example.org"),
             123,
             None,
             false,
@@ -1283,7 +1331,7 @@ mod tests {
 
         let task = ScheduledTask::new(
             TaskKind::Update,
-            FQDN::from_str("example.com").unwrap(),
+            fqdn!("example.com"),
             456,
             None,
             false,
@@ -1362,7 +1410,7 @@ mod tests {
 
         let task = ScheduledTask::new(
             TaskKind::Issue,
-            FQDN::from_str("example.net").unwrap(),
+            fqdn!("example.net"),
             123,
             None,
             false,
@@ -1419,7 +1467,7 @@ mod tests {
 
         let task = ScheduledTask::new(
             TaskKind::Delete,
-            FQDN::from_str("example.org").unwrap(),
+            fqdn!("example.org"),
             123,
             Some(vec![]),
             false,
