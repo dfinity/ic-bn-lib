@@ -211,17 +211,20 @@ mod tests {
         let domain_normal = "example.org";
         let subdomain_unicode = "тест.unicode.org";
 
+        // The task must carry `canister_id: None` (not the derived value) since this
+        // request went through full validation, not the bypass path: the worker relies
+        // on `None` to know it must re-derive & re-verify ownership from DNS itself.
         let expected_task_normal = InputTask::new(
             TaskKind::Issue,
             FQDN::from_str(domain_normal).unwrap(),
             false,
-            Some(expected_canister_id),
+            None,
         );
         let expected_task_unicode = InputTask::new(
             TaskKind::Issue,
             FQDN::from_str(subdomain_unicode).unwrap(),
             false,
-            Some(expected_canister_id),
+            None,
         );
         mock_repository
             .expect_try_add_task()
@@ -818,17 +821,19 @@ mod tests {
         let domain_normal = "example.org";
         let subdomain_unicode = "тест.unicode.org";
 
+        // See test_post_domain_success_accepted: without a bypass canister_id the task
+        // must carry `None` so the worker re-verifies ownership from DNS at execution time.
         let expected_task_normal = InputTask::new(
             TaskKind::Update,
             FQDN::from_str(domain_normal).unwrap(),
             false,
-            Some(expected_canister_id),
+            None,
         );
         let expected_task_unicode = InputTask::new(
             TaskKind::Update,
             FQDN::from_str(subdomain_unicode).unwrap(),
             false,
-            Some(expected_canister_id),
+            None,
         );
         mock_repository
             .expect_try_add_task()
@@ -1187,11 +1192,15 @@ mod tests {
         // provided token doesn't match the configured bypass token.
 
         let domain = "example.org";
+        // A wrong bypass token must fall back to full validation, and the task must carry
+        // `canister_id: None` (not the derived value) so the worker re-verifies ownership
+        // from DNS itself at execution time, rather than trusting a value an attacker with
+        // a wrong-but-plausible token could otherwise have steered towards `validate_limited`.
         let expected_task = InputTask::new(
             TaskKind::Issue,
             FQDN::from_str(domain).unwrap(),
             false,
-            Some(derived_canister_id),
+            None,
         );
         let mut mock_repository = MockRepository::new();
         mock_repository
@@ -1238,6 +1247,10 @@ mod tests {
         let mut mock_repository = MockRepository::new();
         mock_repository
             .expect_try_add_task()
+            // Full-validation path: the task must not carry the caller's query-string
+            // canister_id forward, otherwise the worker would skip re-verifying
+            // ownership from DNS at execution time.
+            .withf(|task| task.canister_id.is_none())
             .times(1)
             .returning(|_| Box::pin(async { Ok(()) }));
 
@@ -1279,6 +1292,10 @@ mod tests {
         let mut mock_repository = MockRepository::new();
         mock_repository
             .expect_try_add_task()
+            // Full-validation path: the task must not carry the caller's query-string
+            // canister_id forward, otherwise the worker would skip re-verifying
+            // ownership from DNS at execution time.
+            .withf(|task| task.canister_id.is_none())
             .times(1)
             .returning(|_| Box::pin(async { Ok(()) }));
 
@@ -1320,6 +1337,10 @@ mod tests {
         let mut mock_repository = MockRepository::new();
         mock_repository
             .expect_try_add_task()
+            // Full-validation path: the task must not carry the caller's query-string
+            // canister_id forward, otherwise the worker would skip re-verifying
+            // ownership from DNS at execution time.
+            .withf(|task| task.canister_id.is_none())
             .times(1)
             .returning(|_| Box::pin(async { Ok(()) }));
 
@@ -1472,11 +1493,13 @@ mod tests {
         // provided token doesn't match the configured bypass token.
 
         let domain = "example.org";
+        // See test_post_domain_wrong_bypass_token_falls_back_to_full_validation: the task
+        // must carry `canister_id: None`, not the derived value.
         let expected_task = InputTask::new(
             TaskKind::Update,
             FQDN::from_str(domain).unwrap(),
             false,
-            Some(derived_canister_id),
+            None,
         );
         let mut mock_repository = MockRepository::new();
         mock_repository
@@ -1523,6 +1546,10 @@ mod tests {
         let mut mock_repository = MockRepository::new();
         mock_repository
             .expect_try_add_task()
+            // Full-validation path: the task must not carry the caller's query-string
+            // canister_id forward, otherwise the worker would skip re-verifying
+            // ownership from DNS at execution time.
+            .withf(|task| task.canister_id.is_none())
             .times(1)
             .returning(|_| Box::pin(async { Ok(()) }));
 
@@ -1564,6 +1591,10 @@ mod tests {
         let mut mock_repository = MockRepository::new();
         mock_repository
             .expect_try_add_task()
+            // Full-validation path: the task must not carry the caller's query-string
+            // canister_id forward, otherwise the worker would skip re-verifying
+            // ownership from DNS at execution time.
+            .withf(|task| task.canister_id.is_none())
             .times(1)
             .returning(|_| Box::pin(async { Ok(()) }));
 
@@ -1605,6 +1636,10 @@ mod tests {
         let mut mock_repository = MockRepository::new();
         mock_repository
             .expect_try_add_task()
+            // Full-validation path: the task must not carry the caller's query-string
+            // canister_id forward, otherwise the worker would skip re-verifying
+            // ownership from DNS at execution time.
+            .withf(|task| task.canister_id.is_none())
             .times(1)
             .returning(|_| Box::pin(async { Ok(()) }));
 

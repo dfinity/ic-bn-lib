@@ -642,6 +642,8 @@ async fn issue_task(
         )
     };
 
+    // If a canister ID is provided, validate it with limited checks.
+    // Otherwise, perform full validation to derive the canister ID from DNS.
     let canister_id = if let Some(v) = canister_id {
         if let Err(e) = validator.validate_limited(&domain).await {
             return failure(e);
@@ -761,6 +763,8 @@ async fn update_task(
         )
     };
 
+    // If a canister ID is provided, validate it with limited checks.
+    // Otherwise, perform full validation to derive the canister ID from DNS.
     let canister_id = if let Some(v) = canister_id {
         if let Err(e) = validator.validate_limited(&domain).await {
             return failure(e);

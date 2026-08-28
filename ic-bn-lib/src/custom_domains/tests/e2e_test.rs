@@ -45,6 +45,10 @@ const MAX_CANISTER_CALL_RETRY_DELAY: Duration = Duration::from_secs(2);
 const DOMAINS_COUNT: usize = 160;
 const WORKERS_COUNT: usize = 4;
 
+/// Bypass token configured on the API server, used by `bypass_canister_id_e2e` to submit a
+/// registration with an explicit `canister_id` instead of going through `MockValidator::validate()`.
+const BYPASS_TOKEN: &str = "e2e-test-bypass-token";
+
 // Title: Custom Domains with Pebble ACME test server and multiple workers processing registration requests in parallel
 // Setup:
 // - Start Pocket IC and install the Custom Domains canister
@@ -57,10 +61,14 @@ const WORKERS_COUNT: usize = 4;
 //    Each worker should start picking up tasks and obtain certificates in parallel
 // 2. Verify all domains have been registered after all tasks are processed
 // 3. Download all certificates and verify they match the requested domains
-// 4. Submit half of the registered domains for deletion via the API calls
-// 5. Verify all these domains are eventually deleted from the canister
-// 6. Get canister metrics and verify the expected stats of domain registrations
-// 7. Get workers metrics and verify they all have processed more than one task each
+// 4. Register a wildcard domain and verify its certificate carries both SANs
+// 5. Register a domain via the bypass token with an explicit canister_id and verify
+//    that canister_id (not the one MockValidator::validate() would derive) is what
+//    ends up registered
+// 6. Submit half of the registered domains for deletion via the API calls
+// 7. Verify all these domains are eventually deleted from the canister
+// 8. Get canister metrics and verify the expected stats of domain registrations
+// 9. Get workers metrics and verify they all have processed more than one task each
 
 #[ignore]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -85,19 +93,25 @@ async fn e2e_pebble_test() -> anyhow::Result<()> {
     info!("Step 4: Registering a wildcard domain and verifying its certificate carries both SANs");
     wildcard_domain_e2e(&ctx).await?;
 
-    info!("Step 5: Submitting half of the registered domains for deletion via the API calls");
+    info!(
+        "Step 5: Registering a domain via the bypass token with an explicit canister_id, \
+         verifying it skips derivation and the requested canister_id is what gets registered"
+    );
+    bypass_canister_id_e2e(&ctx).await?;
+
+    info!("Step 6: Submitting half of the registered domains for deletion via the API calls");
     let deleted_domains = delete_half_domains(&ctx, domains).await?;
 
-    info!("Step 6: Verifying all these domains are eventually deleted from the canister");
+    info!("Step 7: Verifying all these domains are eventually deleted from the canister");
     verify_domains_deletion(&ctx, deleted_domains).await?;
 
     info!(
-        "Step 7: Getting canister metrics and verifying the expected stats of domain registrations"
+        "Step 8: Getting canister metrics and verifying the expected stats of domain registrations"
     );
     verify_canister_metrics(&ctx).await?;
 
     info!(
-        "Step 8: Getting workers metrics and verifying they all have processed more than one task each"
+        "Step 9: Getting workers metrics and verifying they all have processed more than one task each"
     );
     verify_workers_metrics_with_retries(workers_metrics).await?;
 
@@ -277,7 +291,7 @@ async fn spawn_api_server(
             prometheus_registry,
             RateLimitConfig::default(),
             true,
-            None,
+            Some(BYPASS_TOKEN.to_string()),
         );
         info!("Starting API server at http://{}", api_addr);
         axum_server::bind(api_addr)
@@ -434,6 +448,63 @@ async fn wildcard_domain_e2e(ctx: &TestContext) -> anyhow::Result<()> {
     assert!(
         sans.contains(&wildcard_san),
         "certificate is missing the wildcard SAN {wildcard_san}; SANs: {sans:?}"
+    );
+
+    // Clean up so later registration-count assertions remain valid
+    let response = client.delete(&base_url).send().await?;
+    assert!(response.status().is_success());
+    verify_domains_deletion(ctx, vec![domain]).await?;
+
+    Ok(())
+}
+
+/// Registers a domain using the bypass token plus an explicit `canister_id`, and verifies
+/// that the requested canister_id (not the one `MockValidator::validate()` would derive) is
+/// what actually ends up registered against the domain once the async task completes.
+///
+/// This exercises the full pipeline end-to-end: the API handler must forward the bypass
+/// canister_id into the task, the canister must persist and hand it back to a worker via
+/// `fetch_next_task`, and the worker must use it directly (via `validate_limited`) rather
+/// than falling back to `MockValidator::validate()`'s fixed canister id.
+async fn bypass_canister_id_e2e(ctx: &TestContext) -> anyhow::Result<()> {
+    let domain = "bypass-domain.example.com".to_string();
+    // Distinct from the fixed canister id `MockValidator::validate()` always returns
+    // ("laqa6-raaaa-aaaam-aehzq-cai"), so a successful bypass is unambiguous.
+    let bypass_canister_id: Principal = "2vxsx-fae".parse()?;
+
+    let client = reqwest::Client::new();
+    let base_url = format!(
+        "http://{}:{}/v1/{domain}",
+        ctx.api_server_addr.ip(),
+        ctx.api_server_addr.port()
+    );
+
+    // Register the domain via the bypass path
+    let response = client
+        .post(format!("{base_url}?canister_id={bypass_canister_id}"))
+        .bearer_auth(BYPASS_TOKEN)
+        .send()
+        .await?;
+    assert!(
+        response.status().is_success(),
+        "bypass registration request was rejected: {}",
+        response.status()
+    );
+
+    wait_for_all_tasks_completion(&ctx.canister_repository).await?;
+    verify_domains_registration(ctx, &vec![domain.clone()]).await?;
+
+    let status = ctx
+        .canister_repository
+        .get_domain_status(&domain.parse()?)
+        .await?
+        .with_context(|| format!("domain {domain} not found after bypass registration"))?;
+    assert_eq!(status.status, RegistrationStatus::Registered);
+    assert_eq!(
+        status.canister_id,
+        Some(bypass_canister_id),
+        "domain must be registered against the bypass-supplied canister_id, not the one \
+         MockValidator::validate() would have derived"
     );
 
     // Clean up so later registration-count assertions remain valid
