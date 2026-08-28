@@ -44,7 +44,10 @@ pub struct DomainEntry {
     pub failures_count: u32,
     /// Number of rate limit failures for the current task
     pub rate_limit_failures_count: u32,
-    /// Canister ID associated with the domain
+    /// Canister ID associated with the domain. Normally only confirmed once a task
+    /// actually succeeds, but when `bypass_validation` is set it is also written
+    /// at submission time, since `fetch_next_task` needs it *before* the task runs
+    /// in order to tell the worker to trust it.
     pub canister_id: Option<Principal>,
     /// Timestamp when the domain entry was created (set once and never updated)
     pub created_at: UtcTimestamp,
@@ -61,16 +64,14 @@ pub struct DomainEntry {
     /// after upgrade (they predate this field and default to `false`).
     #[serde(default)]
     pub wildcard: bool,
-    /// Canister ID explicitly requested (with the bypass token) for the currently
-    /// in-flight task, if any. `None` means the worker must derive and verify the
-    /// canister ID from the DNS. Set fresh on every `try_add_task` call and cleared
-    /// once the task finishes so it never leaks into a later task, such as a
-    /// canister-generated `Renew`.
-    ///
+    /// Whether validation should always be bypassed for this domain: `canister_id` is
+    /// trusted instead of being derived from DNS TXT record.
+    /// It can be enabled only once at domain creation time, and can only be revoked
+    /// by deleting and re-creating the domain.
     /// `#[serde(default)]` keeps existing stable-storage entries deserializable
-    /// after upgrade (they predate this field and default to `None`).
+    /// after upgrade (they predate this field and default to `false`).
     #[serde(default)]
-    pub pending_canister_id: Option<Principal>,
+    pub bypass_validation: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -309,7 +310,14 @@ impl CanisterState {
                     now,
                     enc_cert,
                     Some(domain_entry.wildcard),
-                    domain_entry.pending_canister_id,
+                    // Only trust `canister_id` outright when this domain is flagged for
+                    // bypass -- applies uniformly to Issue, Update, and a
+                    // canister-generated Renew alike, since none of them re-derive this
+                    // decision themselves.
+                    domain_entry
+                        .bypass_validation
+                        .then_some(domain_entry.canister_id)
+                        .flatten(),
                 )))
             }
             None => Ok(None),
@@ -516,10 +524,19 @@ impl CanisterState {
                 entry.last_failure_reason = None;
                 entry.rate_limit_failures_count = 0;
                 entry.task_created_at = Some(now);
-                // Set fresh from this submission -- always overwritten (not preserved
-                // like `wildcard`) since the bypass decision applies to this specific
-                // task, not to the domain as a whole.
-                entry.pending_canister_id = task.canister_id;
+
+                // Bypass, once granted, can only be revoked by deleting and
+                // re-creating the domain. So only the bypass path may touch these
+                // fields, and only to turn bypass on / retarget the canister_id; a
+                // plain submission must leave both exactly as they are,
+                // otherwise anyone without the token could downgrade a bypassed domain
+                // back to full validation at will.
+                if let (TaskKind::Issue | TaskKind::Update, Some(canister_id)) =
+                    (task.kind, task.canister_id)
+                {
+                    entry.bypass_validation = true;
+                    entry.canister_id = Some(canister_id);
+                }
 
                 entry
             }
@@ -532,7 +549,8 @@ impl CanisterState {
                 let mut entry = DomainEntry::new(Some(task.kind), now);
                 entry.task_created_at = Some(now);
                 entry.wildcard = task.wildcard.unwrap_or(false);
-                entry.pending_canister_id = task.canister_id;
+                entry.bypass_validation = task.canister_id.is_some();
+                entry.canister_id = task.canister_id;
                 entry
             }
         };
@@ -608,7 +626,6 @@ impl CanisterState {
                 entry.rate_limit_failures_count = 0;
                 self.last_change.set(now);
                 entry.task_created_at = None;
-                entry.pending_canister_id = None;
 
                 match output {
                     TaskOutput::Issue(output) => {
@@ -651,7 +668,6 @@ impl CanisterState {
                 // Delete the task if the retry limit is reached
                 if entry.failures_count >= MAX_TASK_FAILURES {
                     entry.task = None;
-                    entry.pending_canister_id = None;
                 }
             }
         }
@@ -960,9 +976,9 @@ mod tests {
             !entry.wildcard,
             "legacy entries must default wildcard to false"
         );
-        assert_eq!(
-            entry.pending_canister_id, None,
-            "legacy entries must default pending_canister_id to None"
+        assert!(
+            !entry.bypass_validation,
+            "legacy entries must default bypass_validation to false"
         );
         // Sanity check that the rest of the fields round-tripped correctly.
         assert_eq!(entry.task, Some(TaskKind::Issue));
@@ -1634,13 +1650,13 @@ mod tests {
     }
 
     #[test]
-    fn test_try_add_task_stores_and_refreshes_pending_canister_id() {
+    fn test_try_add_task_sets_bypass_validation_and_canister_id_on_issue() {
         let mut state = create_test_empty_state();
         let now = 1000;
         let bypass_canister_id = Principal::from_text("rdmx6-jaaaa-aaaaa-aaadq-cai").unwrap();
 
-        // Issuing with a caller-supplied canister ID (the bypass path) stores it as the
-        // pending override for the in-flight task.
+        // Issuing with a caller-supplied canister ID (the bypass path) flags the domain
+        // for bypass and records the canister ID immediately, before the task even runs.
         let domain = "bypass.example.com".to_string();
         state
             .try_add_task(
@@ -1653,15 +1669,58 @@ mod tests {
                 now,
             )
             .expect("issue task should be accepted");
-        assert_eq!(
-            state.domains.get(&domain).unwrap().pending_canister_id,
-            Some(bypass_canister_id)
-        );
 
-        // Unlike `wildcard`, this is NOT preserved across submissions -- it reflects
-        // only the most recently submitted task, so a later Update without a
-        // caller-supplied canister ID must clear it back to `None` rather than keep
-        // trusting the previous task's bypass value.
+        let entry = state.domains.get(&domain).unwrap();
+        assert!(entry.bypass_validation);
+        assert_eq!(entry.canister_id, Some(bypass_canister_id));
+    }
+
+    #[test]
+    fn test_try_add_task_issue_without_canister_id_does_not_set_bypass() {
+        let mut state = create_test_empty_state();
+        let now = 1000;
+
+        let domain = "normal.example.com".to_string();
+        state
+            .try_add_task(
+                InputTask {
+                    domain: domain.clone(),
+                    kind: TaskKind::Issue,
+                    wildcard: None,
+                    canister_id: None,
+                },
+                now,
+            )
+            .expect("issue task should be accepted");
+
+        let entry = state.domains.get(&domain).unwrap();
+        assert!(!entry.bypass_validation);
+        assert_eq!(entry.canister_id, None);
+    }
+
+    #[test]
+    fn test_try_add_task_bypass_update_changes_canister_id() {
+        // A bypass domain's canister_id must be changeable by a later bypass Update
+        // (e.g. migrating the domain to a different canister) -- the worker needs the
+        // NEW target, not the one recorded at creation.
+        let mut state = create_test_empty_state();
+        let now = 1000;
+        let original_canister_id = Principal::from_text("rdmx6-jaaaa-aaaaa-aaadq-cai").unwrap();
+        let new_canister_id = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
+        let domain = "bypass.example.com".to_string();
+
+        state
+            .try_add_task(
+                InputTask {
+                    domain: domain.clone(),
+                    kind: TaskKind::Issue,
+                    wildcard: None,
+                    canister_id: Some(original_canister_id),
+                },
+                now,
+            )
+            .expect("issue task should be accepted");
+
         let mut entry = state.domains.get(&domain).unwrap();
         entry.task = None; // simulate the issue task having completed
         entry.not_after = Some(9999); // Update requires an existing certificate
@@ -1672,17 +1731,150 @@ mod tests {
                 InputTask {
                     domain: domain.clone(),
                     kind: TaskKind::Update,
-                    wildcard: Some(false),
+                    wildcard: None,
+                    canister_id: Some(new_canister_id),
+                },
+                now,
+            )
+            .expect("update task should be accepted");
+
+        let entry = state.domains.get(&domain).unwrap();
+        assert!(entry.bypass_validation);
+        assert_eq!(entry.canister_id, Some(new_canister_id));
+    }
+
+    #[test]
+    fn test_try_add_task_non_bypass_update_does_not_clear_bypass_validation() {
+        // Bypass is one-way: a plain (non-bypass) Update must not be able to downgrade
+        // a bypassed domain back to full validation, otherwise anyone without the
+        // bypass token could revoke it. The only way to clear it is to delete and
+        // re-create the domain.
+        let mut state = create_test_empty_state();
+        let now = 1000;
+        let bypass_canister_id = Principal::from_text("rdmx6-jaaaa-aaaaa-aaadq-cai").unwrap();
+        let domain = "bypass.example.com".to_string();
+
+        state
+            .try_add_task(
+                InputTask {
+                    domain: domain.clone(),
+                    kind: TaskKind::Issue,
+                    wildcard: None,
+                    canister_id: Some(bypass_canister_id),
+                },
+                now,
+            )
+            .expect("issue task should be accepted");
+
+        let mut entry = state.domains.get(&domain).unwrap();
+        entry.task = None; // simulate the issue task having completed
+        entry.not_after = Some(9999); // Update requires an existing certificate
+        state.domains.insert(domain.clone(), entry);
+
+        state
+            .try_add_task(
+                InputTask {
+                    domain: domain.clone(),
+                    kind: TaskKind::Update,
+                    wildcard: None,
                     canister_id: None,
                 },
                 now,
             )
             .expect("update task should be accepted");
-        assert_eq!(
-            state.domains.get(&domain).unwrap().pending_canister_id,
-            None,
-            "an Update without a bypass canister_id must clear any stale pending override"
+
+        let entry = state.domains.get(&domain).unwrap();
+        assert!(
+            entry.bypass_validation,
+            "a non-bypass submission must not be able to clear bypass_validation"
         );
+        assert_eq!(entry.canister_id, Some(bypass_canister_id));
+    }
+
+    #[test]
+    fn test_try_add_task_delete_and_recreate_clears_bypass_validation() {
+        // The only sanctioned way to clear bypass_validation: delete the domain
+        // entirely (dropping its DomainEntry) and re-create it via a fresh, non-bypass
+        // Issue.
+        let mut state = create_test_empty_state();
+        let now = 1000;
+        let bypass_canister_id = Principal::from_text("rdmx6-jaaaa-aaaaa-aaadq-cai").unwrap();
+        let domain = "bypass.example.com".to_string();
+
+        state
+            .try_add_task(
+                InputTask {
+                    domain: domain.clone(),
+                    kind: TaskKind::Issue,
+                    wildcard: None,
+                    canister_id: Some(bypass_canister_id),
+                },
+                now,
+            )
+            .expect("issue task should be accepted");
+        assert!(state.domains.get(&domain).unwrap().bypass_validation);
+
+        // Simulate the domain having actually been deleted (Delete task succeeded).
+        state.domains.remove(&domain);
+
+        state
+            .try_add_task(
+                InputTask {
+                    domain: domain.clone(),
+                    kind: TaskKind::Issue,
+                    wildcard: None,
+                    canister_id: None,
+                },
+                now,
+            )
+            .expect("issue task on the re-created domain should be accepted");
+
+        let entry = state.domains.get(&domain).unwrap();
+        assert!(!entry.bypass_validation);
+        assert_eq!(entry.canister_id, None);
+    }
+
+    #[test]
+    fn test_try_add_task_delete_does_not_disturb_bypass_validation() {
+        // A Delete never carries a canister_id; it must not clear bypass_validation for
+        // a domain it fails to actually delete (e.g. DNS validation rejects it later).
+        let mut state = create_test_empty_state();
+        let now = 1000;
+        let bypass_canister_id = Principal::from_text("rdmx6-jaaaa-aaaaa-aaadq-cai").unwrap();
+        let domain = "bypass.example.com".to_string();
+
+        state
+            .try_add_task(
+                InputTask {
+                    domain: domain.clone(),
+                    kind: TaskKind::Issue,
+                    wildcard: None,
+                    canister_id: Some(bypass_canister_id),
+                },
+                now,
+            )
+            .expect("issue task should be accepted");
+
+        let mut entry = state.domains.get(&domain).unwrap();
+        entry.task = None; // simulate the issue task having completed
+        entry.not_after = Some(9999);
+        state.domains.insert(domain.clone(), entry);
+
+        state
+            .try_add_task(
+                InputTask {
+                    domain: domain.clone(),
+                    kind: TaskKind::Delete,
+                    wildcard: None,
+                    canister_id: None,
+                },
+                now,
+            )
+            .expect("delete task should be accepted");
+
+        let entry = state.domains.get(&domain).unwrap();
+        assert!(entry.bypass_validation);
+        assert_eq!(entry.canister_id, Some(bypass_canister_id));
     }
 
     #[test]
@@ -2057,7 +2249,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fetch_next_task_propagates_pending_canister_id() {
+    fn test_fetch_next_task_propagates_canister_id_when_bypass_validation_is_set() {
         // Arrange: a task submitted through the bypass path (with a caller-supplied
         // canister ID) must hand that canister ID to the worker via `ScheduledTask`, so
         // the worker knows to trust it (`validate_limited`) instead of re-deriving and
@@ -2094,7 +2286,38 @@ mod tests {
     }
 
     #[test]
-    fn test_renewal_does_not_inherit_stale_pending_canister_id_from_prior_bypass_issue() {
+    fn test_fetch_next_task_does_not_propagate_canister_id_without_bypass_validation() {
+        // A domain's `canister_id` may already be confirmed (from a past successful
+        // task), but without `bypass_validation` set the worker must still re-derive and
+        // re-verify ownership from DNS rather than trust the stored value outright.
+        let mut state = create_test_empty_state();
+        let now = 1000;
+        let canister_id = Principal::from_text("rdmx6-jaaaa-aaaaa-aaadq-cai").unwrap();
+
+        let mut domain = DomainEntry::new(Some(TaskKind::Update), now);
+        domain.task_created_at = Some(now);
+        domain.canister_id = Some(canister_id);
+        domain.not_after = Some(9999); // Update requires an existing certificate
+        domain.bypass_validation = false;
+        state.domains.insert("normal.com".to_string(), domain);
+
+        // Act
+        let task = state.fetch_next_task(now).unwrap();
+
+        // Assert
+        let expected_task = Some(ScheduledTask::new(
+            TaskKindApi::Update,
+            "normal.com".to_string(),
+            now,
+            None,
+            Some(false),
+            None,
+        ));
+        assert_eq!(task, expected_task);
+    }
+
+    #[test]
+    fn test_renewal_inherits_canister_id_when_bypass_validation_is_set() {
         // Arrange: register a domain via the bypass path (caller-supplied canister ID,
         // skipping ownership verification) and let that task succeed.
         let mut state = create_test_empty_state();
@@ -2141,35 +2364,36 @@ mod tests {
             )
             .expect("failed to submit task result");
 
-        assert_eq!(
-            state.domains.get(&domain).unwrap().pending_canister_id,
-            None,
-            "pending_canister_id must be cleared once the task it was submitted for completes"
+        let entry = state.domains.get(&domain).unwrap();
+        assert!(
+            entry.bypass_validation,
+            "bypass_validation is a sticky, per-domain decision and must survive task completion"
         );
+        assert_eq!(entry.canister_id, Some(bypass_canister_id));
 
         // Act: fast-forward to when the certificate is nearing expiration, so the
         // canister auto-schedules a `Renew` task for this domain.
         let renewal_time = not_after - 1;
         let task = state.fetch_next_task(renewal_time).unwrap();
 
-        // Assert: the internally-generated Renew task must NOT inherit the bypass
-        // canister id from the earlier, unrelated Issue task -- it never went through
-        // `try_add_task`, so the worker must fall back to full `validate()` and
-        // re-verify ownership from DNS, exactly as for any other Renew.
+        // Assert: the internally-generated Renew task must inherit the domain's bypass
+        // canister id -- it never goes through `try_add_task` itself, so it relies
+        // entirely on the sticky `bypass_validation`/`canister_id` set by the Issue.
         let expected_task = Some(ScheduledTask::new(
             TaskKindApi::Renew,
             domain,
             renewal_time,
             Some(b"cert".to_vec()),
             Some(false),
-            None,
+            Some(bypass_canister_id),
         ));
         assert_eq!(task, expected_task);
     }
 
     #[test]
-    fn test_submit_task_result_success_clears_pending_canister_id() {
-        // Arrange
+    fn test_submit_task_result_failure_preserves_bypass_validation_and_canister_id() {
+        // A retried attempt of the same task must keep trusting the same bypass
+        // canister ID -- `submit_task_result` no longer touches either field on failure.
         let mut state = create_test_empty_state();
         let now = 1000;
         let task_id = 2u64;
@@ -2177,49 +2401,8 @@ mod tests {
 
         let mut domain = DomainEntry::new(Some(TaskKind::Issue), now);
         domain.taken_at = Some(task_id);
-        domain.pending_canister_id = Some(canister_id);
-        state.domains.insert("test.com".to_string(), domain);
-
-        let task_result = TaskResult {
-            domain: "test.com".to_string(),
-            task_id,
-            task_kind: TaskKind::Issue,
-            outcome: TaskOutcome::Success(TaskOutput::Issue(IssueCertificateOutput {
-                canister_id,
-                enc_cert: b"cert".to_vec(),
-                enc_priv_key: b"key".to_vec(),
-                not_before: 0,
-                not_after: 9999,
-            })),
-            duration_secs: 1,
-        };
-
-        // Act
-        state.submit_task_result(task_result, now).unwrap();
-
-        // Assert
-        assert_eq!(
-            state
-                .domains
-                .get(&"test.com".to_string())
-                .unwrap()
-                .pending_canister_id,
-            None
-        );
-    }
-
-    #[test]
-    fn test_submit_task_result_failure_preserves_pending_canister_id_for_retry() {
-        // A retried attempt of the SAME task must keep trusting the same bypass
-        // canister ID -- it's not a new submission, so the override must not be lost.
-        let mut state = create_test_empty_state();
-        let now = 1000;
-        let task_id = 2u64;
-        let canister_id = Principal::from_text("rdmx6-jaaaa-aaaaa-aaadq-cai").unwrap();
-
-        let mut domain = DomainEntry::new(Some(TaskKind::Issue), now);
-        domain.taken_at = Some(task_id);
-        domain.pending_canister_id = Some(canister_id);
+        domain.bypass_validation = true;
+        domain.canister_id = Some(canister_id);
         state.domains.insert("test.com".to_string(), domain);
 
         let task_result = TaskResult {
@@ -2240,11 +2423,14 @@ mod tests {
             Some(TaskKind::Issue),
             "task should still be retried"
         );
-        assert_eq!(entry.pending_canister_id, Some(canister_id));
+        assert!(entry.bypass_validation);
+        assert_eq!(entry.canister_id, Some(canister_id));
     }
 
     #[test]
-    fn test_submit_task_result_failure_clears_pending_canister_id_once_retries_exhausted() {
+    fn test_submit_task_result_max_failures_preserves_bypass_validation_and_canister_id() {
+        // Bypass is a domain-level property, not per-task state: exhausting retries
+        // drops the task itself, but must not disturb the sticky decision.
         let mut state = create_test_empty_state();
         let now = 1000;
         let task_id = 2u64;
@@ -2252,7 +2438,8 @@ mod tests {
 
         let mut domain = DomainEntry::new(Some(TaskKind::Issue), now);
         domain.taken_at = Some(task_id);
-        domain.pending_canister_id = Some(canister_id);
+        domain.bypass_validation = true;
+        domain.canister_id = Some(canister_id);
         domain.failures_count = MAX_TASK_FAILURES - 1;
         state.domains.insert("test.com".to_string(), domain);
 
@@ -2270,7 +2457,8 @@ mod tests {
         // Assert
         let entry = state.domains.get(&"test.com".to_string()).unwrap();
         assert_eq!(entry.task, None);
-        assert_eq!(entry.pending_canister_id, None);
+        assert!(entry.bypass_validation);
+        assert_eq!(entry.canister_id, Some(canister_id));
     }
 
     #[test]
