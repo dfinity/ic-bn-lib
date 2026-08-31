@@ -47,7 +47,9 @@ pub trait ValidatesDomains: Send + Sync {
 
     /// Validates that a domain can be registered or updated.
     ///
-    /// Skips certain checks compared to validate()
+    /// Skips certain checks compared to `validate()`:
+    /// * Canister ownership verification (.well-known/ic-domains)
+    /// * DNS TXT record verification for canister ID
     async fn validate_limited(&self, domain: &FQDN) -> Result<(), ValidationError>;
 
     /// Validates that a domain can be safely deleted.

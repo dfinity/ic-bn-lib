@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use candid::Principal;
 use chrono::{DateTime, Utc};
 use derive_new::new;
-use fqdn::FQDN;
+use fqdn::{FQDN, Fqdn};
 use instant_acme::{RevocationReason, RevocationRequest};
 use pem::parse_many;
 use prometheus::{
@@ -624,6 +624,20 @@ impl Run for Worker {
     }
 }
 
+fn task_validation_failure(
+    domain: &Fqdn,
+    error: ValidationError,
+    task_id: UtcTimestamp,
+    task_kind: TaskKind,
+) -> TaskResult {
+    TaskResult::failure(
+        domain.into(),
+        TaskFailReason::ValidationFailed(error.to_string()),
+        task_id,
+        task_kind,
+    )
+}
+
 async fn issue_task(
     domain: FQDN,
     validator: Arc<dyn ValidatesDomains>,
@@ -633,20 +647,11 @@ async fn issue_task(
     wildcard: bool,
     canister_id: Option<Principal>,
 ) -> TaskResult {
-    let failure = |e: ValidationError| {
-        TaskResult::failure(
-            domain.clone(),
-            TaskFailReason::ValidationFailed(e.to_string()),
-            task_id,
-            task_kind,
-        )
-    };
-
     // If a canister ID is provided, validate it with limited checks.
     // Otherwise, perform full validation to derive the canister ID from DNS.
     let canister_id = if let Some(v) = canister_id {
         if let Err(e) = validator.validate_limited(&domain).await {
-            return failure(e);
+            return task_validation_failure(&domain, e, task_id, task_kind);
         };
 
         v
@@ -654,7 +659,7 @@ async fn issue_task(
         match validator.validate(&domain).await {
             Ok(v) => v,
             Err(e) => {
-                return failure(e);
+                return task_validation_failure(&domain, e, task_id, task_kind);
             }
         }
     };
@@ -754,20 +759,11 @@ async fn update_task(
     task_kind: TaskKind,
     canister_id: Option<Principal>,
 ) -> TaskResult {
-    let failure = |e: ValidationError| {
-        TaskResult::failure(
-            domain.clone(),
-            TaskFailReason::ValidationFailed(e.to_string()),
-            task_id,
-            task_kind,
-        )
-    };
-
     // If a canister ID is provided, validate it with limited checks.
     // Otherwise, perform full validation to derive the canister ID from DNS.
     let canister_id = if let Some(v) = canister_id {
         if let Err(e) = validator.validate_limited(&domain).await {
-            return failure(e);
+            return task_validation_failure(&domain, e, task_id, task_kind);
         };
 
         v
@@ -775,7 +771,7 @@ async fn update_task(
         match validator.validate(&domain).await {
             Ok(v) => v,
             Err(e) => {
-                return failure(e);
+                return task_validation_failure(&domain, e, task_id, task_kind);
             }
         }
     };

@@ -9,6 +9,8 @@ use axum::{
     routing::{delete, get, patch, post},
 };
 use axum_extra::middleware::option_layer;
+use bytes::Bytes;
+use http::header::AUTHORIZATION;
 use prometheus::Registry;
 use tower_http::{
     LatencyUnit,
@@ -26,10 +28,44 @@ use super::{
     metrics::{HttpMetrics, metrics_handler, metrics_middleware},
 };
 use crate::{
+    constant_time_eq,
     custom_domains::base::traits::{repository::Repository, validation::ValidatesDomains},
-    http::middleware::rate_limiter::layer_by_ip,
+    http::middleware::rate_limiter::{BYPASS_TOKEN_HEADER, Bypasser, NeverBypasser, layer_by_ip},
     reqwest::StatusCode,
 };
+
+/// This bypasser checks AUTHORIZATION header for a token first,
+/// then the `x-ratelimit-bypass-token` header if not found.
+#[derive(Clone)]
+struct AuthTokenBypasser(Bytes);
+
+impl Bypasser for AuthTokenBypasser {
+    fn should_bypass<B>(&self, req: &Request<B>) -> bool {
+        req.headers()
+            .get(AUTHORIZATION)
+            .filter(|x| x.as_bytes().starts_with(b"Bearer "))
+            .and_then(|x| x.as_bytes().get(7..))
+            .or_else(|| req.headers().get(BYPASS_TOKEN_HEADER).map(|x| x.as_bytes()))
+            .is_some_and(|x| constant_time_eq(x, &self.0))
+    }
+}
+
+/// Uses either `AuthTokenBypasser` or `NeverBypasser` depending on whether a
+/// bypass token is configured. Needed because bypasser is generic and we need a single type.
+#[derive(Clone)]
+enum RateLimitBypasser {
+    Token(AuthTokenBypasser),
+    Never(NeverBypasser),
+}
+
+impl Bypasser for RateLimitBypasser {
+    fn should_bypass<B>(&self, req: &Request<B>) -> bool {
+        match self {
+            Self::Token(b) => b.should_bypass(req),
+            Self::Never(b) => b.should_bypass(req),
+        }
+    }
+}
 
 /// Options for configuring rate limits on various endpoints.
 #[derive(Clone, Debug, Default)]
@@ -52,10 +88,15 @@ pub fn create_router(
     let backend_service = BackendService::new(repository, validator, bypass_token.clone());
     let response = (StatusCode::TOO_MANY_REQUESTS, "Too many requests");
 
+    let bypasser = bypass_token.map_or_else(
+        || RateLimitBypasser::Never(NeverBypasser),
+        |x| RateLimitBypasser::Token(AuthTokenBypasser(x.into())),
+    );
+
     // Use ic-bn-lib rate limiting middleware, with key by IP address.
     let create_rate_limiter = |limit: Option<u32>, response| {
         option_layer(
-            limit.map(|lim| layer_by_ip(lim, 2 * lim, response, bypass_token.clone()).unwrap()),
+            limit.map(|lim| layer_by_ip(lim, 2 * lim, response, bypasser.clone()).unwrap()),
         )
     };
 
