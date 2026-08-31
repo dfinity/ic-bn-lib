@@ -1,6 +1,6 @@
 [package]
 name = "ic-custom-domains-canister-api"
-version = "0.2.7"
+version = "0.3.0"
 edition.workspace = true
 description = "Custom Domains Canister API"
 homepage.workspace = true
