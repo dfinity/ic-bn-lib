@@ -35,6 +35,8 @@ pub struct InputTask {
     pub domain: FQDN,
     /// Whether to also include a `*.domain` wildcard SAN in the certificate
     pub wildcard: bool,
+    /// The canister ID associated with the domain (if known at submission time)
+    pub canister_id: Option<Principal>,
 }
 
 /// Scheduled task that is ready for execution by a worker.
@@ -50,6 +52,8 @@ pub struct ScheduledTask {
     pub cert: Option<Vec<u8>>,
     /// Whether to also include a `*.domain` wildcard SAN in the certificate
     pub wildcard: bool,
+    /// The canister ID associated with the domain (if known at submission time)
+    pub canister_id: Option<Principal>,
 }
 
 /// Represents the result of a task execution submitted by a worker to the repository.
@@ -192,6 +196,7 @@ impl From<InputTask> for ApiInputTask {
             kind: task.kind.into(),
             domain: task.domain.to_string(),
             wildcard: Some(task.wildcard),
+            canister_id: task.canister_id,
         }
     }
 }

@@ -53,6 +53,15 @@ impl ValidatesDomains for Validator {
     }
 
     #[instrument(level = "info", skip_all, fields(domain = %domain))]
+    async fn validate_limited(&self, domain: &FQDN) -> Result<(), ValidationError> {
+        info!("Beginning validation");
+        self.validate_cname_delegation(domain).await?;
+        self.validate_no_txt_challenge(domain).await?;
+        info!("Validation succeeded");
+        Ok(())
+    }
+
+    #[instrument(level = "info", skip_all, fields(domain = %domain))]
     async fn validate_deletion(&self, domain: &FQDN) -> Result<(), ValidationError> {
         info!("Beginning deletion validation");
         self.validate_no_canister_id_record(domain).await?;

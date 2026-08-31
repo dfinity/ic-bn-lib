@@ -2,6 +2,11 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
+use axum_extra::{
+    TypedHeader,
+    headers::{Authorization, authorization::Bearer},
+};
+use candid::Principal;
 use serde::Deserialize;
 use tracing::warn;
 
@@ -12,7 +17,7 @@ use super::{
         ValidateResponse, error_response, success_response,
     },
 };
-use crate::custom_domains::base::types::task::TaskKind;
+use crate::{constant_time_eq, custom_domains::base::types::task::TaskKind};
 
 /// Query parameters for the domain registration endpoint.
 #[derive(Debug, Default, Deserialize)]
@@ -20,6 +25,9 @@ pub struct CreateQuery {
     /// When `true`, the issued certificate also covers `*.domain`.
     #[serde(default)]
     pub wildcard: bool,
+    /// Canister ID to associate the domain with.
+    /// Taken into account only if the bypass token is provided in the request.
+    pub canister_id: Option<Principal>,
 }
 
 fn log_error(err: &ApiError, domain: &str, operation: &str) {
@@ -40,7 +48,8 @@ fn log_error(err: &ApiError, domain: &str, operation: &str) {
         path = "/v1/{id}",
         params(
             ("id" = String, Path, description = "Domain name to register"),
-            ("wildcard" = Option<bool>, Query, description = "Also issue a *.domain wildcard SAN")
+            ("wildcard" = Option<bool>, Query, description = "Also issue a *.domain wildcard SAN"),
+            ("canister_id" = Option<String>, Query, description = "Canister ID to associate the domain with.")
         ),
         responses(
             (status = 202, description = "Domain registration request accepted", body = super::models::ApiResponse<CreateOrUpdateResponse>),
@@ -54,9 +63,25 @@ pub async fn create_handler(
     State(backend_service): State<BackendService>,
     Path(domain): Path<String>,
     Query(query): Query<CreateQuery>,
+    authorization: Option<TypedHeader<Authorization<Bearer>>>,
 ) -> axum::response::Response {
+    // Consider the canister_id provided in the query only if the bypass token
+    // is provided and matches the one configured in the backend service (if any).
+    let canister_id = authorization
+        .as_ref()
+        .map(|x| x.token())
+        .zip(backend_service.bypass_token.as_ref())
+        .zip(query.canister_id)
+        .and_then(|((token, bypass_token), canister_id)| {
+            if constant_time_eq(token.as_bytes(), bypass_token.as_bytes()) {
+                return Some(canister_id);
+            }
+
+            None
+        });
+
     match backend_service
-        .submit_task(&domain, TaskKind::Issue, query.wildcard)
+        .submit_task(&domain, TaskKind::Issue, query.wildcard, canister_id)
         .await
     {
         Ok(canister_id) => success_response(
@@ -90,7 +115,8 @@ pub async fn create_handler(
         patch,
         path = "/v1/{id}",
         params(
-            ("id" = String, Path, description = "Domain name to update")
+            ("id" = String, Path, description = "Domain name to update"),
+            ("canister_id" = Option<String>, Query, description = "Canister ID to associate the domain with.")
         ),
         responses(
             (status = 202, description = "Update request accepted", body = super::models::ApiResponse<CreateOrUpdateResponse>),
@@ -104,9 +130,26 @@ pub async fn create_handler(
 pub async fn update_handler(
     State(backend_service): State<BackendService>,
     Path(domain): Path<String>,
+    Query(query): Query<CreateQuery>,
+    authorization: Option<TypedHeader<Authorization<Bearer>>>,
 ) -> axum::response::Response {
+    // Consider the canister_id provided in the query only if the bypass token
+    // is provided and matches the one configured in the backend service (if any).
+    let canister_id = authorization
+        .as_ref()
+        .map(|x| x.token())
+        .zip(backend_service.bypass_token.as_ref())
+        .zip(query.canister_id)
+        .and_then(|((token, bypass_token), canister_id)| {
+            if constant_time_eq(token.as_bytes(), bypass_token.as_bytes()) {
+                return Some(canister_id);
+            }
+
+            None
+        });
+
     match backend_service
-        .submit_task(&domain, TaskKind::Update, false)
+        .submit_task(&domain, TaskKind::Update, false, canister_id)
         .await
     {
         Ok(canister_id) => success_response(

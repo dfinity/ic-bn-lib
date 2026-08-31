@@ -96,6 +96,7 @@ impl TestEnv {
             domain,
             kind,
             wildcard: None,
+            canister_id: None,
         };
         let arg = Encode!(&task)?;
 

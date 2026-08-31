@@ -27,6 +27,8 @@ type InputTask = record {
   domain: text;
   // Whether to also include a *.domain wildcard SAN in the certificate
   wildcard: opt bool;
+  // The canister ID associated with the domain (if known at submission time)
+  canister_id: opt principal;
 };
 
 // Reasons why a task might fail
@@ -99,6 +101,8 @@ type ScheduledTask = record {
   enc_cert: opt blob;
   // Whether to also include a *.domain wildcard SAN in the certificate
   wildcard: opt bool;
+  // The canister ID associated with the domain (if known at submission time)
+  canister_id: opt principal;
 };
 
 // Status of a domain

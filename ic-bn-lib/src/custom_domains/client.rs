@@ -297,6 +297,7 @@ impl Repository for CanisterClient {
                     api_task.id,
                     certificate,
                     api_task.wildcard.unwrap_or(false),
+                    api_task.canister_id,
                 );
                 Ok(Some(task))
             }

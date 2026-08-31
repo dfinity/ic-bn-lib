@@ -25,7 +25,7 @@ use tower::{Layer, Service};
 
 use crate::{constant_time_eq, hname, http::middleware::RemoteAddr};
 
-const BYPASS_TOKEN_HEADER: HeaderName = hname!("x-ratelimit-bypass-token");
+pub const BYPASS_TOKEN_HEADER: HeaderName = hname!("x-ratelimit-bypass-token");
 
 /// The `governor` rate limiter type that backs this middleware, generic over the clock so
 /// that tests can inject `governor::clock::FakeRelativeClock` instead of the real-time
@@ -45,6 +45,11 @@ pub trait KeyExtractor: Clone + Send + Sync + 'static {
     type Key: Clone + Eq + Hash + Send + Sync + 'static;
 
     fn extract<B>(&self, req: &Request<B>) -> Option<Self::Key>;
+}
+
+/// Decides if the rate-limiting for the given request should be bypassed
+pub trait Bypasser: Clone + Send + Sync + 'static {
+    fn should_bypass<B>(&self, req: &Request<B>) -> bool;
 }
 
 /// Extracts an IP from the request as a rate-limiting key
@@ -71,29 +76,60 @@ impl KeyExtractor for GlobalKeyExtractor {
     }
 }
 
-struct RateLimiterState<K: KeyExtractor, R, C: Clock> {
+/// Bypasser implementation that checks for a token in the request header `x-ratelimit-bypass-token`
+#[derive(Clone)]
+pub struct TokenBypasser(Bytes);
+
+impl TokenBypasser {
+    pub fn new(token: impl Into<Bytes>) -> Self {
+        Self(token.into())
+    }
+}
+
+impl Bypasser for TokenBypasser {
+    fn should_bypass<B>(&self, req: &Request<B>) -> bool {
+        req.headers()
+            .get(BYPASS_TOKEN_HEADER)
+            .map(|x| x.as_bytes())
+            .is_some_and(|x| constant_time_eq(x, &self.0))
+    }
+}
+
+/// Default Bypasser implementation that never bypasses any requests
+#[derive(Clone)]
+pub struct NeverBypasser;
+
+impl Bypasser for NeverBypasser {
+    fn should_bypass<B>(&self, _req: &Request<B>) -> bool {
+        false
+    }
+}
+
+struct RateLimiterState<K: KeyExtractor, R, BP: Bypasser = NeverBypasser, C: Clock = DefaultClock> {
     key_extractor: K,
     limiter: GovRateLimiter<K::Key, C>,
     rate_limited_response: R,
-    bypass_token: Option<String>,
+    bypasser: BP,
     last_cleanup: ArcSwap<C::Instant>,
 }
 
 /// Ratelimiter that implements Tower Service
 #[derive(Clone)]
-pub struct RateLimiter<S, K: KeyExtractor, R, C: Clock = DefaultClock> {
-    state: Arc<RateLimiterState<K, R, C>>,
+pub struct RateLimiter<S, K: KeyExtractor, R, BP: Bypasser = NeverBypasser, C: Clock = DefaultClock>
+{
+    state: Arc<RateLimiterState<K, R, BP, C>>,
     inner: S,
 }
 
 /// Implement Tower Service for RateLimiter
-impl<S, K, R, C> Service<Request> for RateLimiter<S, K, R, C>
+impl<S, K, R, BP, C> Service<Request> for RateLimiter<S, K, R, BP, C>
 where
     S: Service<Request, Response = Response> + Send + 'static,
     S::Future: Send + 'static,
     S::Error: Send + 'static,
     K: KeyExtractor,
     R: IntoResponse + Clone + Send + Sync + 'static,
+    BP: Bypasser,
     C: Clock + Send + Sync + 'static,
 {
     type Response = S::Response;
@@ -108,12 +144,8 @@ where
         /// Stale entries cleanup interval - 5 minutes
         const CLEANUP_INTERVAL: Nanos = Nanos::new(300_000_000_000);
 
-        // Check that bypass token is configured, header was sent and it matches
-        let bypass = request
-            .headers()
-            .get(BYPASS_TOKEN_HEADER)
-            .zip(self.state.bypass_token.as_ref())
-            .is_some_and(|(hdr, token)| constant_time_eq(hdr.as_bytes(), token.as_bytes()));
+        // Check that bypasser is configured and tells us to bypass
+        let bypass = self.state.bypasser.should_bypass(&request);
 
         // Clean up stale entries from time to time
         let now = self.state.limiter.clock().now();
@@ -159,18 +191,24 @@ where
 
 /// Layer usable as an Axum middleware
 #[derive(Clone, derive_new::new)]
-pub struct RateLimiterLayer<K: KeyExtractor, R, C: Clock = DefaultClock> {
-    state: Arc<RateLimiterState<K, R, C>>,
+pub struct RateLimiterLayer<
+    K: KeyExtractor,
+    R,
+    BP: Bypasser = NeverBypasser,
+    C: Clock = DefaultClock,
+> {
+    state: Arc<RateLimiterState<K, R, BP, C>>,
 }
 
-impl<S, K, R, C> Layer<S> for RateLimiterLayer<K, R, C>
+impl<S, K, R, BP, C> Layer<S> for RateLimiterLayer<K, R, BP, C>
 where
     S: Clone,
     K: KeyExtractor,
     R: IntoResponse + Clone + Send + Sync + 'static,
+    BP: Bypasser,
     C: Clock + Send + Sync + 'static,
 {
-    type Service = RateLimiter<S, K, R, C>;
+    type Service = RateLimiter<S, K, R, BP, C>;
 
     fn layer(&self, inner: S) -> Self::Service {
         RateLimiter {
@@ -181,51 +219,51 @@ where
 }
 
 /// Create unkeyed rate-limiter
-pub fn layer_global<R: IntoResponse + Clone + Send + Sync + 'static>(
+pub fn layer_global<R: IntoResponse + Clone + Send + Sync + 'static, BP: Bypasser>(
     rps: u32,
     burst_size: u32,
     rate_limited_response: R,
-    bypass_token: Option<String>,
-) -> Result<RateLimiterLayer<GlobalKeyExtractor, R>, Error> {
+    bypasser: BP,
+) -> Result<RateLimiterLayer<GlobalKeyExtractor, R, BP>, Error> {
     layer(
         rps,
         burst_size,
         GlobalKeyExtractor,
         rate_limited_response,
-        bypass_token,
+        bypasser,
     )
 }
 
 /// Create ratelimiter keyed by IP
-pub fn layer_by_ip<R: IntoResponse + Clone + Send + Sync + 'static>(
+pub fn layer_by_ip<R: IntoResponse + Clone + Send + Sync + 'static, BP: Bypasser>(
     rps: u32,
     burst_size: u32,
     rate_limited_response: R,
-    bypass_token: Option<String>,
-) -> Result<RateLimiterLayer<IpKeyExtractor, R>, Error> {
+    bypasser: BP,
+) -> Result<RateLimiterLayer<IpKeyExtractor, R, BP>, Error> {
     layer(
         rps,
         burst_size,
         IpKeyExtractor,
         rate_limited_response,
-        bypass_token,
+        bypasser,
     )
 }
 
 /// Create a ratelimiter with a provided key extractor
-pub fn layer<K: KeyExtractor, R: IntoResponse + Clone + Send + Sync + 'static>(
+pub fn layer<K: KeyExtractor, R: IntoResponse + Clone + Send + Sync + 'static, BP: Bypasser>(
     rps: u32,
     burst_size: u32,
     key_extractor: K,
     rate_limited_response: R,
-    bypass_token: Option<String>,
-) -> Result<RateLimiterLayer<K, R>, Error> {
+    bypasser: BP,
+) -> Result<RateLimiterLayer<K, R, BP>, Error> {
     layer_with_clock(
         rps,
         burst_size,
         key_extractor,
         rate_limited_response,
-        bypass_token,
+        bypasser,
         DefaultClock::default(),
     )
 }
@@ -233,14 +271,19 @@ pub fn layer<K: KeyExtractor, R: IntoResponse + Clone + Send + Sync + 'static>(
 /// Create a ratelimiter with a provided key extractor and clock. This custom clock is there so
 /// that tests can supply a `FakeRelativeClock` and drive the rate limiter's
 /// time deterministically, without depending on real wall-clock delays.
-fn layer_with_clock<K: KeyExtractor, R: IntoResponse + Clone + Send + Sync + 'static, C: Clock>(
+fn layer_with_clock<
+    K: KeyExtractor,
+    R: IntoResponse + Clone + Send + Sync + 'static,
+    BP: Bypasser,
+    C: Clock,
+>(
     rps: u32,
     burst_size: u32,
     key_extractor: K,
     rate_limited_response: R,
-    bypass_token: Option<String>,
+    bypasser: BP,
     clock: C,
-) -> Result<RateLimiterLayer<K, R, C>, Error> {
+) -> Result<RateLimiterLayer<K, R, BP, C>, Error> {
     let period = Duration::from_secs(1)
         .checked_div(rps)
         .ok_or_else(|| anyhow!("RPS is zero"))?;
@@ -259,7 +302,7 @@ fn layer_with_clock<K: KeyExtractor, R: IntoResponse + Clone + Send + Sync + 'st
             key_extractor,
             limiter,
             rate_limited_response,
-            bypass_token,
+            bypasser,
             last_cleanup,
         }),
     })
@@ -328,7 +371,7 @@ mod test {
                 5,
                 IpKeyExtractor,
                 (StatusCode::TOO_MANY_REQUESTS, "foo"),
-                None,
+                NeverBypasser,
             )
             .is_err()
         );
@@ -342,7 +385,7 @@ mod test {
                 0,
                 IpKeyExtractor,
                 (StatusCode::TOO_MANY_REQUESTS, "foo"),
-                None,
+                NeverBypasser,
             )
             .is_err()
         );
@@ -362,7 +405,7 @@ mod test {
             burst_size,
             IpKeyExtractor,
             (StatusCode::TOO_MANY_REQUESTS, "foo"),
-            None,
+            NeverBypasser,
             clock.clone(),
         )
         .expect("failed to build middleware");
@@ -424,7 +467,7 @@ mod test {
             1,
             IpKeyExtractor,
             (StatusCode::TOO_MANY_REQUESTS, "foo"),
-            None,
+            NeverBypasser,
             clock.clone(),
         )
         .expect("failed to build middleware");
@@ -456,7 +499,7 @@ mod test {
             1,
             IpKeyExtractor,
             (StatusCode::TOO_MANY_REQUESTS, "foo"),
-            None,
+            NeverBypasser,
             clock.clone(),
         )
         .expect("failed to build middleware");
@@ -496,7 +539,7 @@ mod test {
             burst_size,
             IpKeyExtractor,
             (StatusCode::TOO_MANY_REQUESTS, "foo"),
-            None,
+            NeverBypasser,
         )
         .expect("failed to build middleware");
 
@@ -520,7 +563,7 @@ mod test {
             10,
             GlobalKeyExtractor,
             (StatusCode::TOO_MANY_REQUESTS, "foo"),
-            Some("top_secret_token".into()),
+            TokenBypasser::new("top_secret_token"),
         )
         .expect("failed to build middleware");
 
@@ -579,7 +622,7 @@ mod test {
             1,
             IpKeyExtractor,
             (StatusCode::TOO_MANY_REQUESTS, "foo"),
-            None,
+            NeverBypasser,
             clock.clone(),
         )
         .expect("failed to build middleware");
@@ -615,7 +658,7 @@ mod test {
     #[tokio::test(start_paused = true)]
     async fn test_layer_global_wrapper() {
         let rate_limiter_mw =
-            layer_global(2, 2, (StatusCode::TOO_MANY_REQUESTS, "foo"), None).unwrap();
+            layer_global(2, 2, (StatusCode::TOO_MANY_REQUESTS, "foo"), NeverBypasser).unwrap();
 
         let mut app = Router::new()
             .route("/", post(handler))
@@ -641,7 +684,7 @@ mod test {
     #[tokio::test(start_paused = true)]
     async fn test_layer_by_ip_wrapper() {
         let rate_limiter_mw =
-            layer_by_ip(2, 2, (StatusCode::TOO_MANY_REQUESTS, "foo"), None).unwrap();
+            layer_by_ip(2, 2, (StatusCode::TOO_MANY_REQUESTS, "foo"), NeverBypasser).unwrap();
 
         let mut app = Router::new()
             .route("/", post(handler))
