@@ -2801,7 +2801,7 @@ dependencies = [
 
 [[package]]
 name = "ic-custom-domains-canister-api"
-version = "0.2.7"
+version = "0.3.0"
 dependencies = [
  "candid",
  "derive-new",

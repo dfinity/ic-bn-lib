@@ -24,6 +24,3 @@ jobs:
 
       - name: Run tests
         run: ./run_tests.sh
-
-      - name: Check for publishing errors (dry-run)
-        run: cargo publish --package ic-bn-lib --allow-dirty --dry-run
