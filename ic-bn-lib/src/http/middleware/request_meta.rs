@@ -8,7 +8,6 @@ use std::{
 };
 
 use anyhow::Context;
-use arrayvec::ArrayString;
 use axum::{
     extract::{Request, State},
     middleware::Next,
@@ -17,11 +16,11 @@ use axum::{
 use bytes::Bytes;
 use http::{HeaderMap, header::HeaderValue};
 use ipnet::IpNet;
-use maxminddb::geoip2;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     Error,
+    geoip::GeoIp,
     http::{
         headers::{X_REAL_IP, X_REQUEST_ID},
         server::conn::ConnInfo,
@@ -68,47 +67,6 @@ impl Deref for RequestId {
 impl Display for RequestId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
-    }
-}
-
-/// Two-letter country code.
-/// See https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Deserialize, Serialize)]
-pub struct CountryCode(pub ArrayString<2>);
-
-impl Deref for CountryCode {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_str()
-    }
-}
-
-impl Display for CountryCode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-/// Looks up the client's country using his IP address
-pub struct GeoIp {
-    db: maxminddb::Reader<Vec<u8>>,
-}
-
-impl GeoIp {
-    /// Creates a new GeoIp instance from a provided database
-    pub fn new(db_path: &PathBuf) -> Result<Self, Error> {
-        Ok(Self {
-            db: maxminddb::Reader::open_readfile(db_path).context("unable to load GeoIP DB")?,
-        })
-    }
-
-    /// Looks up the country code from an IP
-    pub fn lookup(&self, ip: IpAddr) -> Option<CountryCode> {
-        let country: Option<geoip2::Country> = self.db.lookup(ip).ok()?.decode().ok()?;
-        // Country code should always fit into 2-letter ArrayString.
-        // If for whatever reason it does not - return None.
-        Some(CountryCode(country?.country.iso_code?.try_into().ok()?))
     }
 }
 
@@ -217,7 +175,7 @@ pub async fn middleware(
         request.extensions_mut().insert(v);
 
         // Look up country code if GeoIP is enabled
-        state.geoip.as_ref().and_then(|x| x.lookup(v.0))
+        state.geoip.as_ref().and_then(|x| x.lookup_country(v.0))
     });
 
     if let Some(v) = country_code {
@@ -265,7 +223,7 @@ mod test {
     use tower::Service;
 
     use super::*;
-    use crate::{hname, http::server::conn::ConnInfo, hval, network::Addr};
+    use crate::{geoip::CountryCode, hname, http::server::conn::ConnInfo, hval, network::Addr};
 
     const X_TEST_REQUEST_ID: &str = "x-test-request-id";
     const X_TEST_REMOTE_ADDR: &str = "x-test-remote-addr";
@@ -282,21 +240,6 @@ mod test {
             env!("CARGO_MANIFEST_DIR"),
             "/test-data/geoip-test-db.mmdb"
         ))
-    }
-
-    #[test]
-    fn lookup_known_ip_returns_country_code() {
-        let geoip = GeoIp::new(&test_db_path()).unwrap();
-        assert_eq!(
-            geoip.lookup(IpAddr::V4(IP_KNOWN)).unwrap().0.as_str(),
-            COUNTRY_KNOWN
-        );
-    }
-
-    #[test]
-    fn lookup_unknown_ip_returns_none() {
-        let geoip = GeoIp::new(&test_db_path()).unwrap();
-        assert!(geoip.lookup(IpAddr::V4(IP_UNKNOWN)).is_none());
     }
 
     #[test]

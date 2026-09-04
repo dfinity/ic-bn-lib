@@ -42,11 +42,8 @@ use tracing::warn;
 use url::Url;
 
 use crate::{
-    http::{
-        Error,
-        client::Client,
-        middleware::{RemoteAddr, request_meta::CountryCode},
-    },
+    geoip::CountryCode,
+    http::{Error, client::Client, middleware::RemoteAddr},
     tasks::Run,
 };
 
