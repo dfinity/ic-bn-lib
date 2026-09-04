@@ -255,6 +255,10 @@ where
     fn size_hint(&self) -> SizeHint {
         self.inner.size_hint()
     }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
 }
 
 #[cfg(test)]
