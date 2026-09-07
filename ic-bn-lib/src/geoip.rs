@@ -2,10 +2,13 @@ use std::{fmt::Display, net::IpAddr, ops::Deref, path::PathBuf};
 
 use anyhow::Context;
 use arrayvec::ArrayString;
+use clap::ArgAction::Count;
 use maxminddb::geoip2;
 use serde::{Deserialize, Serialize};
 
-use crate::Error;
+use crate::{Error, TruncatesString};
+
+const CITY_NAME_MAX_LENGTH: usize = 32;
 
 /// Two-letter country code.
 /// See https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2
@@ -24,6 +27,19 @@ impl Display for CountryCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
+}
+
+/// Location representation
+pub struct Location {
+    pub lat: f64,
+    pub lon: f64,
+}
+
+/// GeoIP lookup city representation.
+pub struct City {
+    pub name: Option<ArrayString<CITY_NAME_MAX_LENGTH>>,
+    pub country_code: Option<CountryCode>,
+    pub location: Option<Location>,
 }
 
 /// Looks up the client's country using his IP address
@@ -45,6 +61,36 @@ impl GeoIp {
         // Country code should always fit into 2-letter ArrayString.
         // If for whatever reason it does not - return None.
         Some(CountryCode(country?.country.iso_code?.try_into().ok()?))
+    }
+
+    /// Looks up the city from an IP
+    pub fn lookup_city(&self, ip: IpAddr) -> Option<City> {
+        let city: geoip2::City = self.db.lookup(ip).ok()?.decode().ok()??;
+
+        Some(City {
+            // Try English, then German, otherwise None
+            name: city
+                .city
+                .names
+                .english
+                .or(city.city.names.german)
+                // SAFETY: truncate_bytes makes the string *no longer* than CITY_NAME_MAX_LENGTH
+                // so it will always fit into Arraystring
+                .map(|x| x.truncate_bytes(CITY_NAME_MAX_LENGTH).try_into().unwrap()),
+
+            country_code: city
+                .country
+                .iso_code
+                .and_then(|x| x.try_into().ok())
+                .map(CountryCode),
+
+            // Location is Some only when both lat & lon are available
+            location: city
+                .location
+                .latitude
+                .zip(city.location.longitude)
+                .map(|(lat, lon)| Location { lat, lon }),
+        })
     }
 }
 
