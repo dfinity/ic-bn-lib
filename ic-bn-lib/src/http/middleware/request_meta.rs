@@ -73,7 +73,7 @@ impl Display for RequestId {
 /// State for [`middleware`]
 pub struct RequestMetaState {
     /// Optional GeoIP database
-    geoip: Option<GeoIp>,
+    geoip: Option<Arc<GeoIp>>,
 
     /// Trust incoming headers from these subnets for the purpose of IP address extraction.
     /// If not set - headers will not be used.
@@ -94,23 +94,36 @@ impl RequestMetaState {
         }
     }
 
-    /// Creates a new [`RequestMetaState`] with a GeoIP DB
-    pub fn new_with_geoip(
+    /// Creates a new [`RequestMetaState`] with a GeoIP provided
+    pub const fn new_with_geoip(
+        trust_ip_from: Vec<IpNet>,
+        trust_request_id_from: Vec<IpNet>,
+        geoip: Option<Arc<GeoIp>>,
+    ) -> Self {
+        Self {
+            geoip,
+            trust_ip_from,
+            trust_request_id_from,
+        }
+    }
+
+    /// Creates a new [`RequestMetaState`] with a GeoIP DB path
+    pub fn new_with_geoip_db(
         trust_ip_from: Vec<IpNet>,
         trust_request_id_from: Vec<IpNet>,
         geoip_db_path: Option<PathBuf>,
     ) -> Result<Self, Error> {
         let geoip = if let Some(v) = geoip_db_path {
-            Some(GeoIp::new(&v).context("unable to init GeoIP")?)
+            Some(Arc::new(GeoIp::new(&v).context("unable to init GeoIP")?))
         } else {
             None
         };
 
-        Ok(Self {
-            geoip,
+        Ok(Self::new_with_geoip(
             trust_ip_from,
             trust_request_id_from,
-        })
+            geoip,
+        ))
     }
 
     /// Extracts remote IP address from the `x-real-ip` header if remote is trusted & header exists
@@ -600,7 +613,8 @@ mod test {
 
     #[tokio::test]
     async fn middleware_geoip_unknown_ip_no_country_code() {
-        let state = RequestMetaState::new_with_geoip(vec![], vec![], Some(test_db_path())).unwrap();
+        let state =
+            RequestMetaState::new_with_geoip_db(vec![], vec![], Some(test_db_path())).unwrap();
         let mut app = app(state);
 
         let req = Request::builder().body(Body::empty()).unwrap();
@@ -614,7 +628,8 @@ mod test {
 
     #[tokio::test]
     async fn middleware_geoip_known_ip_attaches_country_code_to_request_and_response() {
-        let state = RequestMetaState::new_with_geoip(vec![], vec![], Some(test_db_path())).unwrap();
+        let state =
+            RequestMetaState::new_with_geoip_db(vec![], vec![], Some(test_db_path())).unwrap();
         let mut app = app(state);
 
         let req = Request::builder().body(Body::empty()).unwrap();
