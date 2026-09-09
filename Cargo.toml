@@ -82,7 +82,7 @@ mail-parser = { version = "0.11.3", features = ["full_encoding"] }
 mail-send = { version = "0.6.0", default-features = false, features = [
     "builder",
 ] }
-maxminddb = "0.29"
+maxminddb = { version = "0.29", features = ["mmap", "simdutf8"] }
 mockall = "0.15"
 mock-io = { version = "0.3.2", features = ["full"] }
 moka = { version = "0.12.15", features = ["sync"] }

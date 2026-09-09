@@ -9,6 +9,7 @@
 #[cfg(feature = "custom-domains")]
 pub mod custom_domains;
 pub mod dns;
+pub mod geoip;
 pub mod health;
 pub mod http;
 pub mod ic;
