@@ -188,7 +188,11 @@ pub async fn middleware(
         request.extensions_mut().insert(v);
 
         // Look up country code if GeoIP is enabled
-        state.geoip.as_ref().and_then(|x| x.lookup_country(v.0))
+        state
+            .geoip
+            .as_ref()
+            .and_then(|x| x.lookup_country(v.0))
+            .map(|(country_code, _network)| country_code)
     });
 
     if let Some(v) = country_code {
