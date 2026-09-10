@@ -1,9 +1,9 @@
-use std::{fmt::Display, net::IpAddr, ops::Deref, path::PathBuf};
-
 use anyhow::Context;
 use arrayvec::ArrayString;
-use maxminddb::geoip2;
+use ipnet::IpNet;
+use maxminddb::{LookupResult, geoip2};
 use serde::{Deserialize, Serialize};
+use std::{fmt::Display, net::IpAddr, ops::Deref, path::PathBuf};
 
 use crate::{Error, TruncatesString};
 
@@ -34,7 +34,7 @@ pub struct Location {
     pub lon: f64,
 }
 
-/// GeoIP lookup city representation.
+/// GeoIP lookup city representation
 pub struct City {
     pub name: Option<ArrayString<CITY_NAME_MAX_LENGTH>>,
     pub country_code: Option<CountryCode>,
@@ -70,7 +70,7 @@ impl From<geoip2::City<'_>> for City {
     }
 }
 
-/// Looks up the client's country using his IP address
+/// Looks up the client's location using his IP address
 pub struct GeoIp {
     db: maxminddb::Reader<Vec<u8>>,
 }
@@ -83,18 +83,33 @@ impl GeoIp {
         })
     }
 
+    fn to_ipnet(lookup: &LookupResult<'_, Vec<u8>>) -> Option<IpNet> {
+        let net = lookup.network().ok()?;
+        IpNet::new(net.ip(), net.prefix()).ok()
+    }
+
     /// Looks up the country code from an IP
-    pub fn lookup_country(&self, ip: IpAddr) -> Option<CountryCode> {
-        let country: Option<geoip2::Country> = self.db.lookup(ip).ok()?.decode().ok()?;
+    pub fn lookup_country(&self, ip: IpAddr) -> Option<(CountryCode, IpNet)> {
+        let lookup = self.db.lookup(ip).ok()?;
+        let country: Option<geoip2::Country> = lookup.decode().ok()?;
+
         // Country code should always fit into 2-letter ArrayString.
         // If for whatever reason it does not - return None.
-        Some(CountryCode(country?.country.iso_code?.try_into().ok()?))
+        country?
+            .country
+            .iso_code?
+            .try_into()
+            .ok()
+            .zip(Self::to_ipnet(&lookup))
+            .map(|(a, b)| (CountryCode(a), b))
     }
 
     /// Looks up the city from an IP
-    pub fn lookup_city(&self, ip: IpAddr) -> Option<City> {
-        let city: geoip2::City = self.db.lookup(ip).ok()?.decode().ok()??;
-        Some(city.into())
+    pub fn lookup_city(&self, ip: IpAddr) -> Option<(City, IpNet)> {
+        let lookup = self.db.lookup(ip).ok()?;
+        let city: geoip2::City = lookup.decode().ok()??;
+
+        Some((city.into(), Self::to_ipnet(&lookup)?))
     }
 }
 
@@ -106,6 +121,7 @@ mod test {
 
     // Known entries in the MaxMind test DBs (present in both Country & City DBs)
     const IP_KNOWN: Ipv4Addr = Ipv4Addr::new(89, 160, 20, 112);
+    const NET_KNOWN: &str = "89.160.20.112/28";
     const COUNTRY_KNOWN: &str = "SE";
     const CITY_KNOWN: &str = "Linköping";
     const LAT_KNOWN: f64 = 58.4167;
@@ -113,10 +129,17 @@ mod test {
     const IP_UNKNOWN: Ipv4Addr = Ipv4Addr::new(10, 10, 10, 10);
     // City DB: country & location, but no city name
     const IP_NO_CITY_NAME: Ipv4Addr = Ipv4Addr::new(149, 101, 100, 1);
+    const NET_NO_CITY_NAME: &str = "149.101.100.0/28";
     // City DB: location only, no country and no city name
     const IP_LOCATION_ONLY: Ipv6Addr = Ipv6Addr::new(0x2a02, 0xd500, 0, 0, 0, 0, 0, 1);
+    const NET_LOCATION_ONLY: &str = "2a02:d500::/29";
     // City DB: record exists but is empty
     const IP_EMPTY_RECORD: Ipv4Addr = Ipv4Addr::new(2, 3, 3, 1);
+    const NET_EMPTY_RECORD: &str = "2.3.3.0/24";
+
+    fn net(s: &str) -> IpNet {
+        s.parse().unwrap()
+    }
 
     /// MaxMind GeoIP2-Country test DB
     fn test_db_path() -> PathBuf {
@@ -165,16 +188,13 @@ mod test {
     }
 
     #[test]
-    fn lookup_known_ip_returns_country_code() {
+    fn lookup_known_ip_returns_country_code_and_network() {
         let geoip = GeoIp::new(&test_db_path()).unwrap();
-        assert_eq!(
-            geoip
-                .lookup_country(IpAddr::V4(IP_KNOWN))
-                .unwrap()
-                .0
-                .as_str(),
-            COUNTRY_KNOWN
-        );
+        let (country_code, network) = geoip.lookup_country(IpAddr::V4(IP_KNOWN)).unwrap();
+
+        assert_eq!(country_code.0.as_str(), COUNTRY_KNOWN);
+        assert_eq!(network, net(NET_KNOWN));
+        assert!(network.contains(&IpAddr::V4(IP_KNOWN)));
     }
 
     #[test]
@@ -184,9 +204,9 @@ mod test {
     }
 
     #[test]
-    fn lookup_city_known_ip_returns_name_country_and_location() {
+    fn lookup_city_known_ip_returns_name_country_location_and_network() {
         let geoip = GeoIp::new(&test_city_db_path()).unwrap();
-        let city = geoip.lookup_city(IpAddr::V4(IP_KNOWN)).unwrap();
+        let (city, network) = geoip.lookup_city(IpAddr::V4(IP_KNOWN)).unwrap();
 
         assert_eq!(city.name.unwrap().as_str(), CITY_KNOWN);
         assert_eq!(city.country_code.unwrap().0.as_str(), COUNTRY_KNOWN);
@@ -194,6 +214,9 @@ mod test {
         let location = city.location.unwrap();
         assert_eq!(location.lat, LAT_KNOWN);
         assert_eq!(location.lon, LON_KNOWN);
+
+        assert_eq!(network, net(NET_KNOWN));
+        assert!(network.contains(&IpAddr::V4(IP_KNOWN)));
     }
 
     #[test]
@@ -205,7 +228,7 @@ mod test {
     #[test]
     fn lookup_city_without_name_returns_country_and_location() {
         let geoip = GeoIp::new(&test_city_db_path()).unwrap();
-        let city = geoip.lookup_city(IpAddr::V4(IP_NO_CITY_NAME)).unwrap();
+        let (city, network) = geoip.lookup_city(IpAddr::V4(IP_NO_CITY_NAME)).unwrap();
 
         assert!(city.name.is_none());
         assert_eq!(city.country_code.unwrap().0.as_str(), "US");
@@ -213,12 +236,14 @@ mod test {
         let location = city.location.unwrap();
         assert_eq!(location.lat, 37.751);
         assert_eq!(location.lon, -97.822);
+
+        assert_eq!(network, net(NET_NO_CITY_NAME));
     }
 
     #[test]
     fn lookup_city_ipv6_with_location_only() {
         let geoip = GeoIp::new(&test_city_db_path()).unwrap();
-        let city = geoip.lookup_city(IpAddr::V6(IP_LOCATION_ONLY)).unwrap();
+        let (city, network) = geoip.lookup_city(IpAddr::V6(IP_LOCATION_ONLY)).unwrap();
 
         assert!(city.name.is_none());
         assert!(city.country_code.is_none());
@@ -226,26 +251,32 @@ mod test {
         let location = city.location.unwrap();
         assert_eq!(location.lat, 48.69096);
         assert_eq!(location.lon, 9.14062);
+
+        assert_eq!(network, net(NET_LOCATION_ONLY));
     }
 
     #[test]
     fn lookup_city_empty_record_returns_city_without_fields() {
         let geoip = GeoIp::new(&test_city_db_path()).unwrap();
-        let city = geoip.lookup_city(IpAddr::V4(IP_EMPTY_RECORD)).unwrap();
+        let (city, network) = geoip.lookup_city(IpAddr::V4(IP_EMPTY_RECORD)).unwrap();
 
         assert!(city.name.is_none());
         assert!(city.country_code.is_none());
         assert!(city.location.is_none());
+
+        assert_eq!(network, net(NET_EMPTY_RECORD));
     }
 
     #[test]
     fn lookup_city_with_country_db_returns_country_only() {
         let geoip = GeoIp::new(&test_db_path()).unwrap();
-        let city = geoip.lookup_city(IpAddr::V4(IP_KNOWN)).unwrap();
+        let (city, network) = geoip.lookup_city(IpAddr::V4(IP_KNOWN)).unwrap();
 
         assert!(city.name.is_none());
         assert_eq!(city.country_code.unwrap().0.as_str(), COUNTRY_KNOWN);
         assert!(city.location.is_none());
+
+        assert_eq!(network, net(NET_KNOWN));
     }
 
     #[test]
