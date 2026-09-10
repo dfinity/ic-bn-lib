@@ -100,8 +100,8 @@ impl GeoIp {
             .iso_code?
             .try_into()
             .ok()
+            .map(CountryCode)
             .zip(Self::to_ipnet(&lookup))
-            .map(|(a, b)| (CountryCode(a), b))
     }
 
     /// Looks up the city from an IP
