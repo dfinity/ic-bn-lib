@@ -114,7 +114,7 @@ mod test {
         assert!(
             v.verify_server_cert(
                 &garbage,
-                &[garbage.clone()],
+                std::slice::from_ref(&garbage),
                 &name,
                 &[0x00, 0x01],
                 unix_time(NOW)
@@ -264,7 +264,7 @@ mod test {
                 .is_err()
         );
 
-        let mut bad = sig.clone();
+        let mut bad = sig;
         bad[0] ^= 0x01;
         assert!(
             v.verify_tls13_signature(msg, &cert, &dss(scheme, &bad))

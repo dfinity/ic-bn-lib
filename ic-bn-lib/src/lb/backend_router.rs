@@ -448,11 +448,10 @@ mod test {
 
         // The healthy backends keep their own weights (2 and 3 -> 40%/60%)
         // instead of being re-zipped with the head of the weight list.
-        let h = executor.1.lock().unwrap();
+        let h = executor.counts();
         assert_eq!(h["bar"], 400);
         assert_eq!(h["baz"], 600);
         assert!(!h.contains_key("foo"));
-        drop(h);
 
         router.stop().await;
     }
@@ -476,10 +475,9 @@ mod test {
         }
 
         // ...but WRR never sends it anything while a weighted peer exists
-        let h = executor.1.lock().unwrap();
+        let h = executor.counts();
         assert_eq!(h["on"], 20);
         assert!(!h.contains_key("off"));
-        drop(h);
 
         router.stop().await;
     }
@@ -502,10 +500,9 @@ mod test {
 
         // Sequential requests leave every backend at zero in-flight, so LOR
         // deterministically takes the first one and ignores the weights.
-        let h = executor.1.lock().unwrap();
+        let h = executor.counts();
         assert_eq!(h["foo"], 20);
         assert_eq!(h.len(), 1);
-        drop(h);
 
         router.stop().await;
     }
@@ -565,7 +562,7 @@ mod test {
             assert!(router.execute(()).await.is_ok());
         }
         {
-            let h = executor.1.lock().unwrap();
+            let h = executor.counts();
             assert_eq!(h["foo"], 10);
             assert!(!h.contains_key("bar"));
         }
@@ -579,10 +576,9 @@ mod test {
             assert!(router.execute(()).await.is_ok());
         }
 
-        let h = executor.1.lock().unwrap();
+        let h = executor.counts();
         assert_eq!(h["foo"], 15);
         assert_eq!(h["bar"], 5);
-        drop(h);
 
         router.stop().await;
     }
@@ -667,7 +663,7 @@ mod test {
         // The last known-good distributor is kept, so already-issued requests
         // can still be routed after the shutdown.
         assert!(router.execute(()).await.is_ok());
-        let h = executor.1.lock().unwrap();
+        let h = executor.counts();
         assert_eq!(h["foo"], 1);
         assert!(!h.contains_key("bar"));
     }

@@ -205,6 +205,15 @@ pub(crate) mod test {
     #[derive(Debug)]
     pub struct TestExecutor(pub Duration, pub Mutex<HashMap<String, usize>>);
 
+    impl TestExecutor {
+        /// Owned snapshot of the per-backend request counts. Tests take one of these instead
+        /// of holding the `MutexGuard`, which would otherwise be kept alive across a later
+        /// `.await` (clippy::await_holding_lock / clippy::significant_drop_tightening).
+        pub fn counts(&self) -> HashMap<String, usize> {
+            self.1.lock().unwrap().clone()
+        }
+    }
+
     #[async_trait]
     impl ExecutesRequest<String> for TestExecutor {
         type Error = ();
@@ -333,8 +342,16 @@ pub(crate) mod test {
             _backend: &String,
             _req: Self::Request,
         ) -> Result<Self::Response, Self::Error> {
+            // Register as a waiter *before* announcing that we started. `notify_waiters()`
+            // only wakes waiters that are already registered, so announcing first lets a
+            // test that spins on `started` open the gate while this task has not reached
+            // `.await` yet - the wakeup is then lost and the test hangs forever.
+            let gate = self.gate.notified();
+            tokio::pin!(gate);
+            gate.as_mut().enable();
+
             self.started.fetch_add(1, Ordering::SeqCst);
-            self.gate.notified().await;
+            gate.await;
             Ok(())
         }
     }
@@ -495,7 +512,7 @@ pub(crate) mod test {
             d.execute(()).await.unwrap();
         }
 
-        let h = executor.1.lock().unwrap();
+        let h = executor.counts();
         assert_eq!(h["foo"], 10);
         assert_eq!(h.len(), 1);
     }
@@ -532,7 +549,7 @@ pub(crate) mod test {
             d.execute(()).await.unwrap();
         }
 
-        let h = executor.1.lock().unwrap();
+        let h = executor.counts();
         assert_eq!(h["on"], 20);
         assert!(!h.contains_key("off"));
     }
@@ -553,7 +570,7 @@ pub(crate) mod test {
             d.execute(()).await.unwrap();
         }
         {
-            let h = executor.1.lock().unwrap();
+            let h = executor.counts();
             assert_eq!(h["foo"], 50);
             assert_eq!(h["bar"], 50);
         }
@@ -569,7 +586,7 @@ pub(crate) mod test {
         }
 
         // The second batch is split 25/75 on top of the even first batch
-        let h = executor.1.lock().unwrap();
+        let h = executor.counts();
         assert_eq!(h["foo"], 75);
         assert_eq!(h["bar"], 125);
     }
@@ -787,7 +804,7 @@ pub(crate) mod test {
             assert_eq!(metrics.inflight.with_label_values(&[b]).get(), 0);
         }
 
-        let h = executor.1.lock().unwrap();
+        let h = executor.counts();
         assert_eq!(h["foo"], 2);
         assert_eq!(h["bar"], 6);
     }

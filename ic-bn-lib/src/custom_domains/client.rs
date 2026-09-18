@@ -558,6 +558,7 @@ mod test {
     }
 
     /// A single request that reached the mock replica.
+    #[derive(Clone)]
     struct RecordedCall {
         /// Canister ID as taken from the request path (verifies URL construction)
         canister: String,
@@ -574,7 +575,14 @@ mod test {
         calls: Vec<RecordedCall>,
     }
 
-    impl MockState {
+    /// Owned snapshot of the calls the mock recorded. [`Mock::state`] returns one of these
+    /// rather than the `MutexGuard` itself, so assertions never keep the lock alive across a
+    /// later `.await` (clippy::await_holding_lock / clippy::significant_drop_tightening).
+    struct Calls {
+        calls: Vec<RecordedCall>,
+    }
+
+    impl Calls {
         /// Names of the called canister methods, in call order.
         fn methods(&self) -> Vec<&str> {
             self.calls.iter().map(|x| x.method.as_str()).collect()
@@ -642,8 +650,10 @@ mod test {
             self.push(method, Reply::Candid(Encode!(&res).unwrap()));
         }
 
-        fn state(&self) -> std::sync::MutexGuard<'_, MockState> {
-            self.state.lock().unwrap()
+        fn state(&self) -> Calls {
+            Calls {
+                calls: self.state.lock().unwrap().calls.clone(),
+            }
         }
 
         fn methods(&self) -> Vec<String> {

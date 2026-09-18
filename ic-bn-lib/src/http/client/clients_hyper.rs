@@ -751,7 +751,7 @@ mod test {
 
         assert_eq!(
             family_hosts(&families, "http_client_requests_total"),
-            [host.clone()]
+            std::slice::from_ref(&host)
         );
 
         assert_eq!(

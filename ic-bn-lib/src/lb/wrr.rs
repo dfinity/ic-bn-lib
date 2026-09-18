@@ -78,7 +78,7 @@ impl<T> Wrr<T> {
                 }
             }
 
-            if (self.items[c.i.cast_unsigned()].0.cast_signed()) > c.curr_weight {
+            if (self.items[c.i.cast_unsigned()].0.cast_signed()) >= c.curr_weight {
                 return &self.items[c.i.cast_unsigned()].1;
             }
         }

@@ -216,8 +216,8 @@ mod test {
     async fn test_acme_alpn_resolver() {
         let (_dir, o) = opts("le_stag", None);
         let acme = AcmeAlpn::new(o);
-        let state = acme.0.lock().await;
-        assert!(Arc::ptr_eq(&state.resolver(), &acme.1));
+        let resolver = acme.0.lock().await.resolver();
+        assert!(Arc::ptr_eq(&resolver, &acme.1));
     }
 
     #[tokio::test]
