@@ -164,3 +164,158 @@ where
     header.set_sensitive(true);
     header
 }
+
+#[cfg(test)]
+mod test {
+    use std::str::FromStr;
+
+    use super::*;
+
+    #[test]
+    fn test_basic_auth() {
+        // RFC 7617's own example vector
+        assert_eq!(
+            basic_auth("Aladdin", Some("open sesame")),
+            "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="
+        );
+
+        assert_eq!(basic_auth("user", Some("pass")), "Basic dXNlcjpwYXNz");
+
+        // A missing password still has to emit the ":" separator...
+        assert_eq!(basic_auth("user", None::<&str>), "Basic dXNlcjo=");
+        // ...which makes it indistinguishable from an empty one
+        assert_eq!(
+            basic_auth("user", Some("")),
+            basic_auth("user", None::<&str>)
+        );
+
+        // Empty username
+        assert_eq!(basic_auth("", Some("pass")), "Basic OnBhc3M=");
+        assert_eq!(basic_auth("", None::<&str>), "Basic Og==");
+
+        // Any Display type is accepted, not just strings
+        assert_eq!(basic_auth(42, Some(7)), "Basic NDI6Nw==");
+
+        // Non-ASCII is passed through as UTF-8 bytes before base64
+        assert_eq!(basic_auth("üser", Some("päss")), "Basic w7xzZXI6cMOkc3M=");
+    }
+
+    #[test]
+    fn test_basic_auth_is_sensitive() {
+        assert!(basic_auth("user", Some("pass")).is_sensitive());
+        assert!(basic_auth("user", None::<&str>).is_sensitive());
+    }
+
+    #[test]
+    fn test_http_version_display_from_str_roundtrip() {
+        for (v, s) in [
+            (HttpVersion::Http1, "http1"),
+            (HttpVersion::Http2, "http2"),
+            (HttpVersion::All, "all"),
+        ] {
+            assert_eq!(v.to_string(), s);
+            assert_eq!(HttpVersion::from_str(s).unwrap(), v);
+            assert_eq!(HttpVersion::from_str(&v.to_string()).unwrap(), v);
+        }
+
+        // Only the snake_case spellings are accepted
+        assert!(HttpVersion::from_str("Http1").is_err());
+        assert!(HttpVersion::from_str("http3").is_err());
+        assert!(HttpVersion::from_str("").is_err());
+        assert!(HttpVersion::from_str("ALL").is_err());
+    }
+
+    #[test]
+    fn test_client_options_default() {
+        let o = ClientOptions::default();
+
+        assert_eq!(o.timeout_connect, Duration::from_secs(10));
+        assert_eq!(o.timeout_read, Duration::from_secs(60));
+        assert_eq!(o.timeout, Duration::from_secs(120));
+        assert_eq!(o.happy_eyeballs_timeout, Duration::from_millis(500));
+        assert_eq!(o.http_version, HttpVersion::All);
+        assert_eq!(o.user_agent, "Crab");
+
+        assert_eq!(o.pool_idle_timeout, None);
+        assert_eq!(o.pool_idle_max, None);
+        assert_eq!(o.tcp_keepalive_delay, None);
+        assert_eq!(o.tcp_keepalive_interval, None);
+        assert_eq!(o.tcp_keepalive_retries, None);
+        assert_eq!(o.http2_keepalive, None);
+        assert_eq!(o.http2_keepalive_timeout, None);
+        assert!(!o.http2_keepalive_idle);
+        assert!(o.tls_config.is_none());
+        assert_eq!(o.tls_fixed_name, None);
+        assert!(o.dns_overrides.is_empty());
+    }
+
+    #[test]
+    fn test_metrics_registration() {
+        let registry = Registry::new();
+        let metrics = Metrics::new(&registry);
+
+        // Touch every metric so the families carry a child with our label
+        metrics.requests.with_label_values(&["foo:443"]).inc_by(3);
+        metrics
+            .requests_inflight
+            .with_label_values(&["foo:443"])
+            .set(5);
+        metrics
+            .request_duration
+            .with_label_values(&["foo:443"])
+            .observe(0.5);
+
+        let families = registry.gather();
+        let mut names = families
+            .iter()
+            .map(|x| x.name().to_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "http_client_request_duration_sec",
+                "http_client_requests_inflight",
+                "http_client_requests_total",
+            ]
+        );
+
+        // Every metric is labelled by host and only by host
+        for f in &families {
+            assert_eq!(f.get_metric().len(), 1);
+            let labels = f.get_metric()[0].get_label();
+            assert_eq!(labels.len(), 1);
+            assert_eq!(labels[0].name(), "host");
+            assert_eq!(labels[0].value(), "foo:443");
+        }
+
+        let by_name = |name: &str| {
+            families
+                .iter()
+                .find(|x| x.name() == name)
+                .unwrap()
+                .get_metric()[0]
+                .clone()
+        };
+
+        assert_eq!(
+            by_name("http_client_requests_total").get_counter().value(),
+            3.0
+        );
+        assert_eq!(
+            by_name("http_client_requests_inflight").get_gauge().value(),
+            5.0
+        );
+
+        let hist = by_name("http_client_request_duration_sec");
+        let hist = hist.get_histogram();
+        assert_eq!(hist.get_sample_count(), 1);
+        assert_eq!(
+            hist.get_bucket()
+                .iter()
+                .map(|x| x.upper_bound())
+                .collect::<Vec<_>>(),
+            vec![0.01, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2]
+        );
+    }
+}

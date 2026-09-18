@@ -148,3 +148,344 @@ impl From<&HttpServerCli> for TlsOptions {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use clap::Parser;
+
+    use super::*;
+
+    /// Wrapper needed to be able to use `try_parse_from` on `clap::Args`
+    #[derive(Parser)]
+    struct Cli {
+        #[clap(flatten)]
+        srv: HttpServerCli,
+    }
+
+    fn parse(args: &[&str]) -> HttpServerCli {
+        let mut v = vec!["test"];
+        v.extend_from_slice(args);
+        Cli::try_parse_from(v).unwrap().srv
+    }
+
+    fn try_parse(args: &[&str]) -> Result<HttpServerCli, clap::Error> {
+        let mut v = vec!["test"];
+        v.extend_from_slice(args);
+        Cli::try_parse_from(v).map(|x| x.srv)
+    }
+
+    const ALL_ARGS: &[&str] = &[
+        "--http-server-backlog=4096",
+        "--http-server-max-requests-per-conn=1000",
+        "--http-server-read-timeout=1m",
+        "--http-server-write-timeout=2m",
+        "--http-server-idle-timeout=3m",
+        "--http-server-tls-handshake-timeout=4s",
+        "--http-server-http1-header-read-timeout=5s",
+        "--http-server-body-read-timeout=6s",
+        "--http-server-http2-max-streams=256",
+        "--http-server-http2-keepalive-interval=7s",
+        "--http-server-http2-keepalive-timeout=8s",
+        "--http-server-tcp-keepalive-delay=9s",
+        "--http-server-tcp-keepalive-interval=10s",
+        "--http-server-tcp-keepalive-retries=11",
+        "--http-server-tcp-mss=1400",
+        "--http-server-tls-session-cache-size=1MB",
+        "--http-server-tls-session-cache-tti=12h",
+        "--http-server-tls-ticket-lifetime=13h",
+        "--http-server-grace-period=14s",
+        "--http-server-proxy-protocol-mode=forced",
+    ];
+
+    #[test]
+    fn test_cli_defaults() {
+        let c = parse(&[]);
+
+        assert_eq!(c.http_server_backlog, 2048);
+        assert_eq!(c.http_server_max_requests_per_conn, None);
+        assert_eq!(c.http_server_read_timeout, Duration::from_secs(30));
+        assert_eq!(c.http_server_write_timeout, Duration::from_secs(30));
+        assert_eq!(c.http_server_idle_timeout, None);
+        assert_eq!(c.http_server_tls_handshake_timeout, Duration::from_secs(15));
+        assert_eq!(
+            c.http_server_http1_header_read_timeout,
+            Duration::from_secs(10)
+        );
+        assert_eq!(c.http_server_body_read_timeout, Duration::from_secs(60));
+        assert_eq!(c.http_server_http2_max_streams, 128);
+        assert_eq!(c.http_server_http2_keepalive_interval, None);
+        assert_eq!(
+            c.http_server_http2_keepalive_timeout,
+            Duration::from_secs(10)
+        );
+        assert_eq!(c.http_server_tcp_keepalive_delay, None);
+        assert_eq!(c.http_server_tcp_keepalive_interval, None);
+        assert_eq!(c.http_server_tcp_keepalive_retries, None);
+        assert_eq!(c.http_server_tcp_mss, None);
+        // `parse_size` is binary, so MB == MiB
+        assert_eq!(c.http_server_tls_session_cache_size, 256 * 1024 * 1024);
+        assert_eq!(
+            c.http_server_tls_session_cache_tti,
+            Duration::from_secs(18 * 3600)
+        );
+        assert_eq!(
+            c.http_server_tls_ticket_lifetime,
+            Duration::from_secs(9 * 3600)
+        );
+        assert_eq!(c.http_server_grace_period, Duration::from_secs(60));
+        assert_eq!(c.http_server_proxy_protocol_mode, ProxyProtocolMode::Off);
+    }
+
+    #[test]
+    fn test_cli_explicit_values() {
+        let c = parse(ALL_ARGS);
+
+        assert_eq!(c.http_server_backlog, 4096);
+        assert_eq!(c.http_server_max_requests_per_conn, Some(1000));
+        assert_eq!(c.http_server_read_timeout, Duration::from_secs(60));
+        assert_eq!(c.http_server_write_timeout, Duration::from_secs(120));
+        assert_eq!(c.http_server_idle_timeout, Some(Duration::from_secs(180)));
+        assert_eq!(c.http_server_tls_handshake_timeout, Duration::from_secs(4));
+        assert_eq!(
+            c.http_server_http1_header_read_timeout,
+            Duration::from_secs(5)
+        );
+        assert_eq!(c.http_server_body_read_timeout, Duration::from_secs(6));
+        assert_eq!(c.http_server_http2_max_streams, 256);
+        assert_eq!(
+            c.http_server_http2_keepalive_interval,
+            Some(Duration::from_secs(7))
+        );
+        assert_eq!(
+            c.http_server_http2_keepalive_timeout,
+            Duration::from_secs(8)
+        );
+        assert_eq!(
+            c.http_server_tcp_keepalive_delay,
+            Some(Duration::from_secs(9))
+        );
+        assert_eq!(
+            c.http_server_tcp_keepalive_interval,
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(c.http_server_tcp_keepalive_retries, Some(11));
+        assert_eq!(c.http_server_tcp_mss, Some(1400));
+        assert_eq!(c.http_server_tls_session_cache_size, 1024 * 1024);
+        assert_eq!(
+            c.http_server_tls_session_cache_tti,
+            Duration::from_secs(12 * 3600)
+        );
+        assert_eq!(
+            c.http_server_tls_ticket_lifetime,
+            Duration::from_secs(13 * 3600)
+        );
+        assert_eq!(c.http_server_grace_period, Duration::from_secs(14));
+        assert_eq!(c.http_server_proxy_protocol_mode, ProxyProtocolMode::Forced);
+    }
+
+    #[test]
+    fn test_cli_humantime_compound_duration() {
+        let c = parse(&["--http-server-read-timeout=1h30m10s"]);
+        assert_eq!(c.http_server_read_timeout, Duration::from_secs(5410));
+
+        // Sub-second precision must survive
+        let c = parse(&["--http-server-grace-period=1500ms"]);
+        assert_eq!(c.http_server_grace_period, Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn test_cli_proxy_protocol_modes() {
+        assert_eq!(
+            parse(&["--http-server-proxy-protocol-mode=off"]).http_server_proxy_protocol_mode,
+            ProxyProtocolMode::Off
+        );
+        assert_eq!(
+            parse(&["--http-server-proxy-protocol-mode=enabled"]).http_server_proxy_protocol_mode,
+            ProxyProtocolMode::Enabled
+        );
+        assert_eq!(
+            parse(&["--http-server-proxy-protocol-mode=forced"]).http_server_proxy_protocol_mode,
+            ProxyProtocolMode::Forced
+        );
+
+        // Not snake_case / unknown values must be rejected
+        assert!(try_parse(&["--http-server-proxy-protocol-mode=Enabled"]).is_err());
+        assert!(try_parse(&["--http-server-proxy-protocol-mode=bogus"]).is_err());
+        assert!(try_parse(&["--http-server-proxy-protocol-mode="]).is_err());
+    }
+
+    #[test]
+    fn test_cli_invalid_durations() {
+        assert!(try_parse(&["--http-server-read-timeout=abc"]).is_err());
+        // No unit -> humantime refuses it
+        assert!(try_parse(&["--http-server-write-timeout=30"]).is_err());
+        assert!(try_parse(&["--http-server-idle-timeout=-5s"]).is_err());
+        assert!(try_parse(&["--http-server-grace-period="]).is_err());
+    }
+
+    #[test]
+    fn test_cli_invalid_sizes() {
+        assert!(try_parse(&["--http-server-tls-session-cache-size=abc"]).is_err());
+        assert!(try_parse(&["--http-server-tls-session-cache-size=1QB"]).is_err());
+        assert!(try_parse(&["--http-server-tls-session-cache-size=-1"]).is_err());
+        // Bare numbers are bytes
+        assert_eq!(
+            parse(&["--http-server-tls-session-cache-size=1234"])
+                .http_server_tls_session_cache_size,
+            1234
+        );
+    }
+
+    #[test]
+    fn test_cli_invalid_numbers() {
+        assert!(try_parse(&["--http-server-backlog=-1"]).is_err());
+        // u32 overflow
+        assert!(try_parse(&["--http-server-backlog=4294967296"]).is_err());
+        assert!(try_parse(&["--http-server-http2-max-streams=foo"]).is_err());
+        assert!(try_parse(&["--http-server-max-requests-per-conn=-1"]).is_err());
+        assert!(try_parse(&["--http-server-unknown-option=1"]).is_err());
+    }
+
+    /// Catches clap definition problems (duplicate ids, bad default values that
+    /// don't round-trip through the value parser, etc.)
+    #[test]
+    fn test_cli_definition_is_valid() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn test_cli_size_units_are_binary() {
+        let size = |s: &str| {
+            parse(&[&format!("--http-server-tls-session-cache-size={s}")])
+                .http_server_tls_session_cache_size
+        };
+
+        assert_eq!(size("0"), 0);
+        assert_eq!(size("1KB"), 1024);
+        assert_eq!(size("512KB"), 512 * 1024);
+        assert_eq!(size("2GB"), 2 * 1024 * 1024 * 1024);
+        // Decimal semantics would give 1_000_000 here
+        assert_eq!(size("1MB"), 1_048_576);
+    }
+
+    #[test]
+    fn test_cli_numeric_boundaries() {
+        assert_eq!(parse(&["--http-server-backlog=0"]).http_server_backlog, 0);
+        assert_eq!(
+            parse(&["--http-server-backlog=4294967295"]).http_server_backlog,
+            u32::MAX
+        );
+        assert_eq!(
+            parse(&["--http-server-http2-max-streams=0"]).http_server_http2_max_streams,
+            0
+        );
+        assert_eq!(
+            parse(&["--http-server-max-requests-per-conn=0"]).http_server_max_requests_per_conn,
+            Some(0)
+        );
+        assert_eq!(
+            parse(&["--http-server-max-requests-per-conn=18446744073709551615"])
+                .http_server_max_requests_per_conn,
+            Some(u64::MAX)
+        );
+        // One past u64
+        assert!(try_parse(&["--http-server-max-requests-per-conn=18446744073709551616"]).is_err());
+    }
+
+    /// Zero durations are accepted by humantime and must be carried over verbatim
+    /// rather than being turned into `None`.
+    #[test]
+    fn test_cli_zero_durations() {
+        let c = parse(&[
+            "--http-server-read-timeout=0s",
+            "--http-server-grace-period=0s",
+            "--http-server-idle-timeout=0s",
+        ]);
+        assert_eq!(c.http_server_read_timeout, Duration::ZERO);
+        assert_eq!(c.http_server_grace_period, Duration::ZERO);
+        assert_eq!(c.http_server_idle_timeout, Some(Duration::ZERO));
+
+        let o = ServerOptions::from(&c);
+        assert_eq!(o.read_timeout, Some(Duration::ZERO));
+        assert_eq!(o.grace_period, Duration::ZERO);
+        assert_eq!(o.idle_timeout, Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn test_cli_clone_and_debug() {
+        let c = parse(ALL_ARGS);
+        assert_eq!(c.clone(), c);
+        // The Debug output is used in startup logs - make sure the fields are in it
+        let d = format!("{c:?}");
+        assert!(d.contains("http_server_backlog: 4096"), "{d}");
+        assert!(d.contains("Forced"), "{d}");
+    }
+
+    #[test]
+    fn test_cli_eq() {
+        assert_eq!(parse(&[]), parse(&["--http-server-read-timeout=30s"]));
+        assert_ne!(parse(&[]), parse(&["--http-server-read-timeout=31s"]));
+        assert_eq!(parse(ALL_ARGS), parse(ALL_ARGS));
+    }
+
+    #[test]
+    fn test_server_options_from_cli() {
+        let c = parse(ALL_ARGS);
+        let o = ServerOptions::from(&c);
+
+        assert_eq!(o.backlog, 4096);
+        // Non-optional CLI timeouts are wrapped into `Some`
+        assert_eq!(o.read_timeout, Some(Duration::from_secs(60)));
+        assert_eq!(o.write_timeout, Some(Duration::from_secs(120)));
+        assert_eq!(o.idle_timeout, Some(Duration::from_secs(180)));
+        assert_eq!(o.tls_handshake_timeout, Duration::from_secs(4));
+        assert_eq!(o.tcp_keepalive_delay, Some(Duration::from_secs(9)));
+        assert_eq!(o.tcp_keepalive_interval, Some(Duration::from_secs(10)));
+        assert_eq!(o.tcp_keepalive_retries, Some(11));
+        assert_eq!(o.tcp_mss, Some(1400));
+        assert_eq!(o.http1_header_read_timeout, Duration::from_secs(5));
+        assert_eq!(o.http2_keepalive_interval, Some(Duration::from_secs(7)));
+        assert_eq!(o.http2_keepalive_timeout, Duration::from_secs(8));
+        assert_eq!(o.http2_max_streams, 256);
+        assert_eq!(o.grace_period, Duration::from_secs(14));
+        assert_eq!(o.max_requests_per_conn, Some(1000));
+        assert_eq!(o.proxy_protocol_mode, ProxyProtocolMode::Forced);
+    }
+
+    #[test]
+    fn test_server_options_from_cli_defaults_keep_optionals_none() {
+        let o = ServerOptions::from(&parse(&[]));
+
+        assert_eq!(o.idle_timeout, None);
+        assert_eq!(o.max_requests_per_conn, None);
+        assert_eq!(o.tcp_keepalive_delay, None);
+        assert_eq!(o.tcp_keepalive_interval, None);
+        assert_eq!(o.tcp_keepalive_retries, None);
+        assert_eq!(o.tcp_mss, None);
+        assert_eq!(o.http2_keepalive_interval, None);
+        // ...while the mandatory ones are always set
+        assert_eq!(o.read_timeout, Some(Duration::from_secs(30)));
+        assert_eq!(o.write_timeout, Some(Duration::from_secs(30)));
+        assert_eq!(o.proxy_protocol_mode, ProxyProtocolMode::Off);
+    }
+
+    #[test]
+    fn test_tls_options_from_cli() {
+        let c = parse(ALL_ARGS);
+        let o = TlsOptions::from(&c);
+
+        assert_eq!(o.sessions_count, 1024 * 1024);
+        assert_eq!(o.sessions_tti, Duration::from_secs(12 * 3600));
+        assert_eq!(o.ticket_lifetime, Duration::from_secs(13 * 3600));
+        // These are not driven by the CLI and are left empty
+        assert!(o.additional_alpn.is_empty());
+        assert!(o.tls_versions.is_empty());
+
+        // The CLI conversion must not inherit `TlsOptions::default()`
+        let d = TlsOptions::default();
+        assert_ne!(o.sessions_count, d.sessions_count);
+        assert_ne!(o.sessions_tti, d.sessions_tti);
+        assert_ne!(o.ticket_lifetime, d.ticket_lifetime);
+    }
+}

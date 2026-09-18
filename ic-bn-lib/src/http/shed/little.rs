@@ -439,4 +439,344 @@ mod test {
         tracker.wait().await;
         assert_eq!(shedded.load(Ordering::SeqCst), 8);
     }
+
+    #[derive(Debug, Clone)]
+    struct FailService;
+
+    impl Service<Duration> for FailService {
+        type Response = ();
+        type Error = Error;
+        type Future = BoxFuture<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: Duration) -> Self::Future {
+            Box::pin(async move { Err(Error::Generic(anyhow::anyhow!("inner boom"))) })
+        }
+    }
+
+    #[track_caller]
+    fn assert_close(got: f64, want: f64) {
+        assert!((got - want).abs() < 1e-9, "expected {want}, got {got}");
+    }
+
+    /// Rewind the "concurrency last changed" timestamp so that the control loop
+    /// is not rate-limited during the next `stop()` call.
+    fn unthrottle(conf: &LoadShedConf) {
+        conf.stats.lock().unwrap().last_changed = Instant::now() - Duration::from_secs(10);
+    }
+
+    #[test]
+    fn test_little_conf_initial_state() {
+        let layer = LoadShedLayer::new(0.25, Duration::from_millis(1500), 7);
+        let conf = &layer.0;
+
+        assert_close(conf.target, 1.5);
+        assert_close(conf.ewma_param, 0.25);
+        assert_eq!(conf.passthrough_count, 7);
+        assert_eq!(conf.requests.load(Ordering::SeqCst), 0);
+
+        // Both semaphores start with a single permit and the latency averages
+        // start out at the target, so nothing is shed before any measurement.
+        assert_eq!(conf.available_concurrency.available_permits(), 1);
+        assert_eq!(conf.available_queue.available_permits(), 1);
+
+        let stats = conf.stats.lock().unwrap();
+        assert_eq!(stats.concurrency, 1);
+        assert_eq!(stats.queue_capacity, 1);
+        assert_eq!(stats.previous_concurrency, 0);
+        assert_close(stats.average_latency, 1.5);
+        assert_close(stats.average_latency_at_capacity, 1.5);
+        assert_close(stats.previous_throughput, 0.0);
+    }
+
+    #[test]
+    fn test_little_stop_updates_ewma_and_is_rate_limited() {
+        // With ewma_param 0.1 the control loop's rate limit stays around a
+        // second, so these calls only exercise the EWMA update.
+        let conf = LoadShedConf::new(0.1, 1.0, 0);
+
+        conf.stop(Duration::from_millis(100));
+        assert_close(conf.stats.lock().unwrap().average_latency, 0.91);
+        conf.stop(Duration::from_millis(100));
+        assert_close(conf.stats.lock().unwrap().average_latency, 0.829);
+        conf.stop(Duration::from_millis(100));
+
+        let stats = conf.stats.lock().unwrap();
+        assert_close(stats.average_latency, 0.7561);
+        // A single permit with concurrency 1 counts as "at capacity",
+        // so this average tracks the other one.
+        assert_close(stats.average_latency_at_capacity, 0.7561);
+        // Concurrency was left alone: the control loop is rate limited.
+        assert_eq!(stats.concurrency, 1);
+        assert_eq!(conf.available_concurrency.available_permits(), 1);
+    }
+
+    #[test]
+    fn test_little_at_capacity_leeway() {
+        // "At max concurrency" tolerates max(1, concurrency / 10) free permits,
+        // i.e. 3 of them at concurrency 30.
+        for (held, at_capacity) in [(26u32, false), (27u32, true)] {
+            let conf = LoadShedConf::new(0.1, 1.0, 0);
+            conf.available_concurrency.add_permits(29);
+            conf.stats.lock().unwrap().concurrency = 30;
+
+            let _permits = conf
+                .available_concurrency
+                .clone()
+                .try_acquire_many_owned(held)
+                .unwrap();
+
+            conf.stop(Duration::from_millis(100));
+
+            let stats = conf.stats.lock().unwrap();
+            assert_close(stats.average_latency, 0.91);
+            if at_capacity {
+                assert_close(stats.average_latency_at_capacity, 0.91);
+            } else {
+                // 4 free permits out of 30 is not yet "at capacity",
+                // so this average is left at its initial value.
+                assert_close(stats.average_latency_at_capacity, 1.0);
+            }
+            // Not enough time has passed to touch the concurrency.
+            assert_eq!(stats.concurrency, 30);
+        }
+    }
+
+    #[test]
+    fn test_little_concurrency_grows_below_target() {
+        let conf = LoadShedConf::new(0.5, 1.0, 0);
+        unthrottle(&conf);
+
+        conf.stop(Duration::from_millis(100));
+
+        // 0.5 * 1.0 + 0.5 * 0.1 = 0.55 which is below the 1.0 target and the
+        // throughput gradient isn't negative -> one more permit.
+        assert_eq!(conf.available_concurrency.available_permits(), 2);
+
+        let stats = conf.stats.lock().unwrap();
+        assert_eq!(stats.concurrency, 2);
+        // Averages are scaled by concurrency / (concurrency - 1) == 2.0
+        assert_close(stats.average_latency, 1.1);
+        assert_close(stats.average_latency_at_capacity, 1.1);
+        assert_close(stats.previous_throughput, 0.0);
+        assert_eq!(stats.previous_concurrency, 0);
+    }
+
+    #[test]
+    fn test_little_concurrency_shrinks_above_target() {
+        let conf = LoadShedConf::new(0.5, 1.0, 0);
+        conf.available_concurrency.add_permits(1);
+        conf.stats.lock().unwrap().concurrency = 2;
+        unthrottle(&conf);
+
+        // One in-flight request leaves one free permit, which still counts as
+        // being at capacity when concurrency is 2.
+        let permit = conf
+            .available_concurrency
+            .clone()
+            .try_acquire_owned()
+            .unwrap();
+
+        conf.stop(Duration::from_secs(3));
+
+        {
+            let stats = conf.stats.lock().unwrap();
+            // 0.5 * 1.0 + 0.5 * 3.0 = 2.0, way over the target -> shrink
+            assert_eq!(stats.concurrency, 1);
+            // Averages are scaled by concurrency / (concurrency + 1) == 0.5
+            assert_close(stats.average_latency, 1.0);
+            assert_close(stats.average_latency_at_capacity, 1.0);
+            assert_close(stats.previous_throughput, 0.5);
+            assert_eq!(stats.previous_concurrency, 1);
+        }
+
+        // The permit was really taken away from the semaphore
+        assert_eq!(conf.available_concurrency.available_permits(), 0);
+        drop(permit);
+        assert_eq!(conf.available_concurrency.available_permits(), 1);
+    }
+
+    #[test]
+    fn test_little_concurrency_shrinks_on_negative_gradient() {
+        // Latency is far below the target, but the throughput went up while the
+        // concurrency went down -> negative gradient -> shrink anyway.
+        let conf = LoadShedConf::new(0.5, 1.0, 0);
+        conf.available_concurrency.add_permits(1);
+        {
+            let mut stats = conf.stats.lock().unwrap();
+            stats.concurrency = 2;
+            stats.average_latency = 0.1;
+            stats.average_latency_at_capacity = 0.1;
+            stats.previous_concurrency = 5;
+        }
+        unthrottle(&conf);
+
+        let _permit = conf
+            .available_concurrency
+            .clone()
+            .try_acquire_owned()
+            .unwrap();
+
+        conf.stop(Duration::from_millis(100));
+
+        let stats = conf.stats.lock().unwrap();
+        assert_eq!(stats.concurrency, 1);
+        assert_close(stats.average_latency, 0.05);
+        assert!(stats.average_latency < conf.target);
+        // 1 in-flight request / 0.1s average latency
+        assert_close(stats.previous_throughput, 10.0);
+        assert_eq!(stats.previous_concurrency, 1);
+    }
+
+    #[test]
+    fn test_little_concurrency_never_drops_below_one() {
+        let conf = LoadShedConf::new(0.5, 1.0, 0);
+        unthrottle(&conf);
+
+        // All permits are in use (so we're at capacity) and the latency is
+        // way above the target, but concurrency can't go below 1.
+        let permit = conf
+            .available_concurrency
+            .clone()
+            .try_acquire_owned()
+            .unwrap();
+
+        conf.stop(Duration::from_secs(3));
+
+        {
+            let stats = conf.stats.lock().unwrap();
+            assert_eq!(stats.concurrency, 1);
+            // No concurrency change means no latency rescaling either
+            assert_close(stats.average_latency, 2.0);
+            assert_close(stats.average_latency_at_capacity, 2.0);
+            assert_close(stats.previous_throughput, 0.5);
+            assert_eq!(stats.previous_concurrency, 1);
+        }
+
+        // ... and no permit was forgotten
+        drop(permit);
+        assert_eq!(conf.available_concurrency.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_little_start_adjusts_queue_capacity() {
+        let conf = LoadShedConf::new(0.5, 1.0, 0);
+        {
+            let mut stats = conf.stats.lock().unwrap();
+            stats.concurrency = 10;
+            stats.average_latency_at_capacity = 0.25;
+        }
+
+        // queue = concurrency * (target / latency_at_capacity - 1) = 10 * 3
+        assert!(conf.start().await.is_some());
+        assert_eq!(conf.stats.lock().unwrap().queue_capacity, 30);
+        assert_eq!(conf.available_queue.available_permits(), 30);
+
+        // Latency doubles -> the queue shrinks to 10 * (2 - 1)
+        conf.stats.lock().unwrap().average_latency_at_capacity = 0.5;
+        assert!(conf.start().await.is_some());
+        assert_eq!(conf.stats.lock().unwrap().queue_capacity, 10);
+        assert_eq!(conf.available_queue.available_permits(), 10);
+
+        // Latency above the target would give a negative queue size,
+        // but it's clamped to a single request.
+        conf.stats.lock().unwrap().average_latency_at_capacity = 2.0;
+        assert!(conf.start().await.is_some());
+        assert_eq!(conf.stats.lock().unwrap().queue_capacity, 1);
+        assert_eq!(conf.available_queue.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_little_start_returns_none_when_queue_is_full() {
+        let conf = LoadShedConf::new(0.5, 1.0, 0);
+        let _queued = conf.available_queue.clone().try_acquire_owned().unwrap();
+
+        assert!(conf.start().await.is_none());
+        assert_eq!(conf.stats.lock().unwrap().queue_capacity, 1);
+        // The concurrency permit is never taken when we bail out early
+        assert_eq!(conf.available_concurrency.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_little_start_returns_none_when_shrinking_queue_fails() {
+        let conf = LoadShedConf::new(0.5, 1.0, 0);
+        // Pretend the queue is 5 requests long while the semaphore only holds a
+        // single permit: shrinking it back to 1 needs 4 permits that aren't there.
+        conf.stats.lock().unwrap().queue_capacity = 5;
+
+        assert!(conf.start().await.is_none());
+        // The capacity is left alone so that the next request recomputes it
+        assert_eq!(conf.stats.lock().unwrap().queue_capacity, 5);
+        assert_eq!(conf.available_queue.available_permits(), 1);
+    }
+
+    #[test]
+    fn test_little_accessors() {
+        let layer = LoadShedLayer::new(0.5, Duration::from_millis(500), 0);
+        let svc = layer.layer(StubService);
+        let conf = &layer.0;
+
+        assert_eq!(svc.average_latency(), Duration::from_millis(500));
+        assert_eq!(svc.concurrency(), 1);
+        // Concurrency + queue
+        assert_eq!(svc.queue_capacity(), 2);
+        assert_eq!(svc.queue_len(), 0);
+
+        let _concurrency = conf
+            .available_concurrency
+            .clone()
+            .try_acquire_owned()
+            .unwrap();
+        assert_eq!(svc.queue_len(), 1);
+        let _queued = conf.available_queue.clone().try_acquire_owned().unwrap();
+        assert_eq!(svc.queue_len(), 2);
+
+        // 0.5 * 0.5 + 0.5 * 1.0 = 0.75
+        conf.stop(Duration::from_secs(1));
+        assert_eq!(svc.average_latency(), Duration::from_secs_f64(0.75));
+    }
+
+    #[tokio::test]
+    async fn test_little_passthrough_count_boundary() {
+        let layer = LoadShedLayer::new(0.1, Duration::from_millis(100), 1);
+        let mut svc = layer.layer(StubService);
+        // Block the queue so that no request can ever get a permit
+        let _queued = layer.0.available_queue.clone().try_acquire_owned().unwrap();
+
+        // The very first request is within the passthrough allowance ...
+        assert_eq!(
+            svc.call(Duration::ZERO).await.unwrap(),
+            LoadShedResponse::Inner(())
+        );
+        // ... all the subsequent ones are shed
+        assert_eq!(
+            svc.call(Duration::ZERO).await.unwrap(),
+            LoadShedResponse::Overload
+        );
+        assert_eq!(
+            svc.call(Duration::ZERO).await.unwrap(),
+            LoadShedResponse::Overload
+        );
+        assert_eq!(layer.0.requests.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn test_little_propagates_inner_error() {
+        let layer = LoadShedLayer::new(0.5, Duration::from_secs(1), 100);
+        let svc = layer.layer(FailService);
+
+        let err = svc.clone().oneshot(Duration::ZERO).await.unwrap_err();
+        assert!(err.to_string().contains("inner boom"), "{err}");
+
+        // The latency of a failed call is still recorded:
+        // 0.5 * 1.0 + 0.5 * ~0.0 == ~0.5s
+        let avg = svc.average_latency().as_secs_f64();
+        assert!(
+            (0.45..0.55).contains(&avg),
+            "unexpected average latency {avg}"
+        );
+    }
 }

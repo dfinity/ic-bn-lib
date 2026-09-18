@@ -256,3 +256,394 @@ impl From<TaskFailReason> for ApiTaskFailReason {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use fqdn::fqdn;
+
+    use crate::principal;
+
+    use super::*;
+
+    const ALL_KINDS: [TaskKind; 4] = [
+        TaskKind::Issue,
+        TaskKind::Renew,
+        TaskKind::Update,
+        TaskKind::Delete,
+    ];
+
+    fn issue_output() -> IssueCertificateOutput {
+        IssueCertificateOutput::new(
+            principal!("qoctq-giaaa-aaaaa-aaaea-cai"),
+            b"CERTIFICATE".to_vec(),
+            b"PRIVATEKEY".to_vec(),
+            1_000,
+            2_000,
+        )
+    }
+
+    // ---- TaskKind ----
+
+    #[test]
+    fn task_kind_display_is_snake_case() {
+        assert_eq!(TaskKind::Issue.to_string(), "issue");
+        assert_eq!(TaskKind::Renew.to_string(), "renew");
+        assert_eq!(TaskKind::Update.to_string(), "update");
+        assert_eq!(TaskKind::Delete.to_string(), "delete");
+    }
+
+    #[test]
+    fn task_kind_as_ref_matches_display() {
+        for kind in ALL_KINDS {
+            assert_eq!(kind.as_ref(), kind.to_string(), "kind: {kind:?}");
+        }
+    }
+
+    #[test]
+    fn task_kind_maps_to_matching_api_variant() {
+        // Pinned individually: a collapsed or reordered match arm must fail here.
+        assert_eq!(ApiTaskKind::from(TaskKind::Issue), ApiTaskKind::Issue);
+        assert_eq!(ApiTaskKind::from(TaskKind::Renew), ApiTaskKind::Renew);
+        assert_eq!(ApiTaskKind::from(TaskKind::Update), ApiTaskKind::Update);
+        assert_eq!(ApiTaskKind::from(TaskKind::Delete), ApiTaskKind::Delete);
+
+        assert_eq!(TaskKind::from(ApiTaskKind::Issue), TaskKind::Issue);
+        assert_eq!(TaskKind::from(ApiTaskKind::Renew), TaskKind::Renew);
+        assert_eq!(TaskKind::from(ApiTaskKind::Update), TaskKind::Update);
+        assert_eq!(TaskKind::from(ApiTaskKind::Delete), TaskKind::Delete);
+    }
+
+    #[test]
+    fn task_kind_api_roundtrip_is_lossless() {
+        for kind in ALL_KINDS {
+            let back = TaskKind::from(ApiTaskKind::from(kind));
+            assert_eq!(back, kind);
+            // The wire name must agree on both sides of the boundary.
+            assert_eq!(
+                <&'static str>::from(ApiTaskKind::from(kind)),
+                kind.as_ref(),
+                "kind: {kind:?}"
+            );
+        }
+    }
+
+    // ---- InputTask -> ApiInputTask ----
+
+    #[test]
+    fn input_task_into_api_preserves_fields() {
+        let task = InputTask::new(
+            TaskKind::Renew,
+            fqdn!("Example.COM."),
+            true,
+            Some(principal!("qoctq-giaaa-aaaaa-aaaea-cai")),
+        );
+        let api = ApiInputTask::from(task);
+
+        assert_eq!(api.kind, ApiTaskKind::Renew);
+        // FQDN normalizes case and drops the trailing dot on the wire.
+        assert_eq!(api.domain, "example.com");
+        assert_eq!(api.wildcard, Some(true));
+        assert_eq!(
+            api.canister_id,
+            Some(principal!("qoctq-giaaa-aaaaa-aaaea-cai"))
+        );
+    }
+
+    #[test]
+    fn input_task_into_api_keeps_wildcard_and_missing_canister_id() {
+        let api = ApiInputTask::from(InputTask::new(
+            TaskKind::Issue,
+            fqdn!("a.example.com"),
+            false,
+            None,
+        ));
+
+        // `false` must encode as Some(false), not None: the canister treats
+        // None as "unspecified", which is a different thing.
+        assert_eq!(api.wildcard, Some(false));
+        assert!(api.canister_id.is_none());
+        assert_eq!(api.kind, ApiTaskKind::Issue);
+    }
+
+    // ---- ScheduledTask ----
+
+    #[test]
+    fn scheduled_task_new_assigns_every_field() {
+        let task = ScheduledTask::new(
+            TaskKind::Delete,
+            fqdn!("example.com"),
+            42,
+            Some(b"CERT".to_vec()),
+            true,
+            Some(principal!("aaaaa-aa")),
+        );
+
+        assert_eq!(task.kind, TaskKind::Delete);
+        assert_eq!(task.domain, fqdn!("example.com"));
+        assert_eq!(task.task_id, 42);
+        assert_eq!(task.cert.as_deref(), Some(b"CERT".as_slice()));
+        assert!(task.wildcard);
+        assert_eq!(task.canister_id, Some(principal!("aaaaa-aa")));
+    }
+
+    #[test]
+    fn scheduled_task_equality_is_field_sensitive_and_domain_case_insensitive() {
+        let base = ScheduledTask::new(TaskKind::Issue, fqdn!("example.com"), 1, None, false, None);
+
+        let same_domain_other_case =
+            ScheduledTask::new(TaskKind::Issue, fqdn!("EXAMPLE.com"), 1, None, false, None);
+        assert_eq!(base, same_domain_other_case);
+
+        let other_id =
+            ScheduledTask::new(TaskKind::Issue, fqdn!("example.com"), 2, None, false, None);
+        assert_ne!(base, other_id);
+
+        let other_kind =
+            ScheduledTask::new(TaskKind::Renew, fqdn!("example.com"), 1, None, false, None);
+        assert_ne!(base, other_kind);
+
+        let other_wildcard =
+            ScheduledTask::new(TaskKind::Issue, fqdn!("example.com"), 1, None, true, None);
+        assert_ne!(base, other_wildcard);
+    }
+
+    // ---- TaskResult constructors ----
+
+    #[test]
+    fn success_result_has_zero_duration_and_given_outcome() {
+        let result = TaskResult::success(
+            fqdn!("example.com"),
+            TaskOutput::Update(principal!("aaaaa-aa")),
+            7,
+            TaskKind::Update,
+        );
+
+        assert!(result.is_success());
+        assert_eq!(result.duration, Duration::ZERO);
+        assert_eq!(result.task_id, 7);
+        assert_eq!(result.task_kind, TaskKind::Update);
+        assert_eq!(result.domain, fqdn!("example.com"));
+        assert_eq!(
+            result.outcome,
+            TaskOutcome::Success(TaskOutput::Update(principal!("aaaaa-aa")))
+        );
+    }
+
+    #[test]
+    fn failure_result_is_not_success() {
+        let result = TaskResult::failure(
+            fqdn!("example.com"),
+            TaskFailReason::RateLimited,
+            9,
+            TaskKind::Issue,
+        );
+
+        assert!(!result.is_success());
+        assert_eq!(result.duration, Duration::ZERO);
+        assert_eq!(
+            result.outcome,
+            TaskOutcome::Failure(TaskFailReason::RateLimited)
+        );
+    }
+
+    #[test]
+    fn with_duration_changes_only_the_duration() {
+        let base = TaskResult::failure(
+            fqdn!("example.com"),
+            TaskFailReason::Timeout { duration_secs: 5 },
+            3,
+            TaskKind::Delete,
+        );
+        let timed = base.clone().with_duration(Duration::from_secs(5));
+
+        assert_eq!(timed.duration, Duration::from_secs(5));
+        assert_eq!(timed.domain, base.domain);
+        assert_eq!(timed.task_id, base.task_id);
+        assert_eq!(timed.task_kind, base.task_kind);
+        assert_eq!(timed.outcome, base.outcome);
+        assert!(!timed.is_success());
+    }
+
+    #[test]
+    fn with_duration_is_idempotent_on_last_write() {
+        let result = TaskResult::success(
+            fqdn!("example.com"),
+            TaskOutput::Delete,
+            1,
+            TaskKind::Delete,
+        )
+        .with_duration(Duration::from_secs(1))
+        .with_duration(Duration::from_secs(90));
+
+        assert_eq!(result.duration, Duration::from_secs(90));
+    }
+
+    // ---- TaskOutcome / TaskOutput -> Api ----
+
+    #[test]
+    fn task_outcome_into_api_keeps_success_and_failure_sides() {
+        let api = ApiTaskOutcome::from(TaskOutcome::Success(TaskOutput::Delete));
+        assert!(
+            matches!(api, ApiTaskOutcome::Success(ApiTaskOutput::Delete)),
+            "got {api:?}"
+        );
+
+        let api = ApiTaskOutcome::from(TaskOutcome::Failure(TaskFailReason::RateLimited));
+        match api {
+            ApiTaskOutcome::Failure(reason) => {
+                assert_eq!(reason, ApiTaskFailReason::RateLimited);
+            }
+            other => panic!("expected Failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn task_output_into_api_maps_each_variant() {
+        let api = ApiTaskOutput::from(TaskOutput::Issue(issue_output()));
+        match api {
+            ApiTaskOutput::Issue(out) => assert_eq!(out.enc_cert, b"CERTIFICATE"),
+            other => panic!("expected Issue, got {other:?}"),
+        }
+
+        let api = ApiTaskOutput::from(TaskOutput::Update(principal!("aaaaa-aa")));
+        match api {
+            ApiTaskOutput::Update(p) => assert_eq!(p, principal!("aaaaa-aa")),
+            other => panic!("expected Update, got {other:?}"),
+        }
+
+        let api = ApiTaskOutput::from(TaskOutput::Delete);
+        assert!(matches!(api, ApiTaskOutput::Delete), "got {api:?}");
+    }
+
+    #[test]
+    fn issue_output_into_api_does_not_swap_cert_and_key() {
+        let api = ApiIssueCertificateOutput::from(issue_output());
+
+        assert_eq!(api.canister_id, principal!("qoctq-giaaa-aaaaa-aaaea-cai"));
+        assert_eq!(api.enc_cert, b"CERTIFICATE");
+        assert_eq!(api.enc_priv_key, b"PRIVATEKEY");
+        // Distinct values so a swapped pair is detectable.
+        assert_eq!(api.not_before, 1_000);
+        assert_eq!(api.not_after, 2_000);
+    }
+
+    // ---- TaskFailReason ----
+
+    #[test]
+    fn fail_reason_into_api_preserves_payloads() {
+        assert_eq!(
+            ApiTaskFailReason::from(TaskFailReason::ValidationFailed("bad CNAME".to_string())),
+            ApiTaskFailReason::ValidationFailed("bad CNAME".to_string())
+        );
+        assert_eq!(
+            ApiTaskFailReason::from(TaskFailReason::Timeout { duration_secs: 140 }),
+            ApiTaskFailReason::Timeout { duration_secs: 140 }
+        );
+        assert_eq!(
+            ApiTaskFailReason::from(TaskFailReason::RateLimited),
+            ApiTaskFailReason::RateLimited
+        );
+        assert_eq!(
+            ApiTaskFailReason::from(TaskFailReason::GenericFailure("boom".to_string())),
+            ApiTaskFailReason::GenericFailure("boom".to_string())
+        );
+    }
+
+    #[test]
+    fn fail_reason_static_str_is_snake_case() {
+        let cases = [
+            (
+                TaskFailReason::ValidationFailed(String::new()),
+                "validation_failed",
+            ),
+            (TaskFailReason::Timeout { duration_secs: 0 }, "timeout"),
+            (TaskFailReason::RateLimited, "rate_limited"),
+            (
+                TaskFailReason::GenericFailure(String::new()),
+                "generic_failure",
+            ),
+        ];
+
+        for (reason, expected) in cases {
+            // Metric labels are derived from this, and the API side must agree.
+            assert_eq!(<&'static str>::from(&reason), expected);
+            assert_eq!(
+                <&'static str>::from(&ApiTaskFailReason::from(reason)),
+                expected
+            );
+        }
+    }
+
+    // ---- TaskResult -> ApiTaskResult ----
+
+    #[test]
+    fn task_result_into_api_truncates_sub_second_duration() {
+        let api = ApiTaskResult::from(
+            TaskResult::failure(
+                fqdn!("Sub.Example.COM."),
+                TaskFailReason::GenericFailure("nope".to_string()),
+                11,
+                TaskKind::Renew,
+            )
+            .with_duration(Duration::from_millis(1_999)),
+        );
+
+        assert_eq!(api.domain, "sub.example.com");
+        assert_eq!(api.task_id, 11);
+        assert_eq!(api.task_kind, ApiTaskKind::Renew);
+        // `as_secs()` truncates rather than rounds.
+        assert_eq!(api.duration_secs, 1);
+        match api.outcome {
+            ApiTaskOutcome::Failure(reason) => assert_eq!(
+                reason,
+                ApiTaskFailReason::GenericFailure("nope".to_string())
+            ),
+            other => panic!("expected Failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn task_result_into_api_keeps_zero_duration() {
+        let api = ApiTaskResult::from(
+            TaskResult::success(
+                fqdn!("example.com"),
+                TaskOutput::Delete,
+                1,
+                TaskKind::Delete,
+            )
+            .with_duration(Duration::from_millis(999)),
+        );
+        assert_eq!(api.duration_secs, 0);
+    }
+
+    #[test]
+    fn api_task_result_survives_candid_roundtrip() {
+        let api = ApiTaskResult::from(
+            TaskResult::success(
+                fqdn!("example.com"),
+                TaskOutput::Issue(issue_output()),
+                123,
+                TaskKind::Issue,
+            )
+            .with_duration(Duration::from_secs(12)),
+        );
+
+        let bytes = candid::encode_one(&api).expect("encode");
+        let back: ApiTaskResult = candid::decode_one(&bytes).expect("decode");
+
+        assert_eq!(back.domain, "example.com");
+        assert_eq!(back.task_id, 123);
+        assert_eq!(back.task_kind, ApiTaskKind::Issue);
+        assert_eq!(back.duration_secs, 12);
+        match back.outcome {
+            ApiTaskOutcome::Success(ApiTaskOutput::Issue(out)) => {
+                assert_eq!(out.enc_cert, b"CERTIFICATE");
+                assert_eq!(out.enc_priv_key, b"PRIVATEKEY");
+                assert_eq!(out.not_before, 1_000);
+                assert_eq!(out.not_after, 2_000);
+                assert_eq!(out.canister_id, principal!("qoctq-giaaa-aaaaa-aaaea-cai"));
+            }
+            other => panic!("expected Success(Issue), got {other:?}"),
+        }
+    }
+}
