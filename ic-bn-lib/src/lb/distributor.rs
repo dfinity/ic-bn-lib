@@ -198,12 +198,21 @@ pub(crate) mod test {
     use std::{collections::HashMap, sync::Mutex, time::Duration};
 
     use async_trait::async_trait;
-    use tokio::task::JoinSet;
+    use tokio::{sync::Notify, task::JoinSet};
 
     use super::*;
 
     #[derive(Debug)]
     pub struct TestExecutor(pub Duration, pub Mutex<HashMap<String, usize>>);
+
+    impl TestExecutor {
+        /// Owned snapshot of the per-backend request counts. Tests take one of these instead
+        /// of holding the `MutexGuard`, which would otherwise be kept alive across a later
+        /// `.await` (clippy::await_holding_lock / clippy::significant_drop_tightening).
+        pub fn counts(&self) -> HashMap<String, usize> {
+            self.1.lock().unwrap().clone()
+        }
+    }
 
     #[async_trait]
     impl ExecutesRequest<String> for TestExecutor {
@@ -293,5 +302,510 @@ pub(crate) mod test {
         assert_eq!(h["bar"], 20);
         assert_eq!(h["baz"], 20);
         drop(h)
+    }
+
+    /// Executor that always fails, naming the backend it was given
+    #[derive(Debug)]
+    pub struct FailingExecutor;
+
+    #[async_trait]
+    impl ExecutesRequest<String> for FailingExecutor {
+        type Error = String;
+        type Request = ();
+        type Response = ();
+
+        async fn execute(
+            &self,
+            backend: &String,
+            _req: Self::Request,
+        ) -> Result<Self::Response, Self::Error> {
+            Err(format!("boom: {backend}"))
+        }
+    }
+
+    /// Executor that parks inside `execute` until the gate is opened, so that
+    /// tests can observe in-flight state deterministically without any sleeping.
+    #[derive(Debug, Default)]
+    pub struct GateExecutor {
+        pub gate: Arc<Notify>,
+        pub started: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ExecutesRequest<String> for GateExecutor {
+        type Error = ();
+        type Request = ();
+        type Response = ();
+
+        async fn execute(
+            &self,
+            _backend: &String,
+            _req: Self::Request,
+        ) -> Result<Self::Response, Self::Error> {
+            // Register as a waiter *before* announcing that we started. `notify_waiters()`
+            // only wakes waiters that are already registered, so announcing first lets a
+            // test that spins on `started` open the gate while this task has not reached
+            // `.await` yet - the wakeup is then lost and the test hangs forever.
+            let gate = self.gate.notified();
+            tokio::pin!(gate);
+            gate.as_mut().enable();
+
+            self.started.fetch_add(1, Ordering::SeqCst);
+            gate.await;
+            Ok(())
+        }
+    }
+
+    pub fn counting_executor() -> Arc<TestExecutor> {
+        Arc::new(TestExecutor(Duration::ZERO, Mutex::new(HashMap::new())))
+    }
+
+    #[test]
+    fn test_strategy_display_and_from_str() {
+        // The `strum(serialize = ...)` overrides are what Display emits
+        assert_eq!(Strategy::WeightedRoundRobin.to_string(), "wrr");
+        assert_eq!(Strategy::LeastOutstandingRequests.to_string(), "lor");
+
+        assert_eq!(
+            "wrr".parse::<Strategy>().unwrap(),
+            Strategy::WeightedRoundRobin
+        );
+        assert_eq!(
+            "lor".parse::<Strategy>().unwrap(),
+            Strategy::LeastOutstandingRequests
+        );
+
+        // Display -> FromStr round-trip
+        for s in [
+            Strategy::WeightedRoundRobin,
+            Strategy::LeastOutstandingRequests,
+        ] {
+            assert_eq!(s.to_string().parse::<Strategy>().unwrap(), s);
+        }
+
+        // The override replaces the variant name and parsing is case-sensitive
+        assert!("WeightedRoundRobin".parse::<Strategy>().is_err());
+        assert!("WRR".parse::<Strategy>().is_err());
+        assert!("".parse::<Strategy>().is_err());
+        assert!("weighted".parse::<Strategy>().is_err());
+    }
+
+    #[test]
+    fn test_strategy_serde() {
+        // Serde uses the snake_case variant names, not the short strum ones
+        assert_eq!(
+            serde_json::to_string(&Strategy::WeightedRoundRobin).unwrap(),
+            r#""weighted_round_robin""#
+        );
+        assert_eq!(
+            serde_json::to_string(&Strategy::LeastOutstandingRequests).unwrap(),
+            r#""least_outstanding_requests""#
+        );
+
+        // Both the canonical names and the short aliases deserialize
+        for (json, expect) in [
+            (r#""weighted_round_robin""#, Strategy::WeightedRoundRobin),
+            (r#""wrr""#, Strategy::WeightedRoundRobin),
+            (
+                r#""least_outstanding_requests""#,
+                Strategy::LeastOutstandingRequests,
+            ),
+            (r#""lor""#, Strategy::LeastOutstandingRequests),
+        ] {
+            assert_eq!(serde_json::from_str::<Strategy>(json).unwrap(), expect);
+            // ...and round-trips back
+            assert_eq!(
+                serde_json::from_str::<Strategy>(&serde_json::to_string(&expect).unwrap()).unwrap(),
+                expect
+            );
+        }
+
+        assert!(serde_json::from_str::<Strategy>(r#""WeightedRoundRobin""#).is_err());
+        assert!(serde_json::from_str::<Strategy>(r#""nope""#).is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "There must be at least one backend")]
+    fn test_distributor_no_backends_panics() {
+        let _ = Distributor::<String>::new(
+            &[],
+            Strategy::WeightedRoundRobin,
+            counting_executor(),
+            Metrics::new(&Registry::new()),
+        );
+    }
+
+    #[test]
+    fn test_backend_new() {
+        #[derive(Clone, Debug)]
+        struct Node(u16);
+
+        impl Display for Node {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "node-{}", self.0)
+            }
+        }
+
+        // The metric label comes from Display, not from Debug
+        let b = Backend::new(Node(42), 7);
+        assert_eq!(b.name, "node-42");
+        assert_eq!(b.weight, 7);
+        assert_eq!(b.inflight.load(Ordering::SeqCst), 0);
+
+        // A cloned backend shares the in-flight counter, which is what lets
+        // the WRR copy inside `Wrr` and the one in `backends` stay in sync.
+        let c = b.clone();
+        b.inflight.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(c.inflight.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_distributor_lor_picks_least_loaded() {
+        let backends = vec![
+            (1, "foo".to_string()),
+            (1, "bar".to_string()),
+            (1, "baz".to_string()),
+        ];
+
+        let d = Distributor::<String>::new(
+            &backends,
+            Strategy::LeastOutstandingRequests,
+            counting_executor(),
+            Metrics::new(&Registry::new()),
+        );
+
+        d.backends[0].inflight.store(5, Ordering::SeqCst);
+        d.backends[1].inflight.store(1, Ordering::SeqCst);
+        d.backends[2].inflight.store(3, Ordering::SeqCst);
+        assert_eq!(d.next_lor().name, "bar");
+
+        // Loading up the previous winner moves the selection
+        d.backends[1].inflight.store(9, Ordering::SeqCst);
+        assert_eq!(d.next_lor().name, "baz");
+
+        // Ties are broken by position, so the choice stays deterministic
+        for b in &d.backends {
+            b.inflight.store(4, Ordering::SeqCst);
+        }
+        assert_eq!(d.next_lor().name, "foo");
+    }
+
+    #[tokio::test]
+    async fn test_distributor_lor_ignores_weights() {
+        let backends = vec![
+            (1, "foo".to_string()),
+            (100, "bar".to_string()),
+            (100, "baz".to_string()),
+        ];
+
+        let executor = counting_executor();
+        let d = Distributor::new(
+            &backends,
+            Strategy::LeastOutstandingRequests,
+            executor.clone(),
+            Metrics::new(&Registry::new()),
+        );
+
+        // Requests issued one at a time always see all counters at zero, so the
+        // tie-break sends everything to the first backend - weights are not consulted.
+        for _ in 0..10 {
+            d.execute(()).await.unwrap();
+        }
+
+        let h = executor.counts();
+        assert_eq!(h["foo"], 10);
+        assert_eq!(h.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_distributor_wrr_single_and_zero_weight_backends() {
+        // A lone backend gets everything, even with a zero weight
+        for w in [0, 3] {
+            let executor = counting_executor();
+            let d = Distributor::new(
+                &[(w, "solo".to_string())],
+                Strategy::WeightedRoundRobin,
+                executor.clone(),
+                Metrics::new(&Registry::new()),
+            );
+
+            for _ in 0..5 {
+                d.execute(()).await.unwrap();
+            }
+
+            assert_eq!(executor.1.lock().unwrap()["solo"], 5);
+        }
+
+        // Next to a positive weight, a zero-weighted backend is never picked
+        let executor = counting_executor();
+        let d = Distributor::new(
+            &[(0, "off".to_string()), (1, "on".to_string())],
+            Strategy::WeightedRoundRobin,
+            executor.clone(),
+            Metrics::new(&Registry::new()),
+        );
+
+        for _ in 0..20 {
+            d.execute(()).await.unwrap();
+        }
+
+        let h = executor.counts();
+        assert_eq!(h["on"], 20);
+        assert!(!h.contains_key("off"));
+    }
+
+    #[tokio::test]
+    async fn test_distributor_wrr_weights_change_on_rebuild() {
+        // Weight/membership changes are applied by building a new Distributor,
+        // which is exactly what BackendRouter does when health state changes.
+        let executor = counting_executor();
+
+        let d = Distributor::new(
+            &[(1, "foo".to_string()), (1, "bar".to_string())],
+            Strategy::WeightedRoundRobin,
+            executor.clone(),
+            Metrics::new(&Registry::new()),
+        );
+        for _ in 0..100 {
+            d.execute(()).await.unwrap();
+        }
+        {
+            let h = executor.counts();
+            assert_eq!(h["foo"], 50);
+            assert_eq!(h["bar"], 50);
+        }
+
+        let d = Distributor::new(
+            &[(1, "foo".to_string()), (3, "bar".to_string())],
+            Strategy::WeightedRoundRobin,
+            executor.clone(),
+            Metrics::new(&Registry::new()),
+        );
+        for _ in 0..100 {
+            d.execute(()).await.unwrap();
+        }
+
+        // The second batch is split 25/75 on top of the even first batch
+        let h = executor.counts();
+        assert_eq!(h["foo"], 75);
+        assert_eq!(h["bar"], 125);
+    }
+
+    #[tokio::test]
+    async fn test_distributor_metrics_success() {
+        let executor = counting_executor();
+        let metrics = Metrics::new(&Registry::new());
+        let d = Distributor::new(
+            &[(1, "foo".to_string())],
+            Strategy::WeightedRoundRobin,
+            executor,
+            metrics.clone(),
+        );
+
+        for _ in 0..3 {
+            d.execute(()).await.unwrap();
+        }
+
+        assert_eq!(metrics.requests.with_label_values(&["foo", "ok"]).get(), 3);
+        assert_eq!(
+            metrics.requests.with_label_values(&["foo", "fail"]).get(),
+            0
+        );
+        assert_eq!(
+            metrics.requests.with_label_values(&["foo", "cancel"]).get(),
+            0
+        );
+        // Every request is timed...
+        assert_eq!(
+            metrics
+                .duration
+                .with_label_values(&["foo"])
+                .get_sample_count(),
+            3
+        );
+        // ...and the in-flight accounting is balanced again
+        assert_eq!(metrics.inflight.with_label_values(&["foo"]).get(), 0);
+        assert_eq!(d.backends[0].inflight.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_distributor_metrics_failure() {
+        let metrics = Metrics::new(&Registry::new());
+        let d: Distributor<String, (), (), String> = Distributor::new(
+            &[(1, "foo".to_string())],
+            Strategy::WeightedRoundRobin,
+            Arc::new(FailingExecutor),
+            metrics.clone(),
+        );
+
+        // The executor error is passed through verbatim
+        assert_eq!(d.execute(()).await.unwrap_err(), "boom: foo");
+
+        assert_eq!(
+            metrics.requests.with_label_values(&["foo", "fail"]).get(),
+            1
+        );
+        assert_eq!(metrics.requests.with_label_values(&["foo", "ok"]).get(), 0);
+        assert_eq!(metrics.inflight.with_label_values(&["foo"]).get(), 0);
+        assert_eq!(d.backends[0].inflight.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn test_distributor_metrics_cancellation() {
+        let executor = Arc::new(GateExecutor::default());
+        let metrics = Metrics::new(&Registry::new());
+        let d: Distributor<String> = Distributor::new(
+            &[(1, "foo".to_string())],
+            Strategy::WeightedRoundRobin,
+            executor.clone(),
+            metrics.clone(),
+        );
+
+        let mut fut = tokio_test::task::spawn(d.execute(()));
+
+        // The request is now in flight, parked inside the executor
+        assert!(fut.poll().is_pending());
+        assert_eq!(executor.started.load(Ordering::SeqCst), 1);
+        assert_eq!(metrics.inflight.with_label_values(&["foo"]).get(), 1);
+        assert_eq!(d.backends[0].inflight.load(Ordering::SeqCst), 1);
+
+        // Dropping the future mid-flight must still release the in-flight slot
+        // and record the request as cancelled (that's what the `defer!` is for)
+        drop(fut);
+        assert_eq!(
+            metrics.requests.with_label_values(&["foo", "cancel"]).get(),
+            1
+        );
+        assert_eq!(metrics.requests.with_label_values(&["foo", "ok"]).get(), 0);
+        assert_eq!(
+            metrics.requests.with_label_values(&["foo", "fail"]).get(),
+            0
+        );
+        assert_eq!(metrics.inflight.with_label_values(&["foo"]).get(), 0);
+        assert_eq!(d.backends[0].inflight.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            metrics
+                .duration
+                .with_label_values(&["foo"])
+                .get_sample_count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_distributor_inflight_tracks_concurrency() {
+        let executor = Arc::new(GateExecutor::default());
+        let metrics = Metrics::new(&Registry::new());
+        let d: Arc<Distributor<String>> = Arc::new(Distributor::new(
+            &[(1, "foo".to_string()), (1, "bar".to_string())],
+            Strategy::WeightedRoundRobin,
+            executor.clone(),
+            metrics.clone(),
+        ));
+
+        let mut js = JoinSet::new();
+        for _ in 0..4 {
+            let d = d.clone();
+            js.spawn(async move { d.execute(()).await });
+        }
+
+        // Wait until all of them are parked in the executor
+        while executor.started.load(Ordering::SeqCst) < 4 {
+            tokio::task::yield_now().await;
+        }
+
+        // WRR keeps handing out backends in turn regardless of the load on them,
+        // so the four in-flight requests are split evenly
+        assert_eq!(metrics.inflight.with_label_values(&["foo"]).get(), 2);
+        assert_eq!(metrics.inflight.with_label_values(&["bar"]).get(), 2);
+        assert_eq!(d.backends[0].inflight.load(Ordering::SeqCst), 2);
+        assert_eq!(d.backends[1].inflight.load(Ordering::SeqCst), 2);
+
+        executor.gate.notify_waiters();
+        assert_eq!(js.join_all().await, vec![Ok(()); 4]);
+
+        for b in ["foo", "bar"] {
+            assert_eq!(metrics.inflight.with_label_values(&[b]).get(), 0);
+            assert_eq!(metrics.requests.with_label_values(&[b, "ok"]).get(), 2);
+        }
+    }
+
+    /// Executor that echoes the backend it was handed together with the request
+    #[derive(Debug)]
+    struct EchoExecutor;
+
+    #[async_trait]
+    impl ExecutesRequest<String> for EchoExecutor {
+        type Error = ();
+        type Request = String;
+        type Response = String;
+
+        async fn execute(
+            &self,
+            backend: &String,
+            req: Self::Request,
+        ) -> Result<Self::Response, Self::Error> {
+            Ok(format!("{backend}:{req}"))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_distributor_passes_request_and_response_through() {
+        let d: Distributor<String, String, String, ()> = Distributor::new(
+            &[(1, "foo".to_string()), (1, "bar".to_string())],
+            Strategy::WeightedRoundRobin,
+            Arc::new(EchoExecutor),
+            Metrics::new(&Registry::new()),
+        );
+
+        // The request body reaches the executor untouched, paired with the
+        // backend WRR picked, and the response comes back verbatim
+        assert_eq!(d.execute("hello".to_string()).await.unwrap(), "foo:hello");
+        assert_eq!(d.execute("world".to_string()).await.unwrap(), "bar:world");
+        // ...including an empty payload
+        assert_eq!(d.execute(String::new()).await.unwrap(), "foo:");
+    }
+
+    #[tokio::test]
+    async fn test_distributor_metrics_are_labelled_per_picked_target() {
+        let executor = counting_executor();
+        let metrics = Metrics::new(&Registry::new());
+        let d = Distributor::new(
+            &[(1, "foo".to_string()), (3, "bar".to_string())],
+            Strategy::WeightedRoundRobin,
+            executor.clone(),
+            metrics.clone(),
+        );
+
+        // Two full WRR periods of 4 picks: 1 x foo + 3 x bar each
+        for _ in 0..8 {
+            d.execute(()).await.unwrap();
+        }
+
+        // Every metric is attributed to the backend that actually ran the
+        // request rather than to a single fixed label
+        assert_eq!(metrics.requests.with_label_values(&["foo", "ok"]).get(), 2);
+        assert_eq!(metrics.requests.with_label_values(&["bar", "ok"]).get(), 6);
+        assert_eq!(
+            metrics
+                .duration
+                .with_label_values(&["foo"])
+                .get_sample_count(),
+            2
+        );
+        assert_eq!(
+            metrics
+                .duration
+                .with_label_values(&["bar"])
+                .get_sample_count(),
+            6
+        );
+        for b in ["foo", "bar"] {
+            assert_eq!(metrics.inflight.with_label_values(&[b]).get(), 0);
+        }
+
+        let h = executor.counts();
+        assert_eq!(h["foo"], 2);
+        assert_eq!(h["bar"], 6);
     }
 }

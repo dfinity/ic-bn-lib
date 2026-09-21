@@ -381,4 +381,352 @@ mod test {
         let resp = shedder.call(Duration::ZERO).await.unwrap();
         assert!(matches!(resp, ShedResponse::Inner(_)));
     }
+
+    #[derive(Clone, Debug, Default)]
+    struct StubVals {
+        cpu: f64,
+        memory: f64,
+        load: (f64, f64, f64),
+        /// Which measurement should fail: 0 - CPU, 1 - memory, 2 - load average
+        fail: Option<u8>,
+        /// Number of measurement rounds started
+        rounds: usize,
+    }
+
+    #[derive(Clone, Debug)]
+    struct StubSys(Arc<Mutex<StubVals>>);
+
+    impl StubSys {
+        fn new() -> Self {
+            Self(Arc::new(Mutex::new(StubVals::default())))
+        }
+
+        fn set(&self, f: impl FnOnce(&mut StubVals)) {
+            f(&mut self.0.lock().unwrap());
+        }
+
+        fn rounds(&self) -> usize {
+            self.0.lock().unwrap().rounds
+        }
+    }
+
+    #[async_trait]
+    impl GetsSystemInfo for StubSys {
+        async fn cpu_usage(&self) -> Result<f64, Error> {
+            let mut v = self.0.lock().unwrap();
+            v.rounds += 1;
+            if v.fail == Some(0) {
+                return Err(anyhow::anyhow!("cpu boom").into());
+            }
+            Ok(v.cpu)
+        }
+
+        fn memory_usage(&self) -> Result<f64, Error> {
+            let v = self.0.lock().unwrap();
+            if v.fail == Some(1) {
+                return Err(anyhow::anyhow!("memory boom").into());
+            }
+            Ok(v.memory)
+        }
+
+        fn load_avg(&self) -> Result<(f64, f64, f64), Error> {
+            let v = self.0.lock().unwrap();
+            if v.fail == Some(2) {
+                return Err(anyhow::anyhow!("loadavg boom").into());
+            }
+            Ok(v.load)
+        }
+    }
+
+    /// Options with only the CPU threshold set
+    const fn cpu_opts(cpu: f64) -> SystemOptions {
+        SystemOptions {
+            cpu: Some(cpu),
+            memory: None,
+            loadavg_1: None,
+            loadavg_5: None,
+            loadavg_15: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_system_thresholds_are_strict() {
+        let sys = StubSys::new();
+        let opts = SystemOptions {
+            cpu: Some(0.5),
+            memory: Some(0.8),
+            loadavg_1: Some(4.0),
+            loadavg_5: None,
+            loadavg_15: None,
+        };
+        // EWMA alpha of 1.0 makes the average report exactly the last measurement
+        let state = State::new(1.0, opts, sys.clone());
+
+        // Sitting exactly at the thresholds is not an overload.
+        // The 5/15min load averages are huge, but they have no threshold set.
+        sys.set(|v| {
+            v.cpu = 0.5;
+            v.memory = 0.8;
+            v.load = (4.0, 1000.0, 1000.0);
+        });
+        state.measure().await.unwrap();
+        assert_eq!(state.is_overloaded(), None);
+
+        // The tiniest bit above is
+        sys.set(|v| v.cpu = 0.5 + f64::EPSILON);
+        state.measure().await.unwrap();
+        assert_eq!(state.is_overloaded(), Some(ShedReason::CPU));
+
+        sys.set(|v| {
+            v.cpu = 0.5;
+            v.memory = 0.80001;
+        });
+        state.measure().await.unwrap();
+        assert_eq!(state.is_overloaded(), Some(ShedReason::Memory));
+
+        sys.set(|v| {
+            v.memory = 0.8;
+            v.load.0 = 4.00001;
+        });
+        state.measure().await.unwrap();
+        assert_eq!(state.is_overloaded(), Some(ShedReason::LoadAvg));
+
+        sys.set(|v| v.load.0 = 4.0);
+        state.measure().await.unwrap();
+        assert_eq!(state.is_overloaded(), None);
+    }
+
+    #[tokio::test]
+    async fn test_system_unset_thresholds_never_shed() {
+        let sys = StubSys::new();
+        let opts = SystemOptions {
+            cpu: None,
+            memory: None,
+            loadavg_1: None,
+            loadavg_5: None,
+            loadavg_15: None,
+        };
+        let state = State::new(1.0, opts, sys.clone());
+
+        sys.set(|v| {
+            v.cpu = 1.0;
+            v.memory = 1.0;
+            v.load = (1000.0, 1000.0, 1000.0);
+        });
+        state.measure().await.unwrap();
+        assert_eq!(state.is_overloaded(), None);
+    }
+
+    #[tokio::test]
+    async fn test_system_evaluate_precedence() {
+        let sys = StubSys::new();
+        let opts = SystemOptions {
+            cpu: Some(0.5),
+            memory: Some(0.5),
+            loadavg_1: Some(0.5),
+            loadavg_5: Some(0.5),
+            loadavg_15: Some(0.5),
+        };
+        let state = State::new(1.0, opts, sys.clone());
+
+        // Everything is over its threshold -> CPU is reported
+        sys.set(|v| {
+            v.cpu = 1.0;
+            v.memory = 1.0;
+            v.load = (1.0, 1.0, 1.0);
+        });
+        state.measure().await.unwrap();
+        assert_eq!(state.is_overloaded(), Some(ShedReason::CPU));
+
+        // CPU is fine -> memory takes precedence over the load averages
+        sys.set(|v| v.cpu = 0.0);
+        state.measure().await.unwrap();
+        assert_eq!(state.is_overloaded(), Some(ShedReason::Memory));
+
+        sys.set(|v| v.memory = 0.0);
+        state.measure().await.unwrap();
+        assert_eq!(state.is_overloaded(), Some(ShedReason::LoadAvg));
+
+        // Only the 15min average is over the threshold
+        sys.set(|v| v.load = (0.0, 0.0, 1.0));
+        state.measure().await.unwrap();
+        assert_eq!(state.is_overloaded(), Some(ShedReason::LoadAvg));
+    }
+
+    #[tokio::test]
+    async fn test_system_ewma_smooths_spikes() {
+        let sys = StubSys::new();
+        let state = State::new(0.5, cpu_opts(0.5), sys.clone());
+
+        // The first measurement seeds the average
+        state.measure().await.unwrap();
+        assert_eq!(state.inner.read().unwrap().cpu.get(), Some(0.0));
+        assert_eq!(state.is_overloaded(), None);
+
+        // A single spike only moves the average halfway - exactly onto the
+        // threshold, which is not enough to start shedding
+        sys.set(|v| v.cpu = 1.0);
+        state.measure().await.unwrap();
+        assert_eq!(state.inner.read().unwrap().cpu.get(), Some(0.5));
+        assert_eq!(state.is_overloaded(), None);
+
+        // A sustained spike does
+        state.measure().await.unwrap();
+        assert_eq!(state.inner.read().unwrap().cpu.get(), Some(0.75));
+        assert_eq!(state.is_overloaded(), Some(ShedReason::CPU));
+
+        // ... and it recovers once the load goes away
+        sys.set(|v| v.cpu = 0.0);
+        state.measure().await.unwrap();
+        assert_eq!(state.inner.read().unwrap().cpu.get(), Some(0.375));
+        assert_eq!(state.is_overloaded(), None);
+    }
+
+    #[tokio::test]
+    async fn test_system_shed_decision_is_a_snapshot() {
+        let sys = StubSys::new();
+        let state = Arc::new(State::new(1.0, cpu_opts(0.5), sys.clone()));
+        let mut shedder = SystemLoadShedder::new(StubService, state.clone());
+
+        // Nothing was measured yet -> no shedding
+        assert_eq!(
+            shedder.call(Duration::ZERO).await.unwrap(),
+            ShedResponse::Inner(())
+        );
+
+        sys.set(|v| v.cpu = 1.0);
+        state.measure().await.unwrap();
+        assert_eq!(
+            shedder.call(Duration::ZERO).await.unwrap(),
+            ShedResponse::Overload(ShedReason::CPU)
+        );
+
+        // The load is gone, but requests keep being shed until the next measurement
+        sys.set(|v| v.cpu = 0.0);
+        assert_eq!(
+            shedder.call(Duration::ZERO).await.unwrap(),
+            ShedResponse::Overload(ShedReason::CPU)
+        );
+
+        state.measure().await.unwrap();
+        assert_eq!(
+            shedder.call(Duration::ZERO).await.unwrap(),
+            ShedResponse::Inner(())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_system_measure_errors_keep_the_last_verdict() {
+        let sys = StubSys::new();
+        let state = State::new(1.0, cpu_opts(0.5), sys.clone());
+
+        for (which, msg) in [(0u8, "cpu boom"), (1, "memory boom"), (2, "loadavg boom")] {
+            sys.set(|v| v.fail = Some(which));
+            let err = state.measure().await.unwrap_err();
+            assert!(err.to_string().contains(msg), "{err}");
+            // Nothing was recorded at all
+            assert_eq!(state.is_overloaded(), None);
+            assert_eq!(state.inner.read().unwrap().cpu.get(), None);
+        }
+
+        // Get overloaded and then start failing: the last verdict sticks around
+        sys.set(|v| {
+            v.fail = None;
+            v.cpu = 1.0;
+        });
+        state.measure().await.unwrap();
+        assert_eq!(state.is_overloaded(), Some(ShedReason::CPU));
+
+        sys.set(|v| {
+            v.fail = Some(1);
+            v.cpu = 0.0;
+        });
+        assert!(state.measure().await.is_err());
+        assert_eq!(state.is_overloaded(), Some(ShedReason::CPU));
+        assert_eq!(state.inner.read().unwrap().cpu.get(), Some(1.0));
+    }
+
+    // No sockets involved, so the paused clock is safe here
+    #[tokio::test(start_paused = true)]
+    async fn test_system_run_measures_every_second() {
+        let sys = StubSys::new();
+        sys.set(|v| v.cpu = 1.0);
+        let state = Arc::new(State::new(1.0, cpu_opts(0.5), sys.clone()));
+
+        let bg = tokio::spawn({
+            let state = state.clone();
+            async move { state.run().await }
+        });
+
+        // Measurements at 0s, 1s, 2s and 3s
+        tokio::time::sleep(Duration::from_millis(3500)).await;
+        assert_eq!(sys.rounds(), 4);
+        assert_eq!(state.is_overloaded(), Some(ShedReason::CPU));
+
+        bg.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_system_run_survives_measurement_errors() {
+        let sys = StubSys::new();
+        sys.set(|v| {
+            v.cpu = 1.0;
+            v.fail = Some(0);
+        });
+        let state = Arc::new(State::new(1.0, cpu_opts(0.5), sys.clone()));
+
+        let bg = tokio::spawn({
+            let state = state.clone();
+            async move { state.run().await }
+        });
+
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        assert_eq!(sys.rounds(), 3);
+        assert_eq!(state.is_overloaded(), None);
+
+        // The loop is still running and picks the measurements up once they work
+        sys.set(|v| v.fail = None);
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        assert_eq!(sys.rounds(), 4);
+        assert_eq!(state.is_overloaded(), Some(ShedReason::CPU));
+
+        bg.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_system_layer() {
+        let sys = StubSys::new();
+        sys.set(|v| v.cpu = 1.0);
+        let layer = SystemLoadShedderLayer::new(1.0, cpu_opts(0.5), sys.clone());
+        let mut shedder = layer.layer(StubService);
+
+        // The spawned measurement task didn't run yet
+        assert_eq!(sys.rounds(), 0);
+        assert_eq!(
+            shedder.call(Duration::ZERO).await.unwrap(),
+            ShedResponse::Inner(())
+        );
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(sys.rounds(), 1);
+        assert_eq!(
+            shedder.call(Duration::ZERO).await.unwrap(),
+            ShedResponse::Overload(ShedReason::CPU)
+        );
+    }
+
+    #[test]
+    fn test_real_system_info() {
+        let sys = SystemInfo::default();
+
+        // Some memory is always in use and some is always free
+        let mem = sys.memory_usage().expect("unable to measure memory usage");
+        assert!(mem > 0.0 && mem < 1.0, "memory usage out of range: {mem}");
+
+        let (l1, l5, l15) = sys.load_avg().expect("unable to measure load average");
+        let check = |v: f64| assert!(v.is_finite() && v >= 0.0, "bogus load average: {v}");
+        check(l1);
+        check(l5);
+        check(l15);
+    }
 }

@@ -482,3 +482,1037 @@ impl StatisticKind {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use std::collections::BTreeMap;
+
+    use prost::{Message, bytes::Bytes};
+
+    use super::*;
+
+    /// Encodes the message, checks that `encoded_len()` agrees with the produced
+    /// bytes, decodes it back and makes sure nothing was lost on the way.
+    fn roundtrip<T: Message + Default + PartialEq + std::fmt::Debug>(msg: &T) -> T {
+        let buf = msg.encode_to_vec();
+        assert_eq!(
+            buf.len(),
+            msg.encoded_len(),
+            "encoded_len() disagrees with the encoding of {msg:?}"
+        );
+        let decoded = T::decode(buf.as_slice()).expect("unable to decode own encoding");
+        assert_eq!(&decoded, msg, "round trip changed the message");
+        decoded
+    }
+
+    /// Protobuf field key (tag + wire type) as it appears on the wire.
+    fn key(tag: u32, wire_type: u32) -> Vec<u8> {
+        let mut v = (tag << 3) | wire_type;
+        let mut out = vec![];
+        loop {
+            if v < 0x80 {
+                out.push(v as u8);
+                return out;
+            }
+            out.push(((v & 0x7f) | 0x80) as u8);
+            v >>= 7;
+        }
+    }
+
+    fn int(v: i64) -> Value {
+        Value {
+            kind: Some(value::Kind::Integer(v)),
+        }
+    }
+
+    fn bytes(v: &str) -> Value {
+        Value {
+            kind: Some(value::Kind::RawBytes(Bytes::copy_from_slice(v.as_bytes()))),
+        }
+    }
+
+    fn map_fields(v: &Value) -> &BTreeMap<String, Value> {
+        match v.kind.as_ref().expect("value has no kind") {
+            value::Kind::Map(m) => &m.fields,
+            x => panic!("expected a map, got {x:?}"),
+        }
+    }
+
+    fn array_items(v: &Value) -> &[Value] {
+        match v.kind.as_ref().expect("value has no kind") {
+            value::Kind::Array(a) => &a.items,
+            x => panic!("expected an array, got {x:?}"),
+        }
+    }
+
+    #[test]
+    fn test_key_helper() {
+        // Sanity-check the helper itself against hand-computed keys.
+        assert_eq!(key(1, 2), vec![10]);
+        assert_eq!(key(4, 0), vec![32]);
+        assert_eq!(key(9, 0), vec![72]);
+        // Tags >= 16 need two bytes
+        assert_eq!(key(16, 2), vec![0x82, 0x01]);
+    }
+
+    #[test]
+    fn test_value_null_enum() {
+        assert_eq!(ValueNull::NullValue as i32, 0);
+        assert_eq!(ValueNull::NullValue.as_str_name(), "NULL_VALUE");
+        assert_eq!(
+            ValueNull::from_str_name("NULL_VALUE"),
+            Some(ValueNull::NullValue)
+        );
+        assert_eq!(
+            ValueNull::from_str_name(ValueNull::NullValue.as_str_name()),
+            Some(ValueNull::NullValue)
+        );
+        // The names are the ProtoBuf ones, verbatim
+        assert_eq!(ValueNull::from_str_name("null_value"), None);
+        assert_eq!(ValueNull::from_str_name("NullValue"), None);
+        assert_eq!(ValueNull::from_str_name("Null"), None);
+        assert_eq!(ValueNull::from_str_name(""), None);
+
+        assert_eq!(ValueNull::try_from(0).unwrap(), ValueNull::NullValue);
+        assert!(ValueNull::try_from(1).is_err());
+        assert!(ValueNull::try_from(-1).is_err());
+    }
+
+    #[test]
+    fn test_statistic_kind_enum() {
+        assert_eq!(StatisticKind::Histogram as i32, 0);
+        assert_eq!(StatisticKind::Summary as i32, 1);
+        assert_eq!(StatisticKind::Histogram.as_str_name(), "Histogram");
+        assert_eq!(StatisticKind::Summary.as_str_name(), "Summary");
+
+        for v in [StatisticKind::Histogram, StatisticKind::Summary] {
+            assert_eq!(StatisticKind::from_str_name(v.as_str_name()), Some(v));
+            assert_eq!(StatisticKind::try_from(v as i32).unwrap(), v);
+        }
+
+        assert_eq!(StatisticKind::from_str_name("histogram"), None);
+        assert_eq!(StatisticKind::from_str_name("SUMMARY"), None);
+        assert_eq!(StatisticKind::from_str_name(""), None);
+        assert!(StatisticKind::try_from(2).is_err());
+        assert!(StatisticKind::try_from(-1).is_err());
+        // Ordering follows the numeric values
+        assert!(StatisticKind::Histogram < StatisticKind::Summary);
+    }
+
+    #[test]
+    fn test_metric_kind_enum() {
+        assert_eq!(metric::Kind::Incremental as i32, 0);
+        assert_eq!(metric::Kind::Absolute as i32, 1);
+        assert_eq!(metric::Kind::Incremental.as_str_name(), "Incremental");
+        assert_eq!(metric::Kind::Absolute.as_str_name(), "Absolute");
+
+        for v in [metric::Kind::Incremental, metric::Kind::Absolute] {
+            assert_eq!(metric::Kind::from_str_name(v.as_str_name()), Some(v));
+            assert_eq!(metric::Kind::try_from(v as i32).unwrap(), v);
+        }
+
+        assert_eq!(metric::Kind::from_str_name("incremental"), None);
+        assert_eq!(metric::Kind::from_str_name("ABSOLUTE"), None);
+        assert_eq!(metric::Kind::from_str_name(""), None);
+        assert!(metric::Kind::try_from(2).is_err());
+    }
+
+    #[test]
+    fn test_value_kind_wire_format() {
+        // Every `Value` variant and the tag/wire-type it must occupy. These numbers
+        // are part of the Vector wire protocol and cannot be changed.
+        let cases = vec![
+            (value::Kind::RawBytes(Bytes::from_static(b"x")), 1, 2),
+            (
+                value::Kind::Timestamp(prost_types::Timestamp {
+                    seconds: 1,
+                    nanos: 2,
+                }),
+                2,
+                2,
+            ),
+            (value::Kind::Integer(1), 4, 0),
+            (value::Kind::Float(1.0), 5, 1),
+            (value::Kind::Boolean(true), 6, 0),
+            (
+                value::Kind::Map(ValueMap {
+                    fields: BTreeMap::from([("a".to_owned(), int(1))]),
+                }),
+                7,
+                2,
+            ),
+            (
+                value::Kind::Array(ValueArray {
+                    items: vec![int(1)],
+                }),
+                8,
+                2,
+            ),
+            (value::Kind::Null(ValueNull::NullValue as i32), 9, 0),
+        ];
+
+        for (kind, tag, wire_type) in cases {
+            let v = Value {
+                kind: Some(kind.clone()),
+            };
+            let buf = v.encode_to_vec();
+            assert!(
+                buf.starts_with(&key(tag, wire_type)),
+                "{kind:?} should be encoded with tag {tag}/wire type {wire_type}, got {buf:?}"
+            );
+            roundtrip(&v);
+        }
+    }
+
+    #[test]
+    fn test_value_missing_vs_null() {
+        // A `Value` without a kind carries nothing on the wire...
+        let empty = Value::default();
+        assert_eq!(empty.kind, None);
+        assert_eq!(empty.encoded_len(), 0);
+        assert!(empty.encode_to_vec().is_empty());
+        assert_eq!(Value::decode([].as_slice()).unwrap(), empty);
+
+        // ...while an explicit null is a present value, even though the enum
+        // value behind it is zero.
+        let null = Value {
+            kind: Some(value::Kind::Null(ValueNull::NullValue as i32)),
+        };
+        assert_ne!(empty, null);
+        assert_eq!(null.encode_to_vec(), vec![72, 0]);
+        roundtrip(&null);
+    }
+
+    #[test]
+    fn test_value_null_preserves_unknown_enum_value() {
+        // The field is a raw i32, so an out-of-range enum value survives decoding
+        // even though it cannot be converted to `ValueNull`.
+        let v = Value {
+            kind: Some(value::Kind::Null(7)),
+        };
+        assert!(ValueNull::try_from(7).is_err());
+        assert_eq!(roundtrip(&v).kind, Some(value::Kind::Null(7)));
+    }
+
+    #[test]
+    fn test_value_integer_edges() {
+        for i in [0, 1, -1, 127, 128, i64::MIN, i64::MAX] {
+            roundtrip(&int(i));
+        }
+
+        // Inside a oneof even the zero value is written out
+        assert_eq!(int(0).encode_to_vec(), vec![32, 0]);
+        // int64 (not sint64) means negative numbers always take the full 10 bytes
+        assert_eq!(int(-1).encoded_len(), 11);
+        assert_eq!(int(i64::MIN).encoded_len(), 11);
+        assert_eq!(int(i64::MAX).encoded_len(), 10);
+        assert_eq!(int(1).encoded_len(), 2);
+    }
+
+    #[test]
+    fn test_value_float_edges() {
+        for f in [
+            0.0,
+            -0.0,
+            0.5,
+            -1.5,
+            f64::MAX,
+            f64::MIN,
+            f64::MIN_POSITIVE,
+            f64::EPSILON,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            let v = Value {
+                kind: Some(value::Kind::Float(f)),
+            };
+            // 1 byte of key + 8 bytes of double
+            assert_eq!(v.encoded_len(), 9, "{f} should be encoded as a double");
+            let Some(value::Kind::Float(g)) = roundtrip(&v).kind else {
+                panic!("decoded into a different kind");
+            };
+            // Bitwise comparison so that the sign of zero is checked too
+            assert_eq!(
+                g.to_bits(),
+                f.to_bits(),
+                "{f} did not survive the round trip"
+            );
+        }
+
+        // NaN is not equal to itself, so it needs a dedicated check
+        let v = Value {
+            kind: Some(value::Kind::Float(f64::NAN)),
+        };
+        match Value::decode(v.encode_to_vec().as_slice()).unwrap().kind {
+            Some(value::Kind::Float(g)) => assert!(g.is_nan()),
+            x => panic!("expected a float, got {x:?}"),
+        }
+    }
+
+    #[test]
+    fn test_value_raw_bytes() {
+        for b in [
+            &b""[..],
+            &b"\x00"[..],
+            &[0xff, 0xfe, 0x00, 0x80][..],
+            "h\u{e9}llo \u{1f600}".as_bytes(),
+        ] {
+            let v = Value {
+                kind: Some(value::Kind::RawBytes(Bytes::copy_from_slice(b))),
+            };
+            let Some(value::Kind::RawBytes(got)) = roundtrip(&v).kind else {
+                panic!("decoded into a different kind");
+            };
+            assert_eq!(&got[..], b);
+        }
+
+        // Empty bytes are a present value, not a missing one
+        assert_eq!(bytes("").encode_to_vec(), vec![10, 0]);
+
+        // The length prefix counts bytes, not characters
+        let v = bytes("h\u{e9}llo");
+        assert_eq!(v.encode_to_vec()[1], 6);
+        assert_eq!(v.encoded_len(), 8);
+    }
+
+    #[test]
+    fn test_value_timestamp() {
+        for (seconds, nanos) in [
+            (0, 0),
+            (1, 1),
+            (-1, 500_000_000),
+            (1_700_000_000, 999_999_999),
+            (i64::MIN, 0),
+            (i64::MAX, i32::MAX),
+        ] {
+            roundtrip(&Value {
+                kind: Some(value::Kind::Timestamp(prost_types::Timestamp {
+                    seconds,
+                    nanos,
+                })),
+            });
+        }
+
+        // An all-zero timestamp is still an empty submessage, not an absent one
+        let v = Value {
+            kind: Some(value::Kind::Timestamp(prost_types::Timestamp::default())),
+        };
+        assert_eq!(v.encode_to_vec(), vec![18, 0]);
+        assert_eq!(roundtrip(&v), v);
+    }
+
+    #[test]
+    fn test_value_map_sorted_and_deterministic() {
+        let mk = |keys: [&str; 3]| ValueMap {
+            fields: keys.iter().map(|k| ((*k).to_owned(), int(1))).collect(),
+        };
+
+        // The insertion order must not leak into the encoding
+        assert_eq!(
+            mk(["a", "b", "c"]).encode_to_vec(),
+            mk(["c", "a", "b"]).encode_to_vec()
+        );
+        assert_eq!(
+            mk(["b", "c", "a"]).encode_to_vec(),
+            mk(["c", "b", "a"]).encode_to_vec()
+        );
+
+        // ...and the entries come out in key order: entry len 7, key len 1, "a"
+        let buf = mk(["c", "a", "b"]).encode_to_vec();
+        assert!(buf.starts_with(&[10, 7, 10, 1, b'a']), "got {buf:?}");
+
+        let decoded = ValueMap::decode(buf.as_slice()).unwrap();
+        assert_eq!(
+            decoded
+                .fields
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn test_value_map_and_array_empty_and_nested() {
+        // Empty containers are still present values
+        let empty_map = Value {
+            kind: Some(value::Kind::Map(ValueMap::default())),
+        };
+        assert_eq!(empty_map.encode_to_vec(), vec![58, 0]);
+        assert!(map_fields(&roundtrip(&empty_map)).is_empty());
+
+        let empty_array = Value {
+            kind: Some(value::Kind::Array(ValueArray::default())),
+        };
+        assert_eq!(empty_array.encode_to_vec(), vec![66, 0]);
+        assert!(array_items(&roundtrip(&empty_array)).is_empty());
+
+        // An empty map and an empty array are different things
+        assert_ne!(empty_map, empty_array);
+
+        // Arrays keep their order and duplicates, unlike maps
+        let arr = Value {
+            kind: Some(value::Kind::Array(ValueArray {
+                items: vec![int(2), int(1), int(2), Value::default()],
+            })),
+        };
+        let items = array_items(&roundtrip(&arr)).to_vec();
+        assert_eq!(items, vec![int(2), int(1), int(2), Value::default()]);
+
+        // Map -> array -> map nesting
+        let nested = Value {
+            kind: Some(value::Kind::Map(ValueMap {
+                fields: BTreeMap::from([(
+                    "outer".to_owned(),
+                    Value {
+                        kind: Some(value::Kind::Array(ValueArray {
+                            items: vec![Value {
+                                kind: Some(value::Kind::Map(ValueMap {
+                                    fields: BTreeMap::from([("inner".to_owned(), bytes("deep"))]),
+                                })),
+                            }],
+                        })),
+                    },
+                )]),
+            })),
+        };
+        let decoded = roundtrip(&nested);
+        let inner = &array_items(&map_fields(&decoded)["outer"])[0];
+        assert_eq!(map_fields(inner)["inner"], bytes("deep"));
+    }
+
+    #[test]
+    fn test_event_array_variants() {
+        let log = Log {
+            value: Some(int(1)),
+            ..Default::default()
+        };
+        let metric = Metric {
+            name: "m".to_owned(),
+            ..Default::default()
+        };
+        let trace = Trace {
+            fields: BTreeMap::from([("t".to_owned(), int(1))]),
+            ..Default::default()
+        };
+
+        let cases = vec![
+            (
+                event_array::Events::Logs(LogArray {
+                    logs: vec![log.clone(), log.clone()],
+                }),
+                1,
+            ),
+            (
+                event_array::Events::Metrics(MetricArray {
+                    metrics: vec![metric],
+                }),
+                2,
+            ),
+            (
+                event_array::Events::Traces(TraceArray {
+                    traces: vec![trace],
+                }),
+                3,
+            ),
+        ];
+
+        for (events, tag) in cases {
+            let ev = EventArray {
+                events: Some(events.clone()),
+            };
+            assert!(
+                ev.encode_to_vec().starts_with(&key(tag, 2)),
+                "{events:?} should use tag {tag}"
+            );
+            roundtrip(&ev);
+        }
+
+        // A repeated field keeps every element, duplicates included
+        let ev = EventArray {
+            events: Some(event_array::Events::Logs(LogArray {
+                logs: vec![log.clone(), log],
+            })),
+        };
+        let Some(event_array::Events::Logs(logs)) = roundtrip(&ev).events else {
+            panic!("decoded into a different variant");
+        };
+        assert_eq!(logs.logs.len(), 2);
+
+        // And an absent oneof stays absent
+        assert_eq!(EventArray::default().encoded_len(), 0);
+        assert_eq!(EventArray::decode([].as_slice()).unwrap().events, None);
+    }
+
+    #[test]
+    fn test_event_wrapper_variants() {
+        let cases = vec![
+            (
+                event_wrapper::Event::Log(Log {
+                    value: Some(bytes("x")),
+                    ..Default::default()
+                }),
+                1,
+            ),
+            (
+                event_wrapper::Event::Metric(Metric {
+                    name: "n".to_owned(),
+                    ..Default::default()
+                }),
+                2,
+            ),
+            (event_wrapper::Event::Trace(Trace::default()), 3),
+        ];
+
+        for (event, tag) in cases {
+            let ev = EventWrapper {
+                event: Some(event.clone()),
+            };
+            assert!(
+                ev.encode_to_vec().starts_with(&key(tag, 2)),
+                "{event:?} should use tag {tag}"
+            );
+            roundtrip(&ev);
+        }
+
+        assert_eq!(EventWrapper::default().encoded_len(), 0);
+    }
+
+    #[test]
+    fn test_log_fields() {
+        let meta = Metadata {
+            value: Some(bytes("meta")),
+            datadog_origin_metadata: Some(DatadogOriginMetadata {
+                origin_product: Some(1),
+                origin_category: None,
+                origin_service: Some(0),
+            }),
+            source_id: Some("sid".to_owned()),
+            source_type: Some(String::new()),
+            upstream_id: Some(OutputId {
+                component: "c".to_owned(),
+                port: None,
+            }),
+            secrets: Some(Secrets {
+                entries: BTreeMap::from([("k".to_owned(), "v".to_owned())]),
+            }),
+        };
+
+        let log = Log {
+            fields: BTreeMap::from([(".".to_owned(), int(1)), ("b".to_owned(), bytes("x"))]),
+            value: Some(bytes("value")),
+            metadata: Some(bytes("deprecated")),
+            metadata_full: Some(meta),
+            ..Default::default()
+        };
+        let decoded = roundtrip(&log);
+        assert_eq!(decoded.fields.len(), 2);
+        assert_eq!(decoded.fields["."], int(1));
+        assert_eq!(decoded.value, Some(bytes("value")));
+
+        // The optional strings keep the empty-vs-absent distinction
+        let meta = decoded.metadata_full.unwrap();
+        assert_eq!(meta.source_type.as_deref(), Some(""));
+        assert_eq!(meta.upstream_id.unwrap().port, None);
+        let dd = meta.datadog_origin_metadata.unwrap();
+        assert_eq!(dd.origin_product, Some(1));
+        assert_eq!(dd.origin_category, None);
+        // An explicit zero is not the same as a missing value
+        assert_eq!(dd.origin_service, Some(0));
+
+        // The deprecated `metadata` and the current `metadata_full` are separate fields
+        let deprecated_only = Log {
+            metadata: Some(int(1)),
+            ..Default::default()
+        };
+        let full_only = Log {
+            metadata_full: Some(Metadata {
+                value: Some(int(1)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(deprecated_only.encode_to_vec().starts_with(&key(3, 2)));
+        assert!(full_only.encode_to_vec().starts_with(&key(4, 2)));
+        assert_ne!(deprecated_only.encode_to_vec(), full_only.encode_to_vec());
+        assert_eq!(roundtrip(&deprecated_only).metadata_full, None);
+        assert_eq!(roundtrip(&full_only).metadata, None);
+
+        assert_eq!(Log::default().encoded_len(), 0);
+    }
+
+    #[test]
+    fn test_optional_scalars_empty_vs_absent() {
+        // TagValue
+        assert_eq!(TagValue { value: None }.encoded_len(), 0);
+        let empty = TagValue {
+            value: Some(String::new()),
+        };
+        assert_eq!(empty.encode_to_vec(), vec![10, 0]);
+        assert_eq!(roundtrip(&empty).value.as_deref(), Some(""));
+        assert_eq!(roundtrip(&TagValue { value: None }).value, None);
+        assert_ne!(TagValue { value: None }, empty);
+
+        // OutputId: `component` is a plain string, `port` an optional one
+        let id = OutputId {
+            component: String::new(),
+            port: Some(String::new()),
+        };
+        assert_eq!(id.encode_to_vec(), vec![18, 0]);
+        assert_eq!(roundtrip(&id).port.as_deref(), Some(""));
+        assert_eq!(OutputId::default().encoded_len(), 0);
+
+        // Secrets keeps empty values around
+        let secrets = Secrets {
+            entries: BTreeMap::from([
+                ("k".to_owned(), String::new()),
+                ("z".to_owned(), "v".to_owned()),
+            ]),
+        };
+        let decoded = roundtrip(&secrets);
+        assert_eq!(decoded.entries["k"], "");
+        assert_eq!(decoded.entries["z"], "v");
+        assert_eq!(Secrets::default().encoded_len(), 0);
+    }
+
+    #[test]
+    fn test_metric_all_fields() {
+        let m = Metric {
+            name: "requests".to_owned(),
+            timestamp: Some(prost_types::Timestamp {
+                seconds: 1_700_000_000,
+                nanos: 123,
+            }),
+            tags_v1: BTreeMap::from([("a".to_owned(), "1".to_owned())]),
+            tags_v2: BTreeMap::from([(
+                "b".to_owned(),
+                TagValues {
+                    values: vec![
+                        TagValue {
+                            value: Some("x".to_owned()),
+                        },
+                        TagValue { value: None },
+                    ],
+                },
+            )]),
+            kind: metric::Kind::Absolute as i32,
+            namespace: "ns".to_owned(),
+            interval_ms: 1000,
+            metadata: Some(int(1)),
+            metadata_full: Some(Metadata::default()),
+            value: Some(metric::Value::Counter(Counter { value: 1.5 })),
+        };
+
+        let decoded = roundtrip(&m);
+        assert_eq!(decoded.name, "requests");
+        assert_eq!(decoded.kind, metric::Kind::Absolute as i32);
+        assert_eq!(decoded.interval_ms, 1000);
+        assert_eq!(decoded.tags_v1["a"], "1");
+        assert_eq!(decoded.tags_v2["b"].values.len(), 2);
+        assert_eq!(decoded.tags_v2["b"].values[1].value, None);
+        // tags_v2 lives on tag 20, which needs a two-byte key
+        let tags_only = Metric {
+            tags_v2: m.tags_v2.clone(),
+            ..Default::default()
+        };
+        assert_eq!(key(20, 2), vec![0xa2, 0x01]);
+        assert!(
+            tags_only.encode_to_vec().starts_with(&key(20, 2)),
+            "got {:?}",
+            tags_only.encode_to_vec()
+        );
+        roundtrip(&tags_only);
+
+        // An unknown `kind` is kept as a raw i32
+        let m = Metric {
+            kind: 42,
+            ..Default::default()
+        };
+        assert!(metric::Kind::try_from(42).is_err());
+        assert_eq!(roundtrip(&m).kind, 42);
+
+        assert_eq!(Metric::default().encoded_len(), 0);
+    }
+
+    #[test]
+    fn test_metric_value_variants() {
+        let cases = vec![
+            (metric::Value::Counter(Counter { value: 1.0 }), 5),
+            (metric::Value::Gauge(Gauge { value: -1.0 }), 6),
+            (
+                metric::Value::Set(Set {
+                    values: vec!["a".to_owned(), String::new(), "a".to_owned()],
+                }),
+                7,
+            ),
+            (
+                metric::Value::Distribution1(Distribution1 {
+                    values: vec![1.0, 2.0],
+                    sample_rates: vec![1, 2],
+                    statistic: StatisticKind::Summary as i32,
+                }),
+                8,
+            ),
+            (
+                metric::Value::AggregatedHistogram1(AggregatedHistogram1 {
+                    buckets: vec![1.0, 2.0],
+                    counts: vec![1, 2],
+                    count: 3,
+                    sum: 3.0,
+                }),
+                9,
+            ),
+            (
+                metric::Value::AggregatedSummary1(AggregatedSummary1 {
+                    quantiles: vec![0.5],
+                    values: vec![1.0],
+                    count: 1,
+                    sum: 1.0,
+                }),
+                10,
+            ),
+            (
+                metric::Value::Distribution2(Distribution2 {
+                    samples: vec![DistributionSample {
+                        value: 1.0,
+                        rate: 2,
+                    }],
+                    statistic: StatisticKind::Histogram as i32,
+                }),
+                12,
+            ),
+            (
+                metric::Value::AggregatedHistogram2(AggregatedHistogram2 {
+                    buckets: vec![HistogramBucket {
+                        upper_limit: 1.0,
+                        count: u32::MAX,
+                    }],
+                    count: u32::MAX,
+                    sum: 1.0,
+                }),
+                13,
+            ),
+            (
+                metric::Value::AggregatedSummary2(AggregatedSummary2 {
+                    quantiles: vec![SummaryQuantile {
+                        quantile: 0.99,
+                        value: 1.0,
+                    }],
+                    count: 1,
+                    sum: 1.0,
+                }),
+                14,
+            ),
+            (
+                metric::Value::Sketch(Sketch {
+                    sketch: Some(sketch::Sketch::AgentDdSketch(sketch::AgentDdSketch {
+                        count: 1,
+                        min: -1.0,
+                        max: 1.0,
+                        sum: 0.0,
+                        avg: 0.0,
+                        k: vec![-1, 0, 1],
+                        n: vec![1, 2, 3],
+                    })),
+                }),
+                15,
+            ),
+            (
+                metric::Value::AggregatedHistogram3(AggregatedHistogram3 {
+                    buckets: vec![HistogramBucket3 {
+                        upper_limit: f64::INFINITY,
+                        count: u64::MAX,
+                    }],
+                    count: u64::MAX,
+                    sum: 1.0,
+                }),
+                16,
+            ),
+            (
+                metric::Value::AggregatedSummary3(AggregatedSummary3 {
+                    quantiles: vec![SummaryQuantile {
+                        quantile: 0.5,
+                        value: 1.0,
+                    }],
+                    count: u64::MAX,
+                    sum: 1.0,
+                }),
+                17,
+            ),
+        ];
+
+        assert_eq!(cases.len(), 12, "all metric value variants must be covered");
+
+        for (value, tag) in cases {
+            let m = Metric {
+                value: Some(value.clone()),
+                ..Default::default()
+            };
+            // The oneof is the only field set, so its key comes first
+            assert!(
+                m.encode_to_vec().starts_with(&key(tag, 2)),
+                "{value:?} should use tag {tag}, got {:?}",
+                m.encode_to_vec()
+            );
+            let decoded = roundtrip(&m);
+            assert_eq!(decoded.value, Some(value));
+        }
+    }
+
+    #[test]
+    fn test_repeated_and_packed_encoding() {
+        // Repeated numeric fields are packed: one key, then the values
+        let d = Distribution1 {
+            values: vec![1.0, 2.0],
+            ..Default::default()
+        };
+        let buf = d.encode_to_vec();
+        // One key, one length (two doubles = 16 bytes) and the payload
+        assert_eq!(buf[0], key(1, 2)[0]);
+        assert_eq!(buf[1], 16);
+        assert_eq!(buf.len(), 18);
+
+        // Repeated strings are not packable, each gets its own key
+        let s = Set {
+            values: vec!["ab".to_owned(), String::new()],
+        };
+        assert_eq!(s.encode_to_vec(), vec![10, 2, b'a', b'b', 10, 0]);
+        assert_eq!(roundtrip(&s).values, vec!["ab".to_owned(), String::new()]);
+
+        // `k` is a sint32, so it is zigzag-encoded: -1 becomes 1
+        let sk = sketch::AgentDdSketch {
+            k: vec![-1],
+            ..Default::default()
+        };
+        assert_eq!(sk.encode_to_vec(), vec![50, 1, 1]);
+        roundtrip(&sketch::AgentDdSketch {
+            k: vec![i32::MIN, -1, 0, 1, i32::MAX],
+            n: vec![1, 2, 3, 4, 5],
+            ..Default::default()
+        });
+
+        // Empty repeated fields disappear entirely
+        assert_eq!(Distribution1::default().encoded_len(), 0);
+        assert_eq!(Set::default().encoded_len(), 0);
+        assert_eq!(sketch::AgentDdSketch::default().encoded_len(), 0);
+        assert_eq!(Sketch::default().encoded_len(), 0);
+    }
+
+    #[test]
+    fn test_proto3_implicit_presence() {
+        // A plain (non-oneof, non-optional) scalar equal to its default is not
+        // serialized at all...
+        assert_eq!(Counter { value: 0.0 }.encoded_len(), 0);
+        assert_eq!(Gauge { value: 0.0 }.encoded_len(), 0);
+        assert_eq!(
+            Distribution1 {
+                statistic: StatisticKind::Histogram as i32,
+                ..Default::default()
+            }
+            .encoded_len(),
+            0
+        );
+        assert_eq!(
+            Distribution1 {
+                statistic: StatisticKind::Summary as i32,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+            vec![24, 1]
+        );
+
+        // ...which means that a negative zero loses its sign, as it compares
+        // equal to the default.
+        let c = Counter { value: -0.0 };
+        assert_ne!(c.value.to_bits(), 0.0f64.to_bits());
+        assert_eq!(c.encoded_len(), 0);
+        assert_eq!(
+            Counter::decode([].as_slice()).unwrap().value.to_bits(),
+            0.0f64.to_bits()
+        );
+
+        // Inside a oneof, on the other hand, the sign is preserved
+        let v = Value {
+            kind: Some(value::Kind::Float(-0.0)),
+        };
+        let Some(value::Kind::Float(f)) = roundtrip(&v).kind else {
+            panic!("decoded into a different kind");
+        };
+        assert_eq!(f.to_bits(), (-0.0f64).to_bits());
+    }
+
+    #[test]
+    fn test_decode_unknown_fields_are_skipped() {
+        // Tag 3 is not used by `Value` (the oneof uses 1, 2, 4..9)
+        let unknown = [key(3, 0).as_slice(), &[5]].concat();
+        assert_eq!(Value::decode(unknown.as_slice()).unwrap(), Value::default());
+
+        // An unknown field next to a known one doesn't disturb it
+        let mixed = [&unknown[..], &int(7).encode_to_vec()[..]].concat();
+        assert_eq!(Value::decode(mixed.as_slice()).unwrap(), int(7));
+
+        // Same for a length-delimited unknown field in a bigger message
+        let mut buf = Log {
+            value: Some(int(1)),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        buf.extend([key(99, 2).as_slice(), &[2, 0xde, 0xad]].concat());
+        let decoded = Log::decode(buf.as_slice()).unwrap();
+        assert_eq!(decoded.value, Some(int(1)));
+    }
+
+    #[test]
+    fn test_decode_malformed_input() {
+        // Length prefix promises more data than there is
+        assert!(Value::decode([10, 5, 1].as_slice()).is_err());
+        // Wire type 2 for the varint-typed `Integer` field
+        assert!(Value::decode([34, 1, 5].as_slice()).is_err());
+        // Truncated varint
+        assert!(Value::decode([32, 0x80].as_slice()).is_err());
+        // Tag 0 is not valid
+        assert!(Value::decode([0, 0].as_slice()).is_err());
+        // Garbage nested inside a submessage
+        assert!(EventArray::decode([10, 3, 10, 5, 1].as_slice()).is_err());
+    }
+
+    #[test]
+    fn test_prepare_event_wire_structure() {
+        let ev = crate::vector::prepare_event(serde_json::json!({
+            "s": "str",
+            "i": 42,
+            "neg": -42,
+            "f": 1.5,
+            "b": false,
+            "n": null,
+            "arr": [1, "two", null],
+            "obj": {"k": "v"},
+            "empty_obj": {},
+            "empty_arr": [],
+            "big": 18446744073709551615_u64,
+            "": "empty key",
+        }));
+
+        let decoded = roundtrip(&ev);
+        let Some(event_array::Events::Logs(logs)) = decoded.events else {
+            panic!("expected a log array");
+        };
+        assert_eq!(logs.logs.len(), 1);
+        let log = &logs.logs[0];
+
+        // Vector requires the dummy "." field and nothing else in `fields`
+        assert_eq!(log.fields.len(), 1);
+        assert_eq!(
+            log.fields["."].kind,
+            Some(value::Kind::Null(ValueNull::NullValue as i32))
+        );
+        assert_eq!(log.metadata, None);
+        assert_eq!(log.metadata_full, None);
+
+        let fields = map_fields(log.value.as_ref().expect("log has no value"));
+        assert_eq!(fields["s"], bytes("str"));
+        assert_eq!(fields["i"], int(42));
+        assert_eq!(fields["neg"], int(-42));
+        assert_eq!(fields["f"].kind, Some(value::Kind::Float(1.5)));
+        assert_eq!(fields["b"].kind, Some(value::Kind::Boolean(false)));
+        assert_eq!(
+            fields["n"].kind,
+            Some(value::Kind::Null(ValueNull::NullValue as i32))
+        );
+        // Integers above i64::MAX don't fit and are turned into strings
+        assert_eq!(fields["big"], bytes("18446744073709551615"));
+        // Empty containers stay containers
+        assert!(map_fields(&fields["empty_obj"]).is_empty());
+        assert!(array_items(&fields["empty_arr"]).is_empty());
+        // An empty key is a valid map key
+        assert_eq!(fields[""], bytes("empty key"));
+
+        assert_eq!(map_fields(&fields["obj"])["k"], bytes("v"));
+        assert_eq!(
+            array_items(&fields["arr"]).to_vec(),
+            vec![
+                int(1),
+                bytes("two"),
+                Value {
+                    kind: Some(value::Kind::Null(ValueNull::NullValue as i32))
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn test_encode_value_timestamp() {
+        // `encode_value` splits a timestamp into whole seconds plus a positive
+        // subsecond remainder, which also has to hold before the epoch.
+        let cases = [
+            (0, 0),
+            (1_700_000_000, 123_456_789),
+            // 1969-12-31T23:59:59.5Z
+            (-1, 500_000_000),
+            (-1_000_000, 1),
+        ];
+
+        for (seconds, nanos) in cases {
+            let ts = chrono::DateTime::from_timestamp(seconds, nanos).unwrap();
+            let v = crate::vector::encode_value(vrl::value::Value::Timestamp(ts));
+            assert_eq!(
+                v.kind,
+                Some(value::Kind::Timestamp(prost_types::Timestamp {
+                    seconds,
+                    nanos: nanos as i32,
+                })),
+                "{ts} was encoded incorrectly"
+            );
+            roundtrip(&v);
+        }
+    }
+
+    #[test]
+    fn test_encode_value_kind_mapping() {
+        use vrl::value::Value as V;
+
+        // Every VRL value type maps onto exactly one wire kind
+        assert_eq!(
+            crate::vector::encode_value(V::Bytes(Bytes::from_static(b"\xff\x00"))).kind,
+            Some(value::Kind::RawBytes(Bytes::from_static(b"\xff\x00")))
+        );
+        assert_eq!(
+            crate::vector::encode_value(V::Integer(-7)).kind,
+            int(-7).kind
+        );
+        assert_eq!(
+            crate::vector::encode_value(V::from_f64_or_zero(-0.5)).kind,
+            Some(value::Kind::Float(-0.5))
+        );
+        assert_eq!(
+            crate::vector::encode_value(V::Boolean(true)).kind,
+            Some(value::Kind::Boolean(true))
+        );
+        assert_eq!(
+            crate::vector::encode_value(V::Null).kind,
+            Some(value::Kind::Null(ValueNull::NullValue as i32))
+        );
+        // A regex is sent as its source text
+        let rx = vrl::value::ValueRegex::new(std::sync::Arc::new(crate::regex!("^a.*z$")));
+        assert_eq!(
+            crate::vector::encode_value(V::Regex(rx)).kind,
+            Some(value::Kind::RawBytes(Bytes::from_static(b"^a.*z$")))
+        );
+        // Containers recurse
+        assert_eq!(
+            crate::vector::encode_value(V::Array(vec![V::Integer(1)])).kind,
+            Some(value::Kind::Array(ValueArray {
+                items: vec![int(1)]
+            }))
+        );
+        assert_eq!(
+            crate::vector::encode_value(V::Object(
+                [("k".into(), V::Integer(1))].into_iter().collect()
+            ))
+            .kind,
+            Some(value::Kind::Map(ValueMap {
+                fields: BTreeMap::from([("k".to_owned(), int(1))])
+            }))
+        );
+    }
+}

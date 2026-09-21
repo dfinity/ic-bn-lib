@@ -2,8 +2,6 @@
 set -eEuo pipefail
 
 readonly POCKETIC_VERSION="12.0.0"
-readonly POCKETIC_URL="https://github.com/dfinity/pocketic/releases/download/${POCKETIC_VERSION}/pocket-ic-x86_64-linux.gz"
-readonly POCKETIC_CHECKSUM="91405ba12fe8a8402cd5903fb43f5927771a5493a970cfcf3ae0dfbd8bdb45ac"
 readonly WORKDIR="$(pwd)"
 export POCKET_IC_BIN="${WORKDIR}/pocket-ic"
 export CARGO_TARGET_DIR="${WORKDIR}/target"
@@ -15,12 +13,44 @@ export BENCH_CANISTER_WASM_PATH="${BENCH_CANISTER_TARGET_DIR}/wasm32-unknown-unk
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >&2; }
 
-log "Downloading PocketIC v${POCKETIC_VERSION}"
+# `sha256sum` is GNU coreutils and is absent from a stock macOS, which ships `shasum` instead.
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256_verify() { echo "$1  $2" | sha256sum -c -; }
+else
+  sha256_verify() { echo "$1  $2" | shasum -a 256 -c -; }
+fi
+
+# PocketIC publishes a separate binary per platform, so pick the one matching this host and pin
+# its checksum - the same per-platform selection that `ic-bn-lib/src/tests/pebble.rs` already
+# does for Pebble. Without this, any host that is not Linux/x86_64 silently downloads a binary
+# it cannot exec, and every PocketIC-backed integration test fails at startup with
+# "Unexpected PocketIC server version: got ``".
+case "$(uname -s)/$(uname -m)" in
+  Linux/x86_64)
+    POCKETIC_PLATFORM="x86_64-linux"
+    POCKETIC_CHECKSUM="91405ba12fe8a8402cd5903fb43f5927771a5493a970cfcf3ae0dfbd8bdb45ac" ;;
+  Linux/aarch64 | Linux/arm64)
+    POCKETIC_PLATFORM="arm64-linux"
+    POCKETIC_CHECKSUM="5d2cac4ae21146084e4f40b0143393943cc31fe88e8af3ce008a268795e40b15" ;;
+  Darwin/x86_64)
+    POCKETIC_PLATFORM="x86_64-darwin"
+    POCKETIC_CHECKSUM="67baa56fc4afbaa8935e14ef88d9d60f77d011947f0548adc4d424c3c8819e35" ;;
+  Darwin/arm64)
+    POCKETIC_PLATFORM="arm64-darwin"
+    POCKETIC_CHECKSUM="4bd58559fe4516403dd3c01eb6ab0e753dad510ee113085240b8f9728a595873" ;;
+  *)
+    log "Unsupported platform for PocketIC: $(uname -s)/$(uname -m)"
+    exit 1 ;;
+esac
+readonly POCKETIC_PLATFORM POCKETIC_CHECKSUM
+readonly POCKETIC_URL="https://github.com/dfinity/pocketic/releases/download/${POCKETIC_VERSION}/pocket-ic-${POCKETIC_PLATFORM}.gz"
+
+log "Downloading PocketIC v${POCKETIC_VERSION} for ${POCKETIC_PLATFORM}"
 curl -fsSL --retry 3 --retry-delay 5 "${POCKETIC_URL}" -o pocket-ic.gz || {
   log "Failed to download PocketIC"
   exit 1
 }
-echo "${POCKETIC_CHECKSUM} pocket-ic.gz" | sha256sum -c - || {
+sha256_verify "${POCKETIC_CHECKSUM}" pocket-ic.gz || {
   log "PocketIC checksum verification failed"
   exit 1
 }
