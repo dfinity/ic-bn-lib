@@ -107,16 +107,16 @@ impl SmtpCapabilities {
 /// One chunk of the message body.
 ///
 /// Every field except `headers` and `gateway_flags` is repeated in every chunk,
-/// which makes them idempotent.
-///
+/// which makes the chunk idempotent.
 #[derive(Clone, Debug, CandidType, Deserialize, Eq, PartialEq)]
 pub struct SmtpUploadChunk {
     /// Must be `SMTP_UPLOAD_PROTOCOL_VERSION`.
     pub version: u32,
-    /// Assembly key, scoped by the canister to the calling principal. Uses
-    /// the same value as `SmtpRequest::message_id`.
+    /// Assembly key.
+    /// Uses the same value as `SmtpRequest::message_id` (UUID).
     pub message_id: String,
-    /// SMTP envelope. Identical in every chunk of one upload.
+    /// SMTP envelope.
+    /// Identical in every chunk of one upload.
     pub envelope: Envelope,
     /// Index of this chunk
     pub index: u32,
@@ -131,10 +131,10 @@ pub struct SmtpUploadChunk {
     pub payload_sha256: Vec<u8>,
     /// SHA-256 over the concatenation of every chunk's `payload_sha256` in
     /// index order: `SHA256(payload_sha256[0] || .. || payload_sha256[n-1])`.
-    /// A kind of poor-man's Merkle tree.
     ///
-    /// It helps to verify the the entire message body without
-    /// having to re-read all the chunks again (saves cycles).
+    /// A kind of poor-man's Merkle tree, it helps to verify the
+    /// entire message body without having to re-read all the chunks again,
+    /// which saves cycles.
     pub body_sha256: Vec<u8>,
     /// Chunk payload
     pub payload: Vec<u8>,
@@ -163,26 +163,28 @@ pub enum SmtpUploadChunkResponse {
 /// Finalizes an upload
 #[derive(Clone, Debug, CandidType, Deserialize, Eq, PartialEq)]
 pub struct SmtpUploadCommit {
-    /// Must be `SMTP_UPLOAD_PROTOCOL_VERSION`.
+    /// Must be `SMTP_UPLOAD_PROTOCOL_VERSION`
     pub version: u32,
     pub message_id: String,
-    /// Same as `body_sha256` in `SmtpUploadChunk`.
+    /// Same as `SmtpUploadChunk::body_sha256`
     pub body_sha256: Vec<u8>,
     pub total_chunks: u32,
 }
 
-/// Names an existing upload. Used by `smtp_upload_status` and `smtp_upload_abort`.
+/// Identifies an existing upload.
+/// Used by `smtp_upload_status` and `smtp_upload_abort`.
 #[derive(Clone, Debug, CandidType, Deserialize, Eq, PartialEq)]
-pub struct SmtpUploadRef {
+pub struct SmtpUploadId {
     pub message_id: String,
 }
 
 /// State of an upload, as reported by `smtp_upload_status`.
 #[derive(Clone, Debug, Default, CandidType, Deserialize, Eq, PartialEq)]
 pub struct SmtpUploadStatus {
-    /// An open upload or a committed record exists for (caller, message_id).
+    /// An open upload exists for message_id
     pub known: bool,
-    /// The upload was committed; `result` holds the terminal verdict.
+    /// The upload was committed
+    /// `result` holds the outcome.
     pub committed: bool,
     /// `Some` only if `committed`
     pub result: Option<SmtpResponse>,
@@ -750,11 +752,11 @@ mod test {
         let b = Encode!(&c).unwrap();
         assert_eq!(Decode!(&b, SmtpUploadCommit).unwrap(), c);
 
-        let r = SmtpUploadRef {
+        let r = SmtpUploadId {
             message_id: "deadbeef".into(),
         };
         let b = Encode!(&r).unwrap();
-        assert_eq!(Decode!(&b, SmtpUploadRef).unwrap(), r);
+        assert_eq!(Decode!(&b, SmtpUploadId).unwrap(), r);
     }
 
     #[test]
@@ -809,7 +811,7 @@ mod test {
     /// flag, so it is pinned here rather than discovered later.
     #[test]
     fn test_upload_ref_is_a_subtype_of_request() {
-        let b = Encode!(&SmtpUploadRef {
+        let b = Encode!(&SmtpUploadId {
             message_id: "abc".into(),
         })
         .unwrap();
@@ -831,7 +833,7 @@ mod test {
             message_id: None,
         })
         .unwrap();
-        assert!(Decode!(&b, SmtpUploadRef).is_err());
+        assert!(Decode!(&b, SmtpUploadId).is_err());
     }
 
     /// Records are keyed by field-name hash, so the upload types tolerate a

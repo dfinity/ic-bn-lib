@@ -35,7 +35,7 @@ use crate::{
             candid::{
                 Envelope, SMTP_UPLOAD_PROTOCOL_VERSION, SmtpCapabilities, SmtpRequest,
                 SmtpRequestError, SmtpResponse, SmtpUploadChunk, SmtpUploadChunkResponse,
-                SmtpUploadCommit, SmtpUploadRef, SmtpUploadStatusResponse,
+                SmtpUploadCommit, SmtpUploadId, SmtpUploadStatusResponse,
             },
             is_ambiguous, is_missing_method, is_payload_too_large, is_rate_limited,
             parse_email_bytes,
@@ -454,7 +454,7 @@ impl IcSmtpDeliveryAgent {
             // The canister holds the chunks until the TTL expires, so
             // when the attempt failed for a retryable reason e.g. rate limit -
             // leaving them in place lets us resume instead of
-            // re-uploading the whole body.
+            // reuploading the whole body.
             if !e.keep_upload {
                 self.spawn_abort(canister_id, message_id);
             }
@@ -470,10 +470,7 @@ impl IcSmtpDeliveryAgent {
         res
     }
 
-    /// Uploads a single chunk, retrying transient failures.
-    ///
-    /// Safe to retry: the canister keys chunks by
-    /// `(caller, message_id, index)` and re-storing an identical one is a no-op.
+    /// Uploads a single chunk, retrying transient failures
     async fn upload_one_chunk(
         &self,
         canister_id: Principal,
@@ -511,7 +508,7 @@ impl IcSmtpDeliveryAgent {
             };
 
             // The canister advertised chunking but does not implement it.
-            // Drop the stale capabilities.
+            // Drop the stale capabilities from the cache.
             if is_missing_method(&e) {
                 warn!(
                     "{self}: {canister_id}: advertised chunked upload but does not \
@@ -551,18 +548,20 @@ impl IcSmtpDeliveryAgent {
                 .with_label_values(&[<&'static str>::from(&e)])
                 .inc();
 
-            // Exponential backoff; a rate-limited replica gets a longer rest.
+            // Exponential backoff; a rate-limited replica gets a longer delay
             let base = if rate_limited { 2000 } else { 250 };
             let delay = Duration::from_millis(base * (1 << (attempt - 1)) as u64);
+
             debug!(
                 "{self}: {canister_id}: chunk {} attempt {attempt} failed ({e}), retrying in {delay:?}",
                 chunk.index
             );
+
             tokio::time::sleep(delay).await;
         }
     }
 
-    /// Finalizes an upload, resolving an unknown outcome rather than guessing.
+    /// Finalizes an upload
     async fn commit_upload(
         &self,
         canister_id: Principal,
@@ -600,13 +599,14 @@ impl IcSmtpDeliveryAgent {
                 Err(map_canister_error(&e))
             }
 
-            // The commit may or may not have run. Retrying blindly could deliver
-            // the same mail twice, so ask the canister what actually happened.
+            // The commit may or may not have succeeded.
+            // Retrying can deliver the same mail twice, so ask the canister what actually happened.
             Err(e) if is_ambiguous(&e) => {
                 warn!("{self}: {canister_id}: commit outcome unknown ({e:#}), querying status");
                 self.resolve_ambiguous_commit(canister_id, message_id).await
             }
 
+            // If the failure is final - abort the upload and report the error
             Err(e) => {
                 self.spawn_abort(canister_id, message_id);
                 Err(map_delivery_error(canister_id, &e))
@@ -614,7 +614,7 @@ impl IcSmtpDeliveryAgent {
         }
     }
 
-    /// Asks the canister whether a commit whose reply we never saw took effect.
+    /// Asks the canister whether a commit whose reply we never saw was applied
     async fn resolve_ambiguous_commit(
         &self,
         canister_id: Principal,
@@ -625,7 +625,7 @@ impl IcSmtpDeliveryAgent {
             .request_executor
             .canister_upload_status(
                 canister_id,
-                SmtpUploadRef {
+                SmtpUploadId {
                     message_id: message_id.to_string(),
                 },
             )
@@ -635,19 +635,18 @@ impl IcSmtpDeliveryAgent {
         match res {
             Ok(SmtpUploadStatusResponse::Ok(st)) if st.known && st.committed => {
                 match st.result {
-                    // The delivery did happen; report its real verdict.
+                    // The delivery did happen; report its result
                     Some(SmtpResponse::Ok(_)) => {
-                        info!("{self}: {canister_id}: commit had in fact succeeded");
+                        info!("{self}: {canister_id}: commit had succeeded");
                         Ok(())
                     }
                     Some(SmtpResponse::Err(e)) => Err(map_canister_error(&e)),
-                    // Committed but no verdict retained: assume it landed rather
-                    // than risk a duplicate.
+                    // Committed but no outcome for whatever reason - assume it was delivered
                     None => Ok(()),
                 }
             }
 
-            // Still open: the commit never ran, so one more attempt is safe.
+            // Still open: the commit never ran, so one more attempt is safe
             Ok(SmtpUploadStatusResponse::Ok(st)) if st.known => {
                 Err(DeliveryError::Temporary(format!(
                     "commit did not complete, {} chunk(s) still missing",
@@ -655,24 +654,21 @@ impl IcSmtpDeliveryAgent {
                 )))
             }
 
-            // Unknown, and irreducibly ambiguous: the upload was either collected
-            // before commit or committed and already aged out. Prefer a possible
-            // duplicate over a possible silent loss.
+            // Unknown / ambiguous: retry the delivery just in case
             _ => Err(DeliveryError::Temporary(
                 "commit outcome could not be determined".into(),
             )),
         }
     }
 
-    /// Best-effort release of an upload we are giving up on.
+    /// Best-effort release of an upload we are giving up on
     fn spawn_abort(&self, canister_id: Principal, message_id: &str) {
         let executor = self.request_executor.clone();
-        let upload = SmtpUploadRef {
+        let upload = SmtpUploadId {
             message_id: message_id.to_string(),
         };
 
         tokio::spawn(async move {
-            // Purely an optimization - the canister expires uploads on its own.
             let _ = executor.canister_upload_abort(canister_id, upload).await;
         });
     }
@@ -1854,7 +1850,7 @@ mod tests {
         async fn canister_upload_status(
             &self,
             canister_id: Principal,
-            upload: SmtpUploadRef,
+            upload: SmtpUploadId,
         ) -> Result<SmtpUploadStatusResponse, IcSmtpDeliveryAgentError> {
             let known = {
                 let uploads = self.uploads.lock().unwrap();
@@ -1870,7 +1866,7 @@ mod tests {
         async fn canister_upload_abort(
             &self,
             canister_id: Principal,
-            upload: SmtpUploadRef,
+            upload: SmtpUploadId,
         ) -> Result<SmtpResponse, IcSmtpDeliveryAgentError> {
             self.uploads
                 .lock()

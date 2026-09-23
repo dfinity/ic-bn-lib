@@ -22,7 +22,7 @@ use crate::smtp::{
     ic::{
         candid::{
             Header, Message, SmtpCapabilities, SmtpRequest, SmtpResponse, SmtpUploadChunk,
-            SmtpUploadChunkResponse, SmtpUploadCommit, SmtpUploadRef, SmtpUploadStatusResponse,
+            SmtpUploadChunkResponse, SmtpUploadCommit, SmtpUploadId, SmtpUploadStatusResponse,
         },
         delivery_agent::IcSmtpDeliveryAgentError,
     },
@@ -87,7 +87,7 @@ pub trait ExecutesIcSmtpRequest: Send + Sync + Debug {
     async fn canister_upload_status(
         &self,
         _canister_id: Principal,
-        _upload: SmtpUploadRef,
+        _upload: SmtpUploadId,
     ) -> Result<SmtpUploadStatusResponse, IcSmtpDeliveryAgentError> {
         Err(IcSmtpDeliveryAgentError::Unsupported("smtp_upload_status"))
     }
@@ -97,7 +97,7 @@ pub trait ExecutesIcSmtpRequest: Send + Sync + Debug {
     async fn canister_upload_abort(
         &self,
         _canister_id: Principal,
-        _upload: SmtpUploadRef,
+        _upload: SmtpUploadId,
     ) -> Result<SmtpResponse, IcSmtpDeliveryAgentError> {
         Err(IcSmtpDeliveryAgentError::Unsupported("smtp_upload_abort"))
     }
@@ -226,7 +226,7 @@ impl ExecutesIcSmtpRequest for IcSmtpRequestExecutor {
     async fn canister_upload_status(
         &self,
         canister_id: Principal,
-        upload: SmtpUploadRef,
+        upload: SmtpUploadId,
     ) -> Result<SmtpUploadStatusResponse, IcSmtpDeliveryAgentError> {
         let arg = Encode!(&upload).context("unable to encode upload ref")?;
         let resp = self
@@ -242,7 +242,7 @@ impl ExecutesIcSmtpRequest for IcSmtpRequestExecutor {
     async fn canister_upload_abort(
         &self,
         canister_id: Principal,
-        upload: SmtpUploadRef,
+        upload: SmtpUploadId,
     ) -> Result<SmtpResponse, IcSmtpDeliveryAgentError> {
         let arg = Encode!(&upload).context("unable to encode upload ref")?;
         let resp = self
@@ -449,7 +449,7 @@ pub const fn is_ambiguous(e: &IcSmtpDeliveryAgentError) -> bool {
 
         IcSmtpDeliveryAgentError::Parser(_) => false,
 
-        // 413 is an explicit refusal, other HTTP errors may have been applied
+        // 413 is an explicit refusal, other HTTP codes - who knows...
         IcSmtpDeliveryAgentError::Agent(AgentError::HttpError(p)) => p.status != 413,
 
         // Timeouts, transport errors, everything else: unknown
