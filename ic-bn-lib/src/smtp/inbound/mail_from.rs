@@ -62,11 +62,16 @@ impl<S: AsyncReadWrite> Session<S> {
             return self.ext_unsupported("MT-PRIORITY").await;
         }
 
+        // Save the size for the per-recipient check in RCPT TO.
+        // `0` means "not declared".
+        self.data.declared_size = (from.size > 0).then_some(from.size);
+
         if from.size > self.cfg.max_message_size {
             self.set_error(ProtocolError::MessageTooBig(format!(
                 "MAIL FROM-specified size is too big: {} > {}",
                 from.size, self.cfg.max_message_size
             )));
+
             return self.message_too_big().await;
         }
 

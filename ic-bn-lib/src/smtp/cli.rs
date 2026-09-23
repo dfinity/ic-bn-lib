@@ -5,7 +5,10 @@ use clap::Args;
 use humantime::parse_duration;
 use url::Url;
 
-use crate::{parse_size, smtp::inbound::SessionConfig};
+use crate::{
+    parse_size,
+    smtp::{ic::upload::IcSmtpUploadConfig, inbound::SessionConfig},
+};
 
 /// SMTP Server CLI
 #[derive(Args, Clone, Debug, Eq, PartialEq)]
@@ -43,8 +46,14 @@ pub struct SmtpServerCli {
     #[clap(env, long, default_value = "5")]
     pub smtp_server_max_errors_per_session: usize,
 
-    /// Maximum message body size.
-    /// Default accounts for max IC message size + some overhead.
+    /// Maximum message size: the header block and the body together.
+    ///
+    /// The default keeps the Candid-encoded request inside a single IC ingress
+    /// message, so it works against every canister. Raising it enables the
+    /// chunked upload protocol, which destination canisters must implement and
+    /// advertise; a message that exceeds what a given canister can take is
+    /// refused with 552 at RCPT TO (when the sender declared SIZE) or 550 at
+    /// delivery. `smtp_server_max_session_data` must be at least this value.
     #[clap(env, long, default_value = "1950KB", value_parser = parse_size)]
     pub smtp_server_max_message_size: u64,
 
@@ -67,6 +76,46 @@ pub struct SmtpServerCli {
     /// Maximum number of Canister SMTP mappings to keep in cache
     #[clap(env, long, default_value = "100k", value_parser = parse_size)]
     pub smtp_server_canister_cache_capacity: u64,
+
+    /// The target subnet's `max_ingress_bytes_per_message`.
+    /// 2MB is the safe default.
+    #[clap(env, long, default_value = "2MB", value_parser = parse_size)]
+    pub smtp_server_ic_max_ingress_size: u64,
+
+    /// Body bytes per chunk for the IC chunked upload protocol.
+    /// May be lower due to what the destination canister advertises and due to the
+    /// measured Candid overhead of the first chunk, which carries the headers.
+    #[clap(env, long, default_value = "1MB", value_parser = parse_size)]
+    pub smtp_server_ic_upload_chunk_size: u64,
+
+    /// How many payload bytes may be in flight to one destination canister.
+    /// Upload concurrency is derived from this.
+    #[clap(env, long, default_value = "2MB", value_parser = parse_size)]
+    pub smtp_server_ic_max_inflight_bytes: u64,
+
+    /// Ceiling on chunk uploads in flight across all sessions and destinations.
+    /// Must be lower than the IC Agent's own concurrency limit.
+    #[clap(env, long, default_value = "16")]
+    pub smtp_server_ic_upload_global_concurrency: usize,
+
+    /// How many times to retry a single chunk that failed transiently.
+    #[clap(env, long, default_value = "2")]
+    pub smtp_server_ic_upload_chunk_retries: usize,
+
+    /// Timeout for delivering one message to all of its destinations,
+    /// including every chunk, the commit and any retries.
+    #[clap(env, long, default_value = "90s", value_parser = parse_duration)]
+    pub smtp_server_ic_delivery_timeout: Duration,
+
+    /// For how long to cache canister SMTP capabilities
+    #[clap(env, long, default_value = "10m", value_parser = parse_duration)]
+    pub smtp_server_ic_capabilities_cache_ttl: Duration,
+
+    /// Maximum size of the serialized headers.
+    /// Headers are never split across chunks, so they must fit into a single
+    /// ingress message with a first body chunk.
+    #[clap(env, long, default_value = "256KB", value_parser = parse_size)]
+    pub smtp_server_ic_max_header_size: u64,
 
     /// Whether to enforce usage of STARTTLS.
     /// Be advised that it's effectively against standards/RFCs to do that.
@@ -129,6 +178,18 @@ impl TryFrom<&SmtpServerCli> for SessionConfig {
             return Err(anyhow!("`smtp_server_hostname` is required"));
         };
 
+        // A misconfiguration has to fail at boot rather than at the last byte of
+        // a transfer that was already accepted.
+        if v.smtp_server_max_message_size > v.smtp_server_max_session_data {
+            return Err(anyhow!(
+                "`smtp_server_max_message_size` ({}) must not exceed \
+                 `smtp_server_max_session_data` ({}): a single message of the \
+                 advertised maximum size would abort the session mid-transfer",
+                v.smtp_server_max_message_size,
+                v.smtp_server_max_session_data
+            ));
+        }
+
         let mut cfg = Self::new(hostname, v.smtp_server_max_message_size as usize);
         cfg.greeting_delay = Some(v.smtp_server_greeting_delay);
 
@@ -149,6 +210,47 @@ impl TryFrom<&SmtpServerCli> for SessionConfig {
         cfg.verify_dkim_strict = v.smtp_server_verify_dkim_strict;
 
         Ok(cfg)
+    }
+}
+
+impl TryFrom<&SmtpServerCli> for IcSmtpUploadConfig {
+    type Error = anyhow::Error;
+
+    fn try_from(v: &SmtpServerCli) -> Result<Self, Self::Error> {
+        let max_ingress_size = v.smtp_server_ic_max_ingress_size as usize;
+        let chunk_size = v.smtp_server_ic_upload_chunk_size as usize;
+        let max_header_size = v.smtp_server_ic_max_header_size as usize;
+
+        if v.smtp_server_ic_upload_global_concurrency == 0 {
+            return Err(anyhow!(
+                "`smtp_server_ic_upload_global_concurrency` must be at least 1"
+            ));
+        }
+
+        // Chunk 0 has the whole header block, so it is the largest call the
+        // upload can make. If it won't fit with a usable payload - then the
+        // configuration is unusable
+        let worst_case = chunk_size.saturating_add(max_header_size);
+
+        if worst_case > max_ingress_size {
+            return Err(anyhow!(
+                "`smtp_server_ic_upload_chunk_size` ({chunk_size}) plus \
+                 `smtp_server_ic_max_header_size` ({max_header_size}) does not leave room \
+                 for the ingress envelope within `smtp_server_ic_max_ingress_size` \
+                 ({max_ingress_size})"
+            ));
+        }
+
+        Ok(Self {
+            max_ingress_size,
+            chunk_size,
+            max_inflight_bytes: v.smtp_server_ic_max_inflight_bytes as usize,
+            global_concurrency: v.smtp_server_ic_upload_global_concurrency,
+            chunk_retries: v.smtp_server_ic_upload_chunk_retries,
+            delivery_timeout: v.smtp_server_ic_delivery_timeout,
+            capabilities_cache_ttl: v.smtp_server_ic_capabilities_cache_ttl,
+            max_header_size,
+        })
     }
 }
 
@@ -369,8 +471,13 @@ mod test {
             "8",
             "--smtp-server-max-errors-per-session",
             "9",
+            "--smtp-server-max-message-size",
+            "512KB",
+            // Deliberately different from the message size so that mixing the
+            // two options up is caught, but still above it - a session cap
+            // below the per-message cap is rejected at startup.
             "--smtp-server-max-session-data",
-            "1KB",
+            "1MB",
             "--smtp-server-max-session-duration",
             "42s",
             "--smtp-server-timeout",
@@ -386,7 +493,7 @@ mod test {
         assert_eq!(cfg.max_recipients, 7);
         assert_eq!(cfg.max_messages_per_session, 8);
         assert_eq!(cfg.max_errors, 9);
-        assert_eq!(cfg.max_session_data, 1024);
+        assert_eq!(cfg.max_session_data, 1024 * 1024);
         assert_eq!(cfg.max_session_duration, Duration::from_secs(42));
         assert_eq!(cfg.timeout, Duration::from_secs(11));
 
@@ -403,6 +510,130 @@ mod test {
         assert_eq!(cfg.max_received_headers, 50);
         // TLS mode is set up elsewhere (needs a cert resolver)
         assert!(!cfg.tls_mode.enabled());
+    }
+
+    #[test]
+    fn test_upload_defaults() {
+        let c = parse(&[]);
+
+        assert_eq!(c.smtp_server_ic_max_ingress_size, 2 * 1024 * 1024);
+        assert_eq!(c.smtp_server_ic_upload_chunk_size, 1024 * 1024);
+        assert_eq!(c.smtp_server_ic_max_inflight_bytes, 2 * 1024 * 1024);
+        assert_eq!(c.smtp_server_ic_upload_global_concurrency, 16);
+        assert_eq!(c.smtp_server_ic_upload_chunk_retries, 2);
+        assert_eq!(c.smtp_server_ic_delivery_timeout, Duration::from_secs(90));
+        assert_eq!(
+            c.smtp_server_ic_capabilities_cache_ttl,
+            Duration::from_secs(600)
+        );
+        assert_eq!(c.smtp_server_ic_max_header_size, 256 * 1024);
+
+        // The shipped defaults must be usable as-is
+        let cfg = IcSmtpUploadConfig::try_from(&c).unwrap();
+        assert_eq!(cfg, IcSmtpUploadConfig::default());
+    }
+
+    #[test]
+    fn test_upload_config_mapping() {
+        let cli = parse(&[
+            "--smtp-server-ic-max-ingress-size",
+            "3MB",
+            "--smtp-server-ic-upload-chunk-size",
+            "512KB",
+            "--smtp-server-ic-max-inflight-bytes",
+            "4MB",
+            "--smtp-server-ic-upload-global-concurrency",
+            "8",
+            "--smtp-server-ic-upload-chunk-retries",
+            "5",
+            "--smtp-server-ic-delivery-timeout",
+            "45s",
+            "--smtp-server-ic-capabilities-cache-ttl",
+            "1m",
+            "--smtp-server-ic-max-header-size",
+            "128KB",
+        ]);
+
+        let cfg = IcSmtpUploadConfig::try_from(&cli).unwrap();
+        assert_eq!(cfg.max_ingress_size, 3 * 1024 * 1024);
+        assert_eq!(cfg.chunk_size, 512 * 1024);
+        assert_eq!(cfg.max_inflight_bytes, 4 * 1024 * 1024);
+        assert_eq!(cfg.global_concurrency, 8);
+        assert_eq!(cfg.chunk_retries, 5);
+        assert_eq!(cfg.delivery_timeout, Duration::from_secs(45));
+        assert_eq!(cfg.capabilities_cache_ttl, Duration::from_secs(60));
+        assert_eq!(cfg.max_header_size, 128 * 1024);
+
+        // 4 MiB in flight over 512 KiB chunks
+        assert_eq!(cfg.concurrency(cfg.chunk_size), 8);
+    }
+
+    /// A session cap below the per-message cap means every maximum-size message
+    /// aborts mid-transfer, so it must not start.
+    #[test]
+    fn test_session_data_below_message_size_is_rejected() {
+        let cli = parse(&[
+            "--smtp-server-listen",
+            "127.0.0.1:2525",
+            "--smtp-server-hostname",
+            "mx.example.com",
+            "--smtp-server-max-message-size",
+            "10MB",
+            "--smtp-server-max-session-data",
+            "1MB",
+        ]);
+
+        // `SessionConfig` has no `Debug`, so `unwrap_err` is unavailable here
+        let Err(e) = SessionConfig::try_from(&cli) else {
+            panic!("expected a session-data validation error");
+        };
+        let err = e.to_string();
+        assert!(err.contains("max_session_data"), "{err}");
+
+        // Equal is fine - exactly one maximum-size message fits
+        let cli = parse(&[
+            "--smtp-server-listen",
+            "127.0.0.1:2525",
+            "--smtp-server-hostname",
+            "mx.example.com",
+            "--smtp-server-max-message-size",
+            "1MB",
+            "--smtp-server-max-session-data",
+            "1MB",
+        ]);
+        assert!(SessionConfig::try_from(&cli).is_ok());
+    }
+
+    /// Chunk 0 carries the whole header block, so the two together plus the
+    /// envelope have to fit one ingress message.
+    #[test]
+    fn test_chunk_plus_headers_must_fit_one_ingress_message() {
+        let cli = parse(&[
+            "--smtp-server-ic-upload-chunk-size",
+            "2MB",
+            "--smtp-server-ic-max-header-size",
+            "1MB",
+        ]);
+
+        let err = IcSmtpUploadConfig::try_from(&cli).unwrap_err().to_string();
+        assert!(err.contains("does not leave room"), "{err}");
+
+        // Raising the subnet limit makes the same pair workable
+        let cli = parse(&[
+            "--smtp-server-ic-upload-chunk-size",
+            "2MB",
+            "--smtp-server-ic-max-header-size",
+            "1MB",
+            "--smtp-server-ic-max-ingress-size",
+            "3584KB",
+        ]);
+        assert!(IcSmtpUploadConfig::try_from(&cli).is_ok());
+    }
+
+    #[test]
+    fn test_zero_global_concurrency_is_rejected() {
+        let cli = parse(&["--smtp-server-ic-upload-global-concurrency", "0"]);
+        assert!(IcSmtpUploadConfig::try_from(&cli).is_err());
     }
 
     #[test]
