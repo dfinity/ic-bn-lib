@@ -14,12 +14,18 @@ pub enum UploadPlanError {
     #[error("unable to encode the message for size measurement: {0}")]
     Encode(String),
     #[error(
-        "header block is too large to upload: {overhead} bytes of overhead, \
-        only {available} bytes for the body"
+        "header block is too large to upload: {overhead} bytes of overhead leaves \
+        only {available} bytes per chunk, need at least {needed}"
     )]
-    HeadersTooLarge { overhead: usize, available: usize },
+    HeadersTooLarge {
+        overhead: usize,
+        available: usize,
+        needed: usize,
+    },
     #[error("cannot chunk an empty body")]
     EmptyBody,
+    #[error("no envelope to measure the chunk size against")]
+    NoEnvelopes,
 }
 
 /// Config for the chunked upload
@@ -44,8 +50,6 @@ pub struct IcSmtpUploadConfig {
     pub delivery_timeout: Duration,
     /// How long to cache a canister's advertised capabilities.
     pub capabilities_cache_ttl: Duration,
-    /// Largest serialized header block the gateway will attempt to send.
-    pub max_header_size: usize,
 }
 
 impl Default for IcSmtpUploadConfig {
@@ -58,7 +62,6 @@ impl Default for IcSmtpUploadConfig {
             chunk_retries: 2,
             delivery_timeout: Duration::from_secs(90),
             capabilities_cache_ttl: Duration::from_secs(600),
-            max_header_size: 256 * 1024,
         }
     }
 }
@@ -173,10 +176,18 @@ fn chunk_overhead(
         .len())
 }
 
+/// Smallest share of the ingress budget a chunk payload may be reduced to.
+/// This bounds the chunk count if the headers are too big and there's not
+/// a lot of space for body left.
+const MIN_PAYLOAD_SHARE: usize = 8;
+
 /// Computes the chunk layout and all digests for a message.
+///
+/// `envelopes` are all the envelopes this plan has to serve - one per
+/// destination canister.
 pub fn plan_chunks(
     headers: &[Header],
-    envelope: &Envelope,
+    envelopes: &[&Envelope],
     message_id: &str,
     body: &Bytes,
     max_ingress_size: usize,
@@ -186,17 +197,29 @@ pub fn plan_chunks(
         return Err(UploadPlanError::EmptyBody);
     }
 
+    // Without an envelope there is nothing to measure
+    if envelopes.is_empty() {
+        return Err(UploadPlanError::NoEnvelopes);
+    }
+
     // Compute how many bytes are available for the payload
     // after accounting for the chunk overhead.
     // 64 is a framing overhead (LEB128 etc, with some allowance on top)
-    let overhead = chunk_overhead(headers, envelope, message_id)?.saturating_add(64);
+    let mut overhead = 0;
+    for envelope in envelopes {
+        overhead = overhead.max(chunk_overhead(headers, envelope, message_id)?);
+    }
+    let overhead = overhead.saturating_add(64);
     let available = max_ingress_size.saturating_sub(overhead);
 
-    // If the overhead is too big (due to oversized headers) - fail
-    if available == 0 {
+    // Oversized headers would leave so little room per chunk that the message
+    // would need an absurd number of calls - refuse instead.
+    let needed = (max_ingress_size / MIN_PAYLOAD_SHARE).max(1);
+    if available < needed {
         return Err(UploadPlanError::HeadersTooLarge {
             overhead,
             available,
+            needed,
         });
     }
 
@@ -242,7 +265,6 @@ pub fn build_chunk(
     headers: &[Header],
     envelope: &Envelope,
     message_id: &str,
-    gateway_flags: Option<&[String]>,
 ) -> SmtpUploadChunk {
     let (start, end) = plan.range(index);
 
@@ -256,11 +278,11 @@ pub fn build_chunk(
         body_size: plan.body_size as u64,
         payload_sha256: plan.payload_sha256[index as usize].to_vec(),
         payload: body[start..end].to_vec(),
-        // Headers and flags are on the first chunk only
+        // Headers are on the first chunk only
         headers: (index == 0).then(|| headers.to_vec()),
-        gateway_flags: (index == 0)
-            .then(|| gateway_flags.map(<[String]>::to_vec))
-            .flatten(),
+        // Always `None`: `chunk_overhead`'s probe does not measure this field,
+        // so setting it would silently break the ingress bound. See there.
+        gateway_flags: None,
     }
 }
 
@@ -343,10 +365,10 @@ mod test {
             let hdrs = headers(header_count);
             let body = Bytes::from(vec![0x5a; 9_000_000]);
 
-            let plan = plan_chunks(&hdrs, &env, MID, &body, budget, usize::MAX).unwrap();
+            let plan = plan_chunks(&hdrs, &[&env], MID, &body, budget, usize::MAX).unwrap();
 
             for i in 0..plan.total_chunks {
-                let chunk = build_chunk(&plan, i, &body, &hdrs, &env, MID, None);
+                let chunk = build_chunk(&plan, i, &body, &hdrs, &env, MID);
                 let encoded = Encode!(&chunk).unwrap().len();
                 assert!(
                     encoded <= budget,
@@ -364,28 +386,28 @@ mod test {
 
         // Exact multiple of the chunk size
         let body = Bytes::from(vec![1u8; 300_000]);
-        let plan = plan_chunks(&hdrs, &env, MID, &body, budget, 100_000).unwrap();
+        let plan = plan_chunks(&hdrs, &[&env], MID, &body, budget, 100_000).unwrap();
         assert_eq!(plan.total_chunks, 3);
         assert_eq!(plan.range(0), (0, 100_000));
         assert_eq!(plan.range(2), (200_000, 300_000));
 
         // Partial last chunk
         let body = Bytes::from(vec![1u8; 250_001]);
-        let plan = plan_chunks(&hdrs, &env, MID, &body, budget, 100_000).unwrap();
+        let plan = plan_chunks(&hdrs, &[&env], MID, &body, budget, 100_000).unwrap();
         assert_eq!(plan.total_chunks, 3);
         assert_eq!(plan.range(2), (200_000, 250_001));
-        let last = build_chunk(&plan, 2, &body, &hdrs, &env, MID, None);
+        let last = build_chunk(&plan, 2, &body, &hdrs, &env, MID);
         assert_eq!(last.payload.len(), 50_001);
 
         // Body smaller than one chunk
         let body = Bytes::from(vec![1u8; 10]);
-        let plan = plan_chunks(&hdrs, &env, MID, &body, budget, 100_000).unwrap();
+        let plan = plan_chunks(&hdrs, &[&env], MID, &body, budget, 100_000).unwrap();
         assert_eq!(plan.total_chunks, 1);
         assert_eq!(plan.range(0), (0, 10));
 
         // Exactly one full chunk
         let body = Bytes::from(vec![1u8; 100_000]);
-        let plan = plan_chunks(&hdrs, &env, MID, &body, budget, 100_000).unwrap();
+        let plan = plan_chunks(&hdrs, &[&env], MID, &body, budget, 100_000).unwrap();
         assert_eq!(plan.total_chunks, 1);
     }
 
@@ -399,7 +421,7 @@ mod test {
 
         let plan = plan_chunks(
             &hdrs,
-            &env,
+            &[&env],
             MID,
             &body,
             crate::ic::DEFAULT_MAX_INGRESS_MESSAGE_SIZE,
@@ -410,7 +432,7 @@ mod test {
         let mut reassembled = vec![0u8; plan.body_size];
         let mut rolling = Sha256::new();
         for i in 0..plan.total_chunks {
-            let chunk = build_chunk(&plan, i, &body, &hdrs, &env, MID, None);
+            let chunk = build_chunk(&plan, i, &body, &hdrs, &env, MID);
 
             // Per-chunk digest, as the canister verifies it on arrival
             let d: [u8; SHA256_LEN] = Sha256::digest(&chunk.payload).into();
@@ -445,8 +467,8 @@ mod test {
         b_vec[199_999] = 1;
         let b = Bytes::from(b_vec);
 
-        let pa = plan_chunks(&hdrs, &env, MID, &a, budget, 100_000).unwrap();
-        let pb = plan_chunks(&hdrs, &env, MID, &b, budget, 100_000).unwrap();
+        let pa = plan_chunks(&hdrs, &[&env], MID, &a, budget, 100_000).unwrap();
+        let pb = plan_chunks(&hdrs, &[&env], MID, &b, budget, 100_000).unwrap();
         assert_ne!(pa.body_sha256, pb.body_sha256);
     }
 
@@ -455,7 +477,7 @@ mod test {
         assert_eq!(
             plan_chunks(
                 &headers(1),
-                &envelope(1),
+                &[&envelope(1)],
                 MID,
                 &Bytes::new(),
                 crate::ic::DEFAULT_MAX_INGRESS_MESSAGE_SIZE,
@@ -481,7 +503,7 @@ mod test {
 
         let err = plan_chunks(
             &hdrs,
-            &env,
+            &[&env],
             MID,
             &Bytes::from(vec![0u8; 10_000_000]),
             crate::ic::DEFAULT_MAX_INGRESS_MESSAGE_SIZE,
@@ -501,7 +523,7 @@ mod test {
     fn test_max_payload_clamps_chunk_size() {
         let plan = plan_chunks(
             &headers(1),
-            &envelope(1),
+            &[&envelope(1)],
             MID,
             &Bytes::from(vec![0u8; 1_000_000]),
             crate::ic::DEFAULT_MAX_INGRESS_MESSAGE_SIZE,
@@ -522,5 +544,114 @@ mod test {
         // A chunk larger than the whole budget still gets one in flight
         assert_eq!(cfg.concurrency(8 * 1024 * 1024), 1);
         assert_eq!(cfg.concurrency(0), 1);
+    }
+
+    /// With `max_payload` unbounded the measured budget is what sets the chunk
+    /// size, so pin the absolute value rather than an inequality that a large
+    /// slack would satisfy no matter what.
+    #[test]
+    fn test_chunk_size_equals_the_measured_budget_when_it_binds() {
+        let hdrs = headers(20);
+        let env = envelope(3);
+        let body = Bytes::from(vec![0u8; 2_000_000]);
+        let budget = 256 * 1024;
+
+        let plan = plan_chunks(&hdrs, &[&env], MID, &body, budget, usize::MAX).unwrap();
+
+        let overhead = chunk_overhead(&hdrs, &env, MID).unwrap() + 64;
+        assert_eq!(plan.chunk_size, budget - overhead);
+
+        // ...and the chunk that comes out of it really does fit
+        let encoded = Encode!(&build_chunk(&plan, 0, &body, &hdrs, &env, MID))
+            .unwrap()
+            .len();
+        assert!(encoded <= budget, "{encoded} > {budget}");
+    }
+
+    /// One plan serves every destination, so it has to be sized against the
+    /// envelope that leaves the least room - not the first, and not the widest
+    /// by some other measure.
+    #[test]
+    fn test_chunk_size_is_measured_against_the_tightest_envelope() {
+        let hdrs = headers(5);
+        let body = Bytes::from(vec![0u8; 2_000_000]);
+        let budget = 256 * 1024;
+
+        let narrow = envelope(1);
+        let wide = envelope(10);
+
+        let plan = |envs: &[&Envelope]| {
+            plan_chunks(&hdrs, envs, MID, &body, budget, usize::MAX)
+                .unwrap()
+                .chunk_size
+        };
+
+        let narrow_only = plan(&[&narrow]);
+        let wide_only = plan(&[&wide]);
+        assert!(
+            wide_only < narrow_only,
+            "a wider envelope must leave less payload: {wide_only} vs {narrow_only}"
+        );
+
+        // Serving both means serving the tighter of the two, either way round
+        assert_eq!(plan(&[&narrow, &wide]), wide_only);
+        assert_eq!(plan(&[&wide, &narrow]), wide_only);
+    }
+
+    /// The floor rejects a header block that leaves a technically-usable but
+    /// absurd payload - exactly the case an "is there any room at all" guard
+    /// sails straight past.
+    #[test]
+    fn test_headers_leaving_a_tiny_payload_are_rejected() {
+        let budget = crate::ic::DEFAULT_MAX_INGRESS_MESSAGE_SIZE;
+        let env = envelope(1);
+
+        // ~1.9 MB of headers: room is left, but only a sliver of it
+        let hdrs = (0..950)
+            .map(|i| Header {
+                name: format!("X-Pad-{i}"),
+                value: "x".repeat(2000),
+            })
+            .collect::<Vec<_>>();
+
+        let available = budget - (chunk_overhead(&hdrs, &env, MID).unwrap() + 64);
+        assert!(
+            available > 0,
+            "precondition: the old guard would allow this"
+        );
+        assert!(available < budget / MIN_PAYLOAD_SHARE);
+
+        let err = plan_chunks(
+            &hdrs,
+            &[&env],
+            MID,
+            &Bytes::from(vec![0u8; 10_000_000]),
+            budget,
+            usize::MAX,
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, UploadPlanError::HeadersTooLarge { .. }),
+            "got {err:?}"
+        );
+    }
+
+    /// An empty envelope list would leave nothing to measure against, so the
+    /// chunk size would be bounded only by the slack. Refuse instead.
+    #[test]
+    fn test_no_envelopes_is_rejected() {
+        assert_eq!(
+            plan_chunks(
+                &headers(1),
+                &[],
+                MID,
+                &Bytes::from(vec![0u8; 1000]),
+                crate::ic::DEFAULT_MAX_INGRESS_MESSAGE_SIZE,
+                1024,
+            )
+            .unwrap_err(),
+            UploadPlanError::NoEnvelopes
+        );
     }
 }

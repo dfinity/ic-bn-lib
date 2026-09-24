@@ -9,7 +9,7 @@ use std::{
 
 use ahash::{AHashMap, RandomState};
 use async_trait::async_trait;
-use candid::{Encode, Principal};
+use candid::Principal;
 use futures::{StreamExt, TryStreamExt, future::join_all, stream};
 use http::Method;
 use ic_agent::Agent;
@@ -437,7 +437,6 @@ impl IcSmtpDeliveryAgent {
                     &parsed.headers,
                     envelope,
                     message_id,
-                    None,
                 );
 
                 self.upload_one_chunk(canister_id, &chunk).await
@@ -964,7 +963,7 @@ impl IcSmtpDeliveryAgent {
         // Size of the raw message: headers + body
         raw_size: u64,
     ) -> Vec<(Destination, Envelope, Route)> {
-        // Envelope, capabilities and single-call size for each destination.
+        // Envelope and capabilities for each destination.
         let mut prepared = Vec::with_capacity(mapping.len());
         for dest in mapping.values() {
             let envelope = Envelope {
@@ -972,47 +971,42 @@ impl IcSmtpDeliveryAgent {
                 to: dest.rcpts.iter().map(Into::into).collect(),
             };
 
-            // Estimate the encoded size of the envelope
-            let envelope_size = Encode!(&envelope).map(|x| x.len()).unwrap_or(0);
             let caps = self.capabilities(dest.smtp).await;
-
-            prepared.push((dest.clone(), envelope, envelope_size, caps));
+            prepared.push((dest.clone(), envelope, caps));
         }
 
         let est = |envelope: &Envelope| {
             single_shot_encoded_len(&parsed.headers, envelope, message_id, parsed.body.len())
         };
 
-        // Does anything actually need chunking?
+        // Everything that doesn't fit a single call needs a chunking plan
         let needs_chunking = prepared
             .iter()
-            .any(|(_, env, _, _)| est(env).is_ok_and(|n| n > self.upload_cfg.max_ingress_size));
+            .filter(|(_, env, _)| est(env).is_ok_and(|n| n > self.upload_cfg.max_ingress_size))
+            .map(|(_, env, _)| env)
+            .collect::<Vec<_>>();
 
-        // One plan for everyone
-        let plan = if needs_chunking && !parsed.body.is_empty() {
-            let widest = prepared
-                .iter()
-                .max_by_key(|(_, _, len, _)| *len)
-                .map(|(_, env, _, _)| env.clone());
-
-            widest.map(|env| {
+        // One plan for everyone: the digests don't depend on the destination and
+        // `plan_chunks` picks the chunks size against the biggest envelope given
+        let plan = if needs_chunking.is_empty() || parsed.body.is_empty() {
+            None
+        } else {
+            Some(
                 plan_chunks(
                     &parsed.headers,
-                    &env,
+                    &needs_chunking,
                     message_id,
                     &parsed.body,
                     self.upload_cfg.max_ingress_size,
                     self.upload_cfg.chunk_size,
                 )
-                .map(Arc::new)
-            })
-        } else {
-            None
+                .map(Arc::new),
+            )
         };
 
         prepared
             .into_iter()
-            .map(|(dest, envelope, _, caps)| {
+            .map(|(dest, envelope, caps)| {
                 let route =
                     self.route_for(dest.smtp, &envelope, &caps, plan.as_ref(), raw_size, &est);
                 (dest, envelope, route)
@@ -1054,8 +1048,12 @@ impl IcSmtpDeliveryAgent {
             return match plan {
                 Some(Ok(p)) => Route::Chunked(p.clone()),
 
-                // Planning failed (too big header block?)
-                Some(Err(e)) => Route::Reject(DeliveryError::Permanent(e.to_string())),
+                // An oversized header block is deterministic, an encoder
+                // failure is not - do not bounce mail for the latter.
+                Some(Err(e @ UploadPlanError::HeadersTooLarge { .. })) => {
+                    Route::Reject(DeliveryError::Permanent(e.to_string()))
+                }
+                Some(Err(e)) => Route::Reject(DeliveryError::Temporary(e.to_string())),
 
                 None => Route::Reject(DeliveryError::Temporary(
                     "message requires chunked upload but no plan was produced".into(),
@@ -1183,6 +1181,7 @@ mod tests {
             ic::candid::{Header, Message, SmtpOk, SmtpRequestError},
         },
     };
+    use ::candid::Encode;
     use ic_agent::{AgentError, agent_error::HttpErrorPayload};
     use ic_transport_types::{RejectCode, RejectResponse};
 
@@ -1900,7 +1899,6 @@ mod tests {
             chunk_retries: 2,
             delivery_timeout: Duration::from_secs(30),
             capabilities_cache_ttl: Duration::from_secs(600),
-            max_header_size: 32 * 1024,
         }
     }
 
@@ -2371,11 +2369,11 @@ mod tests {
         }];
         let body = bytes::Bytes::from(vec![7u8; 4096]);
 
-        let plan = plan_chunks(&hdrs, &env, "mid", &body, 256 * 1024, 1024).unwrap();
+        let plan = plan_chunks(&hdrs, &[&env], "mid", &body, 256 * 1024, 1024).unwrap();
         assert!(plan.total_chunks > 1);
 
         for i in 0..plan.total_chunks {
-            let chunk = build_chunk(&plan, i, &body, &hdrs, &env, "mid", None);
+            let chunk = build_chunk(&plan, i, &body, &hdrs, &env, "mid");
             assert!(matches!(
                 exec.canister_upload_chunk(canister, &chunk).await.unwrap(),
                 SmtpUploadChunkResponse::Ok(_)
@@ -2439,9 +2437,9 @@ mod tests {
             value: " hi\n".into(),
         }];
         let body = bytes::Bytes::from(vec![7u8; 4096]);
-        let plan = plan_chunks(&hdrs, &tiny_envelope(), "mid", &body, 256 * 1024, 1024).unwrap();
+        let plan = plan_chunks(&hdrs, &[&tiny_envelope()], "mid", &body, 256 * 1024, 1024).unwrap();
 
-        let first = build_chunk(&plan, 0, &body, &hdrs, &tiny_envelope(), "mid", None);
+        let first = build_chunk(&plan, 0, &body, &hdrs, &tiny_envelope(), "mid");
         exec.canister_upload_chunk(canister, &first).await.unwrap();
 
         // Same message_id, different envelope: a collision between two messages
@@ -2449,7 +2447,7 @@ mod tests {
             from: email!("john@doe.com").into(),
             to: vec![email!("someone.else@foo.bar").into()],
         };
-        let clashing = build_chunk(&plan, 1, &body, &hdrs, &other_env, "mid", None);
+        let clashing = build_chunk(&plan, 1, &body, &hdrs, &other_env, "mid");
 
         let resp = exec
             .canister_upload_chunk(canister, &clashing)

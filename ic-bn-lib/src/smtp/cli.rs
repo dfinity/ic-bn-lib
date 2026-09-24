@@ -83,8 +83,8 @@ pub struct SmtpServerCli {
     pub smtp_server_ic_max_ingress_size: u64,
 
     /// Body bytes per chunk for the IC chunked upload protocol.
-    /// May be lower due to what the destination canister advertises and due to the
-    /// measured Candid overhead of the first chunk, which carries the headers.
+    /// May be lowered by the measured Candid overhead of the first chunk,
+    /// which carries the headers.
     #[clap(env, long, default_value = "1MB", value_parser = parse_size)]
     pub smtp_server_ic_upload_chunk_size: u64,
 
@@ -110,12 +110,6 @@ pub struct SmtpServerCli {
     /// For how long to cache canister SMTP capabilities
     #[clap(env, long, default_value = "10m", value_parser = parse_duration)]
     pub smtp_server_ic_capabilities_cache_ttl: Duration,
-
-    /// Maximum size of the serialized headers.
-    /// Headers are never split across chunks, so they must fit into a single
-    /// ingress message with a first body chunk.
-    #[clap(env, long, default_value = "256KB", value_parser = parse_size)]
-    pub smtp_server_ic_max_header_size: u64,
 
     /// Whether to enforce usage of STARTTLS.
     /// Be advised that it's effectively against standards/RFCs to do that.
@@ -219,7 +213,6 @@ impl TryFrom<&SmtpServerCli> for IcSmtpUploadConfig {
     fn try_from(v: &SmtpServerCli) -> Result<Self, Self::Error> {
         let max_ingress_size = v.smtp_server_ic_max_ingress_size as usize;
         let chunk_size = v.smtp_server_ic_upload_chunk_size as usize;
-        let max_header_size = v.smtp_server_ic_max_header_size as usize;
 
         if v.smtp_server_ic_upload_global_concurrency == 0 {
             return Err(anyhow!(
@@ -227,17 +220,11 @@ impl TryFrom<&SmtpServerCli> for IcSmtpUploadConfig {
             ));
         }
 
-        // Chunk 0 has the whole header block, so it is the largest call the
-        // upload can make. If it won't fit with a usable payload - then the
-        // configuration is unusable
-        let worst_case = chunk_size.saturating_add(max_header_size);
-
-        if worst_case > max_ingress_size {
+        // How much of a chunk is actually payload is worked out per message from
+        // the measured Candid overhead, but zero isn't good
+        if chunk_size == 0 {
             return Err(anyhow!(
-                "`smtp_server_ic_upload_chunk_size` ({chunk_size}) plus \
-                 `smtp_server_ic_max_header_size` ({max_header_size}) does not leave room \
-                 for the ingress envelope within `smtp_server_ic_max_ingress_size` \
-                 ({max_ingress_size})"
+                "`smtp_server_ic_upload_chunk_size` must be at least 1"
             ));
         }
 
@@ -249,7 +236,6 @@ impl TryFrom<&SmtpServerCli> for IcSmtpUploadConfig {
             chunk_retries: v.smtp_server_ic_upload_chunk_retries,
             delivery_timeout: v.smtp_server_ic_delivery_timeout,
             capabilities_cache_ttl: v.smtp_server_ic_capabilities_cache_ttl,
-            max_header_size,
         })
     }
 }
@@ -526,7 +512,6 @@ mod test {
             c.smtp_server_ic_capabilities_cache_ttl,
             Duration::from_secs(600)
         );
-        assert_eq!(c.smtp_server_ic_max_header_size, 256 * 1024);
 
         // The shipped defaults must be usable as-is
         let cfg = IcSmtpUploadConfig::try_from(&c).unwrap();
@@ -550,8 +535,6 @@ mod test {
             "45s",
             "--smtp-server-ic-capabilities-cache-ttl",
             "1m",
-            "--smtp-server-ic-max-header-size",
-            "128KB",
         ]);
 
         let cfg = IcSmtpUploadConfig::try_from(&cli).unwrap();
@@ -562,7 +545,6 @@ mod test {
         assert_eq!(cfg.chunk_retries, 5);
         assert_eq!(cfg.delivery_timeout, Duration::from_secs(45));
         assert_eq!(cfg.capabilities_cache_ttl, Duration::from_secs(60));
-        assert_eq!(cfg.max_header_size, 128 * 1024);
 
         // 4 MiB in flight over 512 KiB chunks
         assert_eq!(cfg.concurrency(cfg.chunk_size), 8);
@@ -604,28 +586,22 @@ mod test {
         assert!(SessionConfig::try_from(&cli).is_ok());
     }
 
-    /// Chunk 0 carries the whole header block, so the two together plus the
-    /// envelope have to fit one ingress message.
+    /// How much of a chunk is payload is decided per message from the measured
+    /// Candid overhead, so the only thing left to reject here is a zero, which
+    /// `plan_chunks` would otherwise round up to a 1-byte chunk.
     #[test]
-    fn test_chunk_plus_headers_must_fit_one_ingress_message() {
-        let cli = parse(&[
-            "--smtp-server-ic-upload-chunk-size",
-            "2MB",
-            "--smtp-server-ic-max-header-size",
-            "1MB",
-        ]);
-
+    fn test_zero_chunk_size_is_rejected() {
+        let cli = parse(&["--smtp-server-ic-upload-chunk-size", "0"]);
         let err = IcSmtpUploadConfig::try_from(&cli).unwrap_err().to_string();
-        assert!(err.contains("does not leave room"), "{err}");
+        assert!(err.contains("upload_chunk_size"), "{err}");
 
-        // Raising the subnet limit makes the same pair workable
+        // A chunk larger than the ingress budget is fine - the per-message
+        // measurement clamps it down.
         let cli = parse(&[
             "--smtp-server-ic-upload-chunk-size",
-            "2MB",
-            "--smtp-server-ic-max-header-size",
-            "1MB",
+            "8MB",
             "--smtp-server-ic-max-ingress-size",
-            "3584KB",
+            "2MB",
         ]);
         assert!(IcSmtpUploadConfig::try_from(&cli).is_ok());
     }
