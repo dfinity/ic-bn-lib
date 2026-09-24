@@ -116,7 +116,7 @@ pub struct SmtpUploadChunk {
     /// Uses the same value as `SmtpRequest::message_id` (UUID).
     pub message_id: String,
     /// SMTP envelope.
-    /// Identical in every chunk of one upload.
+    /// Identical in every chunk of one upload
     pub envelope: Envelope,
     /// Index of this chunk
     pub index: u32,
@@ -138,9 +138,9 @@ pub struct SmtpUploadChunk {
     pub body_sha256: Vec<u8>,
     /// Chunk payload
     pub payload: Vec<u8>,
-    /// Message headers - filled only in the first chunk.
+    /// Message headers - filled only in the first chunk
     pub headers: Option<Vec<Header>>,
-    /// Gateway flags, also only in the first chunk.
+    /// Gateway flags, also only in the first chunk
     pub gateway_flags: Option<Vec<String>>,
 }
 
@@ -149,8 +149,6 @@ pub struct SmtpUploadChunk {
 pub struct SmtpUploadChunkOk {
     /// Number of total chunks received so far.
     pub chunks_received: u32,
-    /// IC time in nanoseconds after which the canister may discard this upload.
-    pub expires_at_ns: u64,
 }
 
 /// Response to `smtp_upload_chunk` request
@@ -183,15 +181,13 @@ pub struct SmtpUploadId {
 pub struct SmtpUploadStatus {
     /// An open upload exists for message_id
     pub known: bool,
-    /// The upload was committed
+    /// The upload was committed,
     /// `result` holds the outcome.
     pub committed: bool,
     /// `Some` only if `committed`
     pub result: Option<SmtpResponse>,
     /// Chunk indices not yet received
     pub missing: Vec<u32>,
-    /// IC time in nanoseconds after which the canister may discard this record.
-    pub expires_at_ns: u64,
 }
 
 /// Response to `smtp_upload_status`.
@@ -724,10 +720,7 @@ mod test {
 
     #[test]
     fn test_upload_responses_roundtrip_and_labels() {
-        let r = SmtpUploadChunkResponse::Ok(SmtpUploadChunkOk {
-            chunks_received: 4,
-            expires_at_ns: 1_700_000_000_000_000_000,
-        });
+        let r = SmtpUploadChunkResponse::Ok(SmtpUploadChunkOk { chunks_received: 4 });
         let b = Encode!(&r).unwrap();
         assert_eq!(Decode!(&b, SmtpUploadChunkResponse).unwrap(), r);
         // Labels are part of the wire format
@@ -767,7 +760,6 @@ mod test {
             committed: true,
             result: Some(SmtpResponse::Ok(SmtpOk {})),
             missing: vec![],
-            expires_at_ns: 42,
         };
         let b = Encode!(&SmtpUploadStatusResponse::Ok(st.clone())).unwrap();
         assert_eq!(
@@ -781,7 +773,6 @@ mod test {
             committed: false,
             result: None,
             missing: vec![2, 5, 9],
-            expires_at_ns: 42,
         };
         let b = Encode!(&SmtpUploadStatusResponse::Ok(st.clone())).unwrap();
         let SmtpUploadStatusResponse::Ok(decoded) = Decode!(&b, SmtpUploadStatusResponse).unwrap()
@@ -799,7 +790,6 @@ mod test {
                 committed: false,
                 result: None,
                 missing: vec![],
-                expires_at_ns: 0,
             }
         );
     }

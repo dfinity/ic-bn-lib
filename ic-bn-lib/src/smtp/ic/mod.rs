@@ -268,9 +268,9 @@ pub struct Metrics {
     canister_id_lookup_latency: HistogramVec,
     smtp_requests: IntCounterVec,
     smtp_request_latency: HistogramVec,
+    deliveries: IntCounterVec,
 
     // Chunked upload metrics
-    deliveries: IntCounterVec,
     capability_lookups: IntCounterVec,
     upload_calls: IntCounterVec,
     upload_call_latency: HistogramVec,

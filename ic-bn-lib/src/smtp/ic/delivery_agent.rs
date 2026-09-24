@@ -1793,7 +1793,6 @@ mod tests {
 
             Ok(SmtpUploadChunkResponse::Ok(SmtpUploadChunkOk {
                 chunks_received,
-                expires_at_ns: 0,
             }))
         }
 
