@@ -107,7 +107,8 @@ impl SmtpCapabilities {
 /// One chunk of the message body.
 ///
 /// Every field except `headers` and `gateway_flags` is repeated in every chunk,
-/// which makes the chunk idempotent.
+/// which makes the chunk idempotent and lets the canister build the upload from
+/// whichever chunk arrives first.
 #[derive(Clone, Debug, CandidType, Deserialize, Eq, PartialEq)]
 pub struct SmtpUploadChunk {
     /// Must be `SMTP_UPLOAD_PROTOCOL_VERSION`.
@@ -127,15 +128,8 @@ pub struct SmtpUploadChunk {
     pub chunk_size: u64,
     /// Total body length
     pub body_size: u64,
-    /// SHA-256 of the `payload` field
+    /// SHA-256 of the `payload` field, 32 bytes
     pub payload_sha256: Vec<u8>,
-    /// SHA-256 over the concatenation of every chunk's `payload_sha256` in
-    /// index order: `SHA256(payload_sha256[0] || .. || payload_sha256[n-1])`.
-    ///
-    /// A kind of poor-man's Merkle tree, it helps to verify the
-    /// entire message body without having to re-read all the chunks again,
-    /// which saves cycles.
-    pub body_sha256: Vec<u8>,
     /// Chunk payload
     pub payload: Vec<u8>,
     /// Message headers - filled only in the first chunk
@@ -164,7 +158,11 @@ pub struct SmtpUploadCommit {
     /// Must be `SMTP_UPLOAD_PROTOCOL_VERSION`
     pub version: u32,
     pub message_id: String,
-    /// Same as `SmtpUploadChunk::body_sha256`
+    /// SHA-256 over the concatenation of every chunk's payload digest in index
+    /// order: `SHA256(d_0 || d_1 || .. || d_{n-1})` where `d_i = SHA256(payload_i)`.
+    ///
+    /// A poor-man's Merkle tree: it lets the canister verify the whole body by
+    /// hashing `32 * total_chunks` bytes instead of re-reading the message.
     pub body_sha256: Vec<u8>,
     pub total_chunks: u32,
 }
@@ -186,8 +184,6 @@ pub struct SmtpUploadStatus {
     pub committed: bool,
     /// `Some` only if `committed`
     pub result: Option<SmtpResponse>,
-    /// Chunk indices not yet received
-    pub missing: Vec<u32>,
 }
 
 /// Response to `smtp_upload_status`.
@@ -531,7 +527,6 @@ mod test {
         chunk_size: u64,
         body_size: u64,
         payload_sha256: Vec<u8>,
-        body_sha256: Vec<u8>,
         payload: Vec<u8>,
         headers: Option<Vec<Header>>,
         gateway_flags: Option<Vec<String>>,
@@ -566,7 +561,6 @@ mod test {
             chunk_size: 1024,
             body_size: 6500,
             payload_sha256: vec![0xaa; SHA256_LEN],
-            body_sha256: vec![0xbb; SHA256_LEN],
             payload: (0..=255u8).collect(),
             headers: None,
             gateway_flags: None,
@@ -705,7 +699,6 @@ mod test {
             chunk_size: c.chunk_size,
             body_size: c.body_size,
             payload_sha256: c.payload_sha256.clone(),
-            body_sha256: c.body_sha256.clone(),
             payload: c.payload,
             headers: None,
             gateway_flags: None,
@@ -759,7 +752,6 @@ mod test {
             known: true,
             committed: true,
             result: Some(SmtpResponse::Ok(SmtpOk {})),
-            missing: vec![],
         };
         let b = Encode!(&SmtpUploadStatusResponse::Ok(st.clone())).unwrap();
         assert_eq!(
@@ -772,7 +764,6 @@ mod test {
             known: true,
             committed: false,
             result: None,
-            missing: vec![2, 5, 9],
         };
         let b = Encode!(&SmtpUploadStatusResponse::Ok(st.clone())).unwrap();
         let SmtpUploadStatusResponse::Ok(decoded) = Decode!(&b, SmtpUploadStatusResponse).unwrap()
@@ -780,7 +771,6 @@ mod test {
             panic!("expected Ok variant");
         };
         assert_eq!(decoded, st);
-        assert_eq!(decoded.missing, vec![2, 5, 9]);
 
         // Unknown upload - the default is the safe reading
         assert_eq!(
@@ -789,7 +779,6 @@ mod test {
                 known: false,
                 committed: false,
                 result: None,
-                missing: vec![],
             }
         );
     }
@@ -851,5 +840,54 @@ mod test {
         assert_eq!(r.message_id, "x");
 
         assert_eq!(Decode!(&Encode!(&r).unwrap(), SmtpUploadCommit).unwrap(), c);
+    }
+
+    /// Dropping a required field is only safe before anyone implements the
+    /// protocol, because the compatibility is one-way. Pin both directions so
+    /// the next person can see why the removal had to precede adoption.
+    #[test]
+    fn test_chunk_decode_asymmetry_after_dropping_body_sha256() {
+        /// The shape `SmtpUploadChunk` had while it still carried the body digest.
+        #[derive(Clone, Debug, CandidType, Deserialize, Eq, PartialEq)]
+        struct SmtpUploadChunkV0 {
+            version: u32,
+            message_id: String,
+            envelope: Envelope,
+            index: u32,
+            total_chunks: u32,
+            chunk_size: u64,
+            body_size: u64,
+            payload_sha256: Vec<u8>,
+            body_sha256: Vec<u8>,
+            payload: Vec<u8>,
+            headers: Option<Vec<Header>>,
+            gateway_flags: Option<Vec<String>>,
+        }
+
+        let c = chunk();
+        let old = SmtpUploadChunkV0 {
+            version: c.version,
+            message_id: c.message_id.clone(),
+            envelope: c.envelope.clone(),
+            index: c.index,
+            total_chunks: c.total_chunks,
+            chunk_size: c.chunk_size,
+            body_size: c.body_size,
+            payload_sha256: c.payload_sha256.clone(),
+            body_sha256: vec![0xbb; SHA256_LEN],
+            payload: c.payload.clone(),
+            headers: c.headers.clone(),
+            gateway_flags: c.gateway_flags.clone(),
+        };
+
+        // A sender still carrying the field is fine: record width subtyping
+        // drops what the receiver does not declare.
+        let b = Encode!(&old).unwrap();
+        assert_eq!(Decode!(&b, SmtpUploadChunk).unwrap(), c);
+
+        // A receiver that still REQUIRES it is not fine - which is exactly why
+        // this could not be done after a canister had shipped.
+        let b = Encode!(&c).unwrap();
+        assert!(Decode!(&b, SmtpUploadChunkV0).is_err());
     }
 }

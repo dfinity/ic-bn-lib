@@ -33,15 +33,14 @@ use crate::{
             DestCanister, ExecutesIcSmtpRequest, IcSmtpRequestExecutor, Metrics, ParsedEmail,
             ReceivesIcSmtpNotifications,
             candid::{
-                Envelope, SMTP_UPLOAD_PROTOCOL_VERSION, SmtpCapabilities, SmtpRequest,
-                SmtpRequestError, SmtpResponse, SmtpUploadChunk, SmtpUploadChunkResponse,
-                SmtpUploadCommit, SmtpUploadId, SmtpUploadStatusResponse,
+                Envelope, SmtpCapabilities, SmtpRequest, SmtpRequestError, SmtpResponse,
+                SmtpUploadChunk, SmtpUploadChunkResponse, SmtpUploadId, SmtpUploadStatusResponse,
             },
             is_ambiguous, is_missing_method, is_payload_too_large, is_rate_limited,
             parse_email_bytes,
             upload::{
-                IcSmtpUploadConfig, UploadPlan, UploadPlanError, build_chunk, plan_chunks,
-                single_shot_encoded_len,
+                IcSmtpUploadConfig, UploadPlan, UploadPlanError, build_chunk, build_commit,
+                plan_chunks, single_shot_encoded_len,
             },
         },
     },
@@ -451,10 +450,7 @@ impl IcSmtpDeliveryAgent {
         if let Err(e) = res {
             self.observe_upload(start, Some(&e.error));
 
-            // The canister holds the chunks until the TTL expires, so
-            // when the attempt failed for a retryable reason e.g. rate limit -
-            // leaving them in place lets us resume instead of
-            // reuploading the whole body.
+            // If the error tells us to abort the upload, do so
             if !e.keep_upload {
                 self.spawn_abort(canister_id, message_id);
             }
@@ -568,12 +564,7 @@ impl IcSmtpDeliveryAgent {
         message_id: &str,
         plan: &UploadPlan,
     ) -> Result<(), DeliveryError> {
-        let commit = SmtpUploadCommit {
-            version: SMTP_UPLOAD_PROTOCOL_VERSION,
-            message_id: message_id.to_string(),
-            body_sha256: plan.body_sha256.to_vec(),
-            total_chunks: plan.total_chunks,
-        };
+        let commit = build_commit(plan, message_id);
 
         let start = Instant::now();
         let res = self
@@ -648,10 +639,7 @@ impl IcSmtpDeliveryAgent {
 
             // Still open: the commit never ran, so one more attempt is safe
             Ok(SmtpUploadStatusResponse::Ok(st)) if st.known => {
-                Err(DeliveryError::Temporary(format!(
-                    "commit did not complete, {} chunk(s) still missing",
-                    st.missing.len()
-                )))
+                Err(DeliveryError::Temporary("commit did not complete".into()))
             }
 
             // Unknown / ambiguous: retry the delivery just in case
@@ -695,7 +683,7 @@ impl IcSmtpDeliveryAgent {
     /// Sends the message to the listed recipients of a single canister.
     async fn smtp_message_send(
         &self,
-        dest: DestCanister,
+        dest: Destination,
         envelope: Envelope,
         meta: Arc<SessionMeta>,
         message: Arc<EmailMessage>,
@@ -748,10 +736,21 @@ impl IcSmtpDeliveryAgent {
             let error = res.clone().err();
             let meta = meta.clone();
             let message = message.clone();
+            // Several `DestCanister`s can share one SMTP canister and therefore
+            // one delivery
+            let origins = dest.origins.clone();
 
             tokio::spawn(async move {
-                v.notify_ic_message(meta, message, dest, latency, error)
+                for origin in origins {
+                    v.notify_ic_message(
+                        meta.clone(),
+                        message.clone(),
+                        origin,
+                        latency,
+                        error.clone(),
+                    )
                     .await;
+                }
             });
         }
 
@@ -763,7 +762,7 @@ impl IcSmtpDeliveryAgent {
 #[derive(Clone, Debug)]
 struct ChunkFailure {
     error: DeliveryError,
-    /// Leave the partial upload in place so a retry can resume it
+    /// Leave the partial upload alone rather than aborting it
     keep_upload: bool,
 }
 
@@ -776,7 +775,7 @@ impl ChunkFailure {
         }
     }
 
-    /// Transient back-pressure; a retry can pick up where this left off.
+    /// Transient back-pressure: skip the abort, let the canister expire it.
     const fn resumable(error: DeliveryError) -> Self {
         Self {
             error,
@@ -785,14 +784,28 @@ impl ChunkFailure {
     }
 }
 
-/// How one destination canister will receive this message.
+/// One SMTP canister and everything destined for it.
+///
+/// Recipients are merged per **SMTP canister**, not per [`DestCanister`]: the
+/// same canister can be reached through several `DestCanister`s - two
+/// app canisters delegating to one shared SMTP canister via
+/// `.well-known/ic-smtp-canister-id`, or one canister addressed both through a
+/// custom domain and through `<principal>.icp0.io`.
+#[derive(Clone, Debug)]
+struct Destination {
+    smtp: Principal,
+    origins: Vec<DestCanister>,
+    rcpts: Vec<EmailAddress>,
+}
+
+/// How one destination canister will receive this message
 #[derive(Clone, Debug)]
 enum Route {
-    /// Fits into a single ingress message, exactly as before.
+    /// Fits into a single ingress message
     SingleShot,
-    /// Too large for one call, and the canister supports chunked upload.
+    /// Too large for one call, and the canister supports chunked upload
     Chunked(Arc<UploadPlan>),
-    /// Cannot be delivered; no canister call will be made at all.
+    /// Cannot be delivered - no canister call will be made at all
     Reject(DeliveryError),
 }
 
@@ -844,6 +857,7 @@ impl DeliversMail for IcSmtpDeliveryAgent {
         // no existing timeout can limit it: `max_session_duration` is only
         // checked when the client sends more bytes, and `timeout` is a socket
         // read timeout.
+        // So wrap it with timeout.
         self.deliver_mail_inner(meta, message)
             .timeout(self.upload_cfg.delivery_timeout)
             .await
@@ -877,8 +891,9 @@ impl IcSmtpDeliveryAgent {
         );
 
         // A single message can be (potentially) destined for several canisters/domains.
-        // So we build a map (canister_ids) -> (recipients).
-        let mut mapping: AHashMap<DestCanister, Vec<EmailAddress>> =
+        // So we build a map (smtp canister) -> (recipients), keyed by the canister
+        // we actually talk to
+        let mut mapping: AHashMap<Principal, Destination> =
             AHashMap::with_capacity(message.rcpt_to.len());
 
         // The future in this loop usually resolves instantly due to the nature of the SMTP protocol.
@@ -891,11 +906,16 @@ impl IcSmtpDeliveryAgent {
                 .await
                 .ok_or_else(|| DeliveryError::Permanent("Unknown domain".into()))?;
 
-            if let Some(v) = mapping.get_mut(&dest) {
-                v.push(rcpt.clone());
-            } else {
-                mapping.insert(dest, vec![rcpt.clone()]);
+            let entry = mapping.entry(dest.smtp).or_insert_with(|| Destination {
+                smtp: dest.smtp,
+                origins: vec![],
+                rcpts: vec![],
+            });
+
+            if !entry.origins.contains(&dest) {
+                entry.origins.push(dest);
             }
+            entry.rcpts.push(rcpt.clone());
         }
 
         let message_id = message.id.to_string();
@@ -937,26 +957,26 @@ impl IcSmtpDeliveryAgent {
     /// Decides how each destination canister will receive this message (single-call, chunked etc)
     async fn plan_destinations(
         &self,
-        mapping: &AHashMap<DestCanister, Vec<EmailAddress>>,
+        mapping: &AHashMap<Principal, Destination>,
         parsed: &ParsedEmail,
         message_id: &str,
         mail_from: &EmailAddress,
         // Size of the raw message: headers + body
         raw_size: u64,
-    ) -> Vec<(DestCanister, Envelope, Route)> {
+    ) -> Vec<(Destination, Envelope, Route)> {
         // Envelope, capabilities and single-call size for each destination.
         let mut prepared = Vec::with_capacity(mapping.len());
-        for (dest, rcpts) in mapping {
+        for dest in mapping.values() {
             let envelope = Envelope {
                 from: mail_from.clone().into(),
-                to: rcpts.iter().map(Into::into).collect(),
+                to: dest.rcpts.iter().map(Into::into).collect(),
             };
 
             // Estimate the encoded size of the envelope
             let envelope_size = Encode!(&envelope).map(|x| x.len()).unwrap_or(0);
             let caps = self.capabilities(dest.smtp).await;
 
-            prepared.push((*dest, envelope, envelope_size, caps));
+            prepared.push((dest.clone(), envelope, envelope_size, caps));
         }
 
         let est = |envelope: &Envelope| {
@@ -968,9 +988,7 @@ impl IcSmtpDeliveryAgent {
             .iter()
             .any(|(_, env, _, _)| est(env).is_ok_and(|n| n > self.upload_cfg.max_ingress_size));
 
-        // One plan for everyone. The stride is clamped by the most restrictive
-        // canister, which only makes chunks smaller; each destination's own
-        // limits are still checked individually below.
+        // One plan for everyone
         let plan = if needs_chunking && !parsed.body.is_empty() {
             let widest = prepared
                 .iter()
@@ -995,7 +1013,8 @@ impl IcSmtpDeliveryAgent {
         prepared
             .into_iter()
             .map(|(dest, envelope, _, caps)| {
-                let route = self.route_for(dest, &envelope, &caps, plan.as_ref(), raw_size, &est);
+                let route =
+                    self.route_for(dest.smtp, &envelope, &caps, plan.as_ref(), raw_size, &est);
                 (dest, envelope, route)
             })
             .collect()
@@ -1004,7 +1023,7 @@ impl IcSmtpDeliveryAgent {
     /// Picks the transfer mode for one destination.
     fn route_for(
         &self,
-        dest: DestCanister,
+        smtp: Principal,
         envelope: &Envelope,
         caps: &SmtpCapabilities,
         plan: Option<&Result<Arc<UploadPlan>, UploadPlanError>>,
@@ -1017,7 +1036,7 @@ impl IcSmtpDeliveryAgent {
             ));
         };
 
-        // Comfortably within one ingress message: exactly today's behaviour.
+        // Fits one ingress message
         if encoded <= self.upload_cfg.max_ingress_size {
             return Route::SingleShot;
         }
@@ -1027,8 +1046,7 @@ impl IcSmtpDeliveryAgent {
             // them is a definite refusal rather than something to retry.
             if caps.max_message_size.is_some_and(|m| raw_size > m) {
                 return Route::Reject(DeliveryError::Permanent(format!(
-                    "message is {raw_size} bytes, canister {} accepts at most {}",
-                    dest.smtp,
+                    "message is {raw_size} bytes, canister {smtp} accepts at most {}",
                     caps.max_message_size.unwrap_or(0)
                 )));
             }
@@ -1045,21 +1063,12 @@ impl IcSmtpDeliveryAgent {
             };
         }
 
-        // No chunking available. `encoded` is exact, but the envelope overhead
-        // subtracted from `budget` is only an estimate, so between the two there
-        // is a band where the message may still fit. Try it rather than refuse:
-        // it either succeeds exactly as it does today, or the replica refuses it
-        // and we report that instead of bouncing on our own guess.
-        if encoded <= self.upload_cfg.max_ingress_size {
-            return Route::SingleShot;
-        }
-
-        // Past the subnet's hard limit with zero envelope overhead, so it cannot
-        // fit under any estimate. Bouncing here is safe and tells the sender why.
+        // Too big for one call and no chunking on offer. Bouncing is safe: the
+        // check above already let through everything that fits.
         Route::Reject(DeliveryError::Permanent(format!(
             "message is too large ({encoded} bytes encoded, limit is {}) and \
-             canister {} does not support chunked upload",
-            self.upload_cfg.max_ingress_size, dest.smtp
+             canister {smtp} does not support chunked upload",
+            self.upload_cfg.max_ingress_size
         )))
     }
 }
@@ -1166,6 +1175,7 @@ mod tests {
         },
     };
 
+    use crate::smtp::ic::candid::SmtpUploadCommit;
     use crate::{
         email, principal,
         smtp::{
@@ -1602,14 +1612,13 @@ mod tests {
         total_chunks: u32,
         chunk_size: u64,
         body_size: u64,
-        body_sha256: Vec<u8>,
         chunks: BTreeMap<u32, Vec<u8>>,
     }
 
     /// A test executor that actually implements the canister side of the
-    /// protocol: it verifies each chunk's digest on arrival, enforces
-    /// cross-chunk consistency, reassembles at commit and checks the digest
-    /// chain. That makes the round-trip tests below real protocol tests rather
+    /// protocol: it verifies each chunk's digest on arrival, enforces the shape
+    /// invariants it must act on before the commit, reassembles at commit and
+    /// re-derives the digest chain from what it stored. That makes the round-trip tests below real protocol tests rather
     /// than assertions about what the gateway happens to send.
     #[derive(Debug, Default)]
     struct ChunkingExecutor {
@@ -1746,12 +1755,17 @@ mod tests {
                 )));
             }
 
-            // Shape
-            let expected = chunk
-                .chunk_size
-                .min(chunk.body_size - u64::from(chunk.index) * chunk.chunk_size);
+            // Shape. The index has to be bounded BEFORE it is used in the
+            // offset arithmetic below, which would otherwise underflow on a
+            // malformed chunk - wrapping in release, trapping in a canister
+            // built with overflow checks.
+            let expected = u64::from(chunk.index)
+                .checked_mul(chunk.chunk_size)
+                .and_then(|offset| chunk.body_size.checked_sub(offset))
+                .map(|left| chunk.chunk_size.min(left));
+
             if chunk.index >= chunk.total_chunks
-                || chunk.payload.len() as u64 != expected
+                || expected != Some(chunk.payload.len() as u64)
                 || chunk.headers.is_some() != (chunk.index == 0)
             {
                 return Ok(SmtpUploadChunkResponse::Err(Self::reject(
@@ -1769,17 +1783,17 @@ mod tests {
                 up.total_chunks = chunk.total_chunks;
                 up.chunk_size = chunk.chunk_size;
                 up.body_size = chunk.body_size;
-                up.body_sha256.clone_from(&chunk.body_sha256);
                 up.envelope = Some(chunk.envelope.clone());
             } else if up.total_chunks != chunk.total_chunks
                 || up.chunk_size != chunk.chunk_size
                 || up.body_size != chunk.body_size
-                || up.body_sha256 != chunk.body_sha256
                 || up.envelope.as_ref() != Some(&chunk.envelope)
             {
-                // Two different messages collided on one message_id
+                // Two different messages collided on one message_id. 4xx, not
+                // 5xx: `map_canister_error` turns 5xx into a permanent failure
+                // and a collision is worth retrying.
                 return Ok(SmtpUploadChunkResponse::Err(Self::reject(
-                    550,
+                    450,
                     "inconsistent chunk",
                 )));
             }
@@ -1827,7 +1841,7 @@ mod tests {
             }
             let derived: [u8; 32] = rolling.finalize().into();
 
-            if derived.to_vec() != commit.body_sha256 || commit.body_sha256 != up.body_sha256 {
+            if derived.to_vec() != commit.body_sha256 {
                 return Ok(SmtpResponse::Err(Self::reject(550, "body digest mismatch")));
             }
             if body.len() as u64 != up.body_size {
@@ -1875,8 +1889,8 @@ mod tests {
         }
     }
 
-    /// Small ingress budget so tests can trigger chunking without multi-megabyte
-    /// bodies. `MIN_CHUNK_SIZE` is 64 KiB, so the budget has to stay above it.
+    /// Small ingress budget so tests can trigger chunking without
+    /// multi-megabyte bodies.
     fn test_upload_cfg() -> IcSmtpUploadConfig {
         IcSmtpUploadConfig {
             max_ingress_size: 256 * 1024,
@@ -2116,22 +2130,29 @@ mod tests {
         assert_eq!(exec.chunk_calls.load(Ordering::SeqCst), 0);
     }
 
-    /// Between the estimated budget and the hard limit the message may still
-    /// fit, so it is attempted rather than refused on our own estimate. Nothing
-    /// that delivers today may start bouncing.
+    /// A legacy canister keeps the single call for everything that fits the
+    /// ingress budget, right up to the boundary. The routing threshold is the
+    /// budget itself - no reserve is subtracted - so nothing that delivers
+    /// today may start being chunked or refused.
     #[tokio::test]
-    async fn test_gray_band_still_attempts_the_single_call() {
+    async fn test_legacy_canister_gets_the_single_call_up_to_the_limit() {
         let exec = Arc::new(ChunkingExecutor::default()); // legacy
         let cfg = test_upload_cfg();
         let agent = create_chunking_agent(exec.clone(), cfg.clone());
 
-        // Over `arg_budget` (256 KiB - 16 KiB reserve) but under the hard limit
+        // Just under the 256 KiB budget once headers and framing are counted
         let body_len = 250 * 1024;
         agent
             .deliver_mail(test_meta(), Arc::new(big_message(body_len)))
             .await
             .unwrap();
 
+        let encoded = exec.max_encoded.load(Ordering::SeqCst);
+        assert!(
+            encoded <= cfg.max_ingress_size,
+            "{encoded} exceeded the {} byte budget",
+            cfg.max_ingress_size
+        );
         assert_eq!(exec.single_shot.lock().unwrap().len(), 1);
         assert_eq!(exec.chunk_calls.load(Ordering::SeqCst), 0);
     }
@@ -2180,9 +2201,8 @@ mod tests {
         );
     }
 
-    /// A rate-limited replica must not cost us the upload: the canister is
-    /// still holding the chunks until its TTL, so the partial upload is left in
-    /// place for the sender's retry to resume. Any other failure releases it.
+    /// A rate-limited replica must not be sent an abort on top: the canister
+    /// expires the upload on its own. Any other failure releases it explicitly.
     #[tokio::test]
     async fn test_rate_limited_upload_is_left_for_a_retry() {
         // No retries, so the test does not sit through the backoff
@@ -2242,5 +2262,207 @@ mod tests {
             exec.uploads.lock().unwrap().is_empty(),
             "an abandoned upload must be released"
         );
+    }
+
+    /// Two recipients that resolve to different `DestCanister`s but the same
+    /// SMTP canister must be delivered as ONE upload carrying both.
+    ///
+    /// Before they were merged this produced two concurrent uploads under the
+    /// same `(caller, message_id)` with different envelopes - which a canister
+    /// checking cross-chunk consistency rejects, and whose abort then removed
+    /// the other upload as well.
+    #[tokio::test]
+    async fn test_recipients_sharing_an_smtp_canister_are_merged() {
+        let shared = principal!("6hsbt-vqaaa-aaaaf-aaafq-cai");
+        let via_custom_domain = principal!("qoctq-giaaa-aaaaa-aaaea-cai");
+        let addressed_directly = principal!("gjxif-ryaaa-aaaad-ae4ka-cai");
+
+        // `foo.bar` is a custom domain for one canister, the other is addressed
+        // as `<principal>.icp0.io`. Both delegate their SMTP to `shared`.
+        let resolver =
+            TestDomainResolver(HashMap::from_iter([(fqdn!("foo.bar"), via_custom_domain)]));
+
+        let http_client = Arc::new(TestHttpClient(
+            HashMap::from_iter([(via_custom_domain, shared), (addressed_directly, shared)]),
+            AtomicUsize::new(0),
+            AtomicUsize::new(0),
+        ));
+
+        let exec = Arc::new(ChunkingExecutor::with_caps(
+            ChunkingExecutor::chunking_caps(),
+        ));
+        let agent = IcSmtpDeliveryAgent::new(
+            exec.clone(),
+            Arc::new(resolver),
+            http_client,
+            "icp0.io",
+            Duration::from_secs(10),
+            10,
+            Metrics::new(&Registry::new()),
+            None,
+        )
+        .with_upload_config(test_upload_cfg());
+
+        let rcpt_a = email!("a@foo.bar");
+        let rcpt_b = email!("b@gjxif-ryaaa-aaaad-ae4ka-cai.icp0.io");
+
+        // Guard the premise: these must be two DISTINCT `DestCanister`s that
+        // nonetheless share an SMTP canister, otherwise the test would pass
+        // trivially without exercising the merge at all.
+        let dest_a = agent.resolve_canister_id(&rcpt_a).await.unwrap();
+        let dest_b = agent.resolve_canister_id(&rcpt_b).await.unwrap();
+        assert_ne!(dest_a, dest_b, "the two destinations must differ");
+        assert_eq!(dest_a.smtp, shared);
+        assert_eq!(dest_b.smtp, shared);
+
+        let message = EmailMessage {
+            rcpt_to: vec![rcpt_a, rcpt_b],
+            ..big_message(300_000)
+        };
+
+        agent
+            .deliver_mail(test_meta(), Arc::new(message))
+            .await
+            .unwrap();
+
+        let delivered = exec.delivered.lock().unwrap().clone();
+        assert_eq!(
+            delivered.len(),
+            1,
+            "one SMTP canister must receive exactly one message"
+        );
+
+        let (canister, _, envelope) = delivered[0].clone();
+        assert_eq!(canister, shared);
+
+        // ...carrying both recipients
+        let mut users = envelope
+            .to
+            .iter()
+            .map(|a| a.user.clone())
+            .collect::<Vec<_>>();
+        users.sort();
+        assert_eq!(users, vec!["a".to_string(), "b".to_string()]);
+
+        // ...and the body was uploaded once, not once per `DestCanister`
+        assert_eq!(exec.chunk_calls.load(Ordering::SeqCst), 5);
+    }
+
+    fn tiny_envelope() -> Envelope {
+        Envelope {
+            from: email!("john@doe.com").into(),
+            to: vec![email!("jane@foo.bar").into()],
+        }
+    }
+
+    /// The commit's digest is now the ONLY check with truth value about the
+    /// body, so prove it actually fires. Every other test drives it with a
+    /// correct gateway, where it never can.
+    #[tokio::test]
+    async fn test_commit_verifies_the_derived_digest() {
+        use crate::smtp::ic::candid::SHA256_LEN;
+
+        let exec = ChunkingExecutor::with_caps(ChunkingExecutor::chunking_caps());
+        let canister = principal!("aaaaa-aa");
+        let env = tiny_envelope();
+        let hdrs = vec![Header {
+            name: "Subject".into(),
+            value: " hi\n".into(),
+        }];
+        let body = bytes::Bytes::from(vec![7u8; 4096]);
+
+        let plan = plan_chunks(&hdrs, &env, "mid", &body, 256 * 1024, 1024).unwrap();
+        assert!(plan.total_chunks > 1);
+
+        for i in 0..plan.total_chunks {
+            let chunk = build_chunk(&plan, i, &body, &hdrs, &env, "mid", None);
+            assert!(matches!(
+                exec.canister_upload_chunk(canister, &chunk).await.unwrap(),
+                SmtpUploadChunkResponse::Ok(_)
+            ));
+        }
+
+        // Every chunk was stored and verified, but the commit asserts a digest
+        // that does not match what the canister derived.
+        let mut commit = build_commit(&plan, "mid");
+        commit.body_sha256 = vec![0u8; SHA256_LEN];
+
+        let resp = exec.canister_upload_commit(canister, commit).await.unwrap();
+        assert!(
+            matches!(&resp, SmtpResponse::Err(e) if e.code == 550),
+            "{resp:?}"
+        );
+        assert!(exec.delivered.lock().unwrap().is_empty());
+    }
+
+    /// An out-of-range index must be rejected, not used in the offset
+    /// arithmetic - which would underflow `u64` and trap a real canister.
+    #[tokio::test]
+    async fn test_malformed_chunk_index_does_not_underflow() {
+        let exec = ChunkingExecutor::with_caps(ChunkingExecutor::chunking_caps());
+
+        let chunk = SmtpUploadChunk {
+            version: crate::smtp::ic::candid::SMTP_UPLOAD_PROTOCOL_VERSION,
+            message_id: "mid".into(),
+            envelope: tiny_envelope(),
+            // index * chunk_size is far past body_size
+            index: u32::MAX,
+            total_chunks: 4,
+            chunk_size: 1024,
+            body_size: 100,
+            payload_sha256: Sha256::digest([]).to_vec(),
+            payload: vec![],
+            headers: None,
+            gateway_flags: None,
+        };
+
+        let resp = exec
+            .canister_upload_chunk(principal!("aaaaa-aa"), &chunk)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(&resp, SmtpUploadChunkResponse::Err(e) if e.code == 550),
+            "{resp:?}"
+        );
+        assert!(exec.uploads.lock().unwrap().is_empty());
+    }
+
+    /// A chunk that disagrees with the upload it is joining is retryable, not a
+    /// bounce: `map_canister_error` turns 5xx into a permanent failure.
+    #[tokio::test]
+    async fn test_inconsistent_chunk_is_temporary() {
+        let exec = ChunkingExecutor::with_caps(ChunkingExecutor::chunking_caps());
+        let canister = principal!("aaaaa-aa");
+        let hdrs = vec![Header {
+            name: "Subject".into(),
+            value: " hi\n".into(),
+        }];
+        let body = bytes::Bytes::from(vec![7u8; 4096]);
+        let plan = plan_chunks(&hdrs, &tiny_envelope(), "mid", &body, 256 * 1024, 1024).unwrap();
+
+        let first = build_chunk(&plan, 0, &body, &hdrs, &tiny_envelope(), "mid", None);
+        exec.canister_upload_chunk(canister, &first).await.unwrap();
+
+        // Same message_id, different envelope: a collision between two messages
+        let other_env = Envelope {
+            from: email!("john@doe.com").into(),
+            to: vec![email!("someone.else@foo.bar").into()],
+        };
+        let clashing = build_chunk(&plan, 1, &body, &hdrs, &other_env, "mid", None);
+
+        let resp = exec
+            .canister_upload_chunk(canister, &clashing)
+            .await
+            .unwrap();
+
+        let SmtpUploadChunkResponse::Err(e) = resp else {
+            panic!("expected the clashing chunk to be rejected");
+        };
+        assert_eq!(e.code, 450, "a collision must be retryable, not a bounce");
+        assert!(matches!(
+            map_canister_error(&e),
+            DeliveryError::Temporary(_)
+        ));
     }
 }

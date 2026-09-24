@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crate::smtp::ic::candid::{
     Envelope, Header, Message, SHA256_LEN, SMTP_UPLOAD_PROTOCOL_VERSION, SmtpRequest,
-    SmtpUploadChunk,
+    SmtpUploadChunk, SmtpUploadCommit,
 };
 
 /// Errors from planning an upload
@@ -87,7 +87,9 @@ pub struct UploadPlan {
     pub body_size: usize,
     /// SHA-256 of each chunk's payload, in index order
     pub payload_sha256: Vec<[u8; SHA256_LEN]>,
-    /// See [`SmtpUploadChunk::body_sha256`]
+    /// `SHA256(payload_sha256[0] || .. || payload_sha256[n-1])`.
+    /// Travels to the canister in [`SmtpUploadCommit`], never in a chunk -
+    /// see that field's docs for why.
     pub body_sha256: [u8; SHA256_LEN],
 }
 
@@ -161,7 +163,6 @@ fn chunk_overhead(
         chunk_size: 0,
         body_size: 0,
         payload_sha256: vec![0; SHA256_LEN],
-        body_sha256: vec![0; SHA256_LEN],
         payload: vec![],
         headers: Some(headers.to_vec()),
         gateway_flags: None,
@@ -223,6 +224,16 @@ pub fn plan_chunks(
     })
 }
 
+/// Builds the commit that finalizes an upload
+pub fn build_commit(plan: &UploadPlan, message_id: &str) -> SmtpUploadCommit {
+    SmtpUploadCommit {
+        version: SMTP_UPLOAD_PROTOCOL_VERSION,
+        message_id: message_id.to_string(),
+        body_sha256: plan.body_sha256.to_vec(),
+        total_chunks: plan.total_chunks,
+    }
+}
+
 /// Builds chunk `index`
 pub fn build_chunk(
     plan: &UploadPlan,
@@ -244,7 +255,6 @@ pub fn build_chunk(
         chunk_size: plan.chunk_size as u64,
         body_size: plan.body_size as u64,
         payload_sha256: plan.payload_sha256[index as usize].to_vec(),
-        body_sha256: plan.body_sha256.to_vec(),
         payload: body[start..end].to_vec(),
         // Headers and flags are on the first chunk only
         headers: (index == 0).then(|| headers.to_vec()),
@@ -413,7 +423,6 @@ mod test {
             // Metadata is identical in every chunk
             assert_eq!(chunk.total_chunks, plan.total_chunks);
             assert_eq!(chunk.body_size, plan.body_size as u64);
-            assert_eq!(chunk.body_sha256, plan.body_sha256.to_vec());
             // Headers ride on the first chunk only
             assert_eq!(chunk.headers.is_some(), i == 0);
         }
@@ -423,8 +432,8 @@ mod test {
         assert_eq!(derived, plan.body_sha256);
     }
 
-    /// Two different bodies must not share a `body_sha256`, so a `message_id`
-    /// collision cannot merge two messages.
+    /// Two different bodies must not share a `body_sha256`, so two messages
+    /// that collide on `message_id` cannot commit as one.
     #[test]
     fn test_body_digest_distinguishes_messages() {
         let env = envelope(1);
