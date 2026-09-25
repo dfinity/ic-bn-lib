@@ -47,13 +47,7 @@ pub struct SmtpServerCli {
     pub smtp_server_max_errors_per_session: usize,
 
     /// Maximum message size: the header block and the body together.
-    ///
-    /// The default keeps the Candid-encoded request inside a single IC ingress
-    /// message, so it works against every canister. Raising it enables the
-    /// chunked upload protocol, which destination canisters must implement and
-    /// advertise; a message that exceeds what a given canister can take is
-    /// refused with 552 at RCPT TO (when the sender declared SIZE) or 550 at
-    /// delivery. `smtp_server_max_session_data` must be at least this value.
+    /// `smtp_server_max_session_data` must be at least this value.
     #[clap(env, long, default_value = "1950KB", value_parser = parse_size)]
     pub smtp_server_max_message_size: u64,
 
