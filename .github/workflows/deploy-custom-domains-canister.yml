@@ -1,0 +1,171 @@
+name: Deploy Custom Domains canister
+
+run-name: Deploy Custom Domains canister to ${{ inputs.environment }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        type: choice
+        required: true
+        default: dev
+        options:
+          - dev
+          - prod
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_NET_RETRY: 10 # retries fetching Rust crates on network failures
+  DFX_IDENTITY_NAME: deployer
+  DFX_WARNING: -mainnet_plaintext_identity
+  WASM: target/wasm32-unknown-unknown/release/ic_custom_domains_canister.wasm
+
+concurrency:
+  group: deploy-custom-domains-canister-${{ inputs.environment }}
+  cancel-in-progress: false # never interrupt an in-flight canister install
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 30
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Resolve environment configuration
+        id: config
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          CANISTER_ID_DEV: ${{ vars.CUSTOM_DOMAINS_CANISTER_ID_DEV }}
+          CANISTER_ID_PROD: ${{ vars.CUSTOM_DOMAINS_CANISTER_ID_PROD }}
+          AUTHORIZED_PRINCIPAL_DEV: ${{ vars.CUSTOM_DOMAINS_AUTHORIZED_PRINCIPAL_DEV }}
+          AUTHORIZED_PRINCIPAL_PROD: ${{ vars.CUSTOM_DOMAINS_AUTHORIZED_PRINCIPAL_PROD }}
+        run: |
+          set -eEuo pipefail
+
+          case "${ENVIRONMENT}" in
+            dev) suffix=DEV ;;
+            prod) suffix=PROD ;;
+            *) echo "::error::unknown environment '${ENVIRONMENT}'"; exit 1 ;;
+          esac
+
+          principal_re='^[a-z2-7]+(-[a-z2-7]+)+$'
+
+          for name in CANISTER_ID AUTHORIZED_PRINCIPAL; do
+            var="${name}_${suffix}"
+            value="${!var:-}"
+            if [ -z "${value}" ]; then
+              echo "::error::repository variable CUSTOM_DOMAINS_${var} is unset or empty"
+              exit 1
+            fi
+            if ! printf '%s' "${value}" | grep -Eq "${principal_re}"; then
+              echo "::error::CUSTOM_DOMAINS_${var}='${value}' is not a textual principal"
+              exit 1
+            fi
+          done
+
+          canister_id_var="CANISTER_ID_${suffix}"
+          authorized_principal_var="AUTHORIZED_PRINCIPAL_${suffix}"
+
+          # post_upgrade() calls init(), which overwrites AUTHORIZED_PRINCIPAL. If it ends up None,
+          # every caller becomes authorized, so this argument is never allowed to be null here.
+          init_arg="(record { authorized_principal = opt principal \"${!authorized_principal_var}\" })"
+
+          echo "environment:  ${ENVIRONMENT}"
+          echo "canister id:  ${!canister_id_var}"
+          echo "init arg:     ${init_arg}"
+
+          {
+            echo "suffix=${suffix}"
+            echo "canister_id=${!canister_id_var}"
+            echo "init_arg=${init_arg}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Add WASM target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Check Candid interface
+        run: cargo test --locked --package ic-custom-domains-canister --lib
+
+      - name: Build canister
+        run: cargo build --locked --release --package ic-custom-domains-canister --target wasm32-unknown-unknown
+
+      - name: Package WASM
+        run: |
+          set -eEuo pipefail
+
+          gzip -9 -n -c "${WASM}" > "${WASM}.gz"
+
+          echo "raw: $(sha256sum "${WASM}")"
+          echo "gz:  $(sha256sum "${WASM}.gz")"
+
+      - uses: dfinity/setup-dfx@e50c04f104ee4285ec010f10609483cf41e4d365 # main, the repo has no tags
+        with:
+          dfx-version: "0.32.0"
+
+      - name: Import controller identity
+        env:
+          SUFFIX: ${{ steps.config.outputs.suffix }}
+          IDENTITY_DEV: ${{ secrets.CUSTOM_DOMAINS_CANISTER_IDENTITY_DEV }}
+          IDENTITY_PROD: ${{ secrets.CUSTOM_DOMAINS_CANISTER_IDENTITY_PROD }}
+        run: |
+          set -eEuo pipefail
+          umask 077
+
+          var="IDENTITY_${SUFFIX}"
+          pem="${!var:-}"
+          if [ -z "${pem}" ]; then
+            echo "::error::repository secret CUSTOM_DOMAINS_CANISTER_${var} is unset or empty"
+            exit 1
+          fi
+
+          printf '%s\n' "${pem}" > "${RUNNER_TEMP}/controller.pem"
+          if ! head -n1 "${RUNNER_TEMP}/controller.pem" | grep -q -- '-----BEGIN'; then
+            echo "::error::secret is not a PEM - store the raw key, not a base64 blob"
+            exit 1
+          fi
+
+          dfx identity import --storage-mode plaintext "${DFX_IDENTITY_NAME}" "${RUNNER_TEMP}/controller.pem"
+          rm -f "${RUNNER_TEMP}/controller.pem"
+
+          echo "deploying as $(dfx identity get-principal --identity "${DFX_IDENTITY_NAME}")"
+
+      - name: Upgrade canister
+        env:
+          CANISTER_ID: ${{ steps.config.outputs.canister_id }}
+          INIT_ARG: ${{ steps.config.outputs.init_arg }}
+        run: |
+          set -eEuo pipefail
+
+          # --upgrade-unchanged: without it dfx skips an identical WASM, so post_upgrade() would not
+          # run and a changed authorized principal would not be applied.
+          dfx canister install "${CANISTER_ID}" \
+            --wasm "${WASM}.gz" \
+            --mode upgrade \
+            --argument "${INIT_ARG}" \
+            --upgrade-unchanged \
+            --identity "${DFX_IDENTITY_NAME}" \
+            --network ic \
+            --yes </dev/null
+
+      - name: Remove controller identity
+        if: always()
+        run: |
+          rm -f "${RUNNER_TEMP}/controller.pem"
+          rm -rf "${HOME}/.config/dfx/identity/${DFX_IDENTITY_NAME}"
+
+      - name: Send Slack message
+        if: always()
+        uses: slackapi/slack-github-action@45a88b9581bfab2566dc881e2cd66d334e621e2c # v3.0.3
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            text: "Custom-domains canister deploy to `${{ inputs.environment }}` finished with status `${{ job.status }}`: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|run>"
