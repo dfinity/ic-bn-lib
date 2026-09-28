@@ -53,7 +53,7 @@ jobs:
           case "${ENVIRONMENT}" in
             dev) suffix=DEV ;;
             prod) suffix=PROD ;;
-            *) echo "::error::unknown environment '${ENVIRONMENT}'"; exit 1 ;;
+            *) echo "Unknown environment '${ENVIRONMENT}'"; exit 1 ;;
           esac
 
           principal_re='^[a-z2-7]+(-[a-z2-7]+)+$'
@@ -62,11 +62,11 @@ jobs:
             var="${name}_${suffix}"
             value="${!var:-}"
             if [ -z "${value}" ]; then
-              echo "::error::repository variable CUSTOM_DOMAINS_${var} is unset or empty"
+              echo "Variable CUSTOM_DOMAINS_${var} is unset or empty"
               exit 1
             fi
             if ! printf '%s' "${value}" | grep -Eq "${principal_re}"; then
-              echo "::error::CUSTOM_DOMAINS_${var}='${value}' is not a textual principal"
+              echo "CUSTOM_DOMAINS_${var}='${value}' is not a textual principal"
               exit 1
             fi
           done
@@ -75,7 +75,7 @@ jobs:
           authorized_principal_var="AUTHORIZED_PRINCIPAL_${suffix}"
 
           # post_upgrade() calls init(), which overwrites AUTHORIZED_PRINCIPAL. If it ends up None,
-          # every caller becomes authorized, so this argument is never allowed to be null here.
+          # every caller becomes authorized.
           init_arg="(record { authorized_principal = opt principal \"${!authorized_principal_var}\" })"
 
           echo "environment:  ${ENVIRONMENT}"
@@ -122,20 +122,20 @@ jobs:
           var="IDENTITY_${SUFFIX}"
           pem="${!var:-}"
           if [ -z "${pem}" ]; then
-            echo "::error::repository secret CUSTOM_DOMAINS_CANISTER_${var} is unset or empty"
+            echo "Repository secret CUSTOM_DOMAINS_CANISTER_${var} is unset or empty"
             exit 1
           fi
 
           printf '%s\n' "${pem}" > "${RUNNER_TEMP}/controller.pem"
           if ! head -n1 "${RUNNER_TEMP}/controller.pem" | grep -q -- '-----BEGIN'; then
-            echo "::error::secret is not a PEM - store the raw key, not a base64 blob"
+            echo "Secret is not a PEM"
             exit 1
           fi
 
           dfx identity import --storage-mode plaintext "${DFX_IDENTITY_NAME}" "${RUNNER_TEMP}/controller.pem"
           rm -f "${RUNNER_TEMP}/controller.pem"
 
-          echo "deploying as $(dfx identity get-principal --identity "${DFX_IDENTITY_NAME}")"
+          echo "Deploying as $(dfx identity get-principal --identity "${DFX_IDENTITY_NAME}")"
 
       - name: Upgrade canister
         env:
@@ -143,6 +143,11 @@ jobs:
           INIT_ARG: ${{ steps.config.outputs.init_arg }}
         run: |
           set -eEuo pipefail
+
+          # Take a snapshot of the current canister state before upgrading
+          dfx canister stop "${CANISTER_ID}" --identity "${DFX_IDENTITY_NAME}" --network ic
+          dfx canister snapshot create "${CANISTER_ID}" --identity "${DFX_IDENTITY_NAME}" --network ic
+          dfx canister start "${CANISTER_ID}" --identity "${DFX_IDENTITY_NAME}" --network ic
 
           # --upgrade-unchanged: without it dfx skips an identical WASM, so post_upgrade() would not
           # run and a changed authorized principal would not be applied.
