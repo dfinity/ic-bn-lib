@@ -160,6 +160,34 @@ jobs:
             --network ic \
             --yes </dev/null
 
+      - name: Query canister status
+        id: status
+        if: always()
+        env:
+          CANISTER_ID: ${{ steps.config.outputs.canister_id }}
+        run: |
+          set -uo pipefail
+
+          if [ -z "${CANISTER_ID:-}" ]; then
+            echo "No canister id was resolved, skipping status"
+            exit 0
+          fi
+
+          if ! status=$(dfx canister status "${CANISTER_ID}" --identity "${DFX_IDENTITY_NAME}" --network ic 2>&1 </dev/null); then
+            echo "Could not query canister status"
+            exit 1
+          fi
+
+          echo "${status}"
+
+          escaped=$(printf '%s' "${status}" |
+            sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' |
+            awk '{ printf "%s\\n", $0 }')
+
+          nl='\n'
+          fence='```'
+          printf 'slack_text=%s%s%s%s%s\n' "${nl}" "${fence}" "${nl}" "${escaped}" "${fence}" >> "${GITHUB_OUTPUT}"
+
       - name: Remove controller identity
         if: always()
         run: |
@@ -173,4 +201,4 @@ jobs:
           webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
           webhook-type: incoming-webhook
           payload: |
-            text: "Custom-domains canister deploy to `${{ inputs.environment }}` finished with status `${{ job.status }}`: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|run>"
+            text: "Custom-domains canister deploy to `${{ inputs.environment }}` finished with status `${{ job.status }}`: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|run>${{ steps.status.outputs.slack_text }}"
