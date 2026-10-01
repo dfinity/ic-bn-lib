@@ -2861,6 +2861,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ic-smtp-poc-canister"
+version = "0.1.0"
+dependencies = [
+ "candid",
+ "candid_parser",
+ "ic-cdk",
+ "serde",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "ic-stable-structures"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

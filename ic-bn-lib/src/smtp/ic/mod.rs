@@ -30,6 +30,8 @@ use crate::smtp::{
 
 pub mod candid;
 pub mod delivery_agent;
+#[cfg(test)]
+mod e2e;
 pub mod upload;
 
 /// Destination canisters of the mail.
