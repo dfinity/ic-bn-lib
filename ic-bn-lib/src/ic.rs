@@ -127,6 +127,9 @@ impl AgentExt for Agent {
     }
 }
 
+/// Default value of replica's ingress size
+pub const DEFAULT_MAX_INGRESS_MESSAGE_SIZE: usize = 2 * 1024 * 1024; // 2_097_152
+
 /// End-to-end tests that spin up a fake replica HTTP server and feed it hand-signed
 /// certificates, so that `AgentExt`'s state-tree parsing is exercised through a real
 /// `Agent` rather than by unit-testing internal logic directly.

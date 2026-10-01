@@ -36,7 +36,13 @@ cert-providers = ["custom-domains"]
 lb = []
 pubsub = []
 sev-snp = ["dep:sev"]
-smtp = ["custom-domains", "dep:mail-auth", "dep:mail-parser", "dep:smtp-proto"]
+smtp = [
+    "custom-domains",
+    "dep:mail-auth",
+    "dep:mail-parser",
+    "dep:smtp-proto",
+    "dep:sha2",
+]
 vector = ["dep:vrl", "dep:prost", "dep:prost-types"]
 
 [dependencies]

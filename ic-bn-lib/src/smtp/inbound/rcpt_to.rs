@@ -68,6 +68,35 @@ impl<S: AsyncReadWrite> Session<S> {
             Ok(v) => {
                 debug!("{self}: {}: recipient resolved: {v}", to.address);
 
+                // If the sender told us how big the message is, and this
+                // recipient's backend cannot take it, fail here rather
+                // than after the whole body has been transferred. Other
+                // recipients in the same transaction are unaffected.
+                if let Some(declared) = self.data.declared_size
+                    && let Some(limit) = self
+                        .cfg
+                        .recipient_resolver
+                        .recipient_max_message_size(&address)
+                        .await
+                    && declared > limit
+                {
+                    info!(
+                        "{self}: {}: declared size {declared} exceeds recipient limit {limit}",
+                        to.address
+                    );
+
+                    self.set_error(ProtocolError::MessageTooBig(format!(
+                        "{declared} > {limit} for {}",
+                        to.address
+                    )));
+
+                    return self
+                        .reply_with("552", "5.3.4", |buf| {
+                            write!(buf, "Recipient accepts at most {limit} bytes.")
+                        })
+                        .await;
+                }
+
                 match v {
                     RecipientPolicy::Accept => {
                         self.data.rcpt_to.push(address);
@@ -825,5 +854,150 @@ mod test {
             .unwrap();
         assert_eq!(out.take(), "550 5.1.2 Mailbox does not exist.\r\n");
         assert_eq!(recipients(&session), ["a@example.com"]);
+    }
+
+    /// Resolver that accepts everyone but caps how much each recipient can take.
+    #[derive(Debug)]
+    struct SizeLimitedResolver {
+        limits: Vec<(String, Option<usize>)>,
+        size_calls: AtomicUsize,
+    }
+
+    impl SizeLimitedResolver {
+        fn new(limits: &[(&str, Option<usize>)]) -> Arc<Self> {
+            Arc::new(Self {
+                limits: limits.iter().map(|(a, l)| ((*a).to_string(), *l)).collect(),
+                size_calls: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ResolvesRecipient for SizeLimitedResolver {
+        async fn resolve_recipient(
+            &self,
+            _from: &EmailAddress,
+            _rcpt: &EmailAddress,
+        ) -> Result<RecipientPolicy, RecipientResolveError> {
+            Ok(RecipientPolicy::Accept)
+        }
+
+        async fn recipient_max_message_size(&self, rcpt: &EmailAddress) -> Option<usize> {
+            self.size_calls.fetch_add(1, Ordering::SeqCst);
+            self.limits
+                .iter()
+                .find(|(a, _)| *a == rcpt.to_string())
+                .and_then(|(_, l)| *l)
+        }
+    }
+
+    async fn session_with_declared_size(
+        resolver: Arc<SizeLimitedResolver>,
+        size: usize,
+    ) -> (Session<Capture>, Capture) {
+        let mut cfg = test_config();
+        cfg.max_recipients = 10;
+        cfg.recipient_resolver = resolver;
+
+        let (mut session, out) = session_with_ehlo(cfg);
+
+        let mut from = mail_from("sender@example.com");
+        from.size = size;
+        session.handle_mail_from(from).await.unwrap();
+        assert_eq!(out.take(), "250 2.1.0 OK\r\n");
+
+        (session, out)
+    }
+
+    /// A recipient whose backend cannot take the declared size is refused with
+    /// 552 - and only that recipient. The rest of the transaction proceeds, which
+    /// is exactly what RFC 1870 provides a per-recipient 552 for.
+    #[tokio::test]
+    async fn test_rcpt_to_per_recipient_size_limit() {
+        let resolver = SizeLimitedResolver::new(&[
+            ("small@example.com", Some(100)),
+            ("big@example.com", Some(500)),
+            ("unknown@example.com", None),
+        ]);
+        let (mut session, out) = session_with_declared_size(resolver.clone(), 300).await;
+
+        // Too big for this one
+        session
+            .handle_rcpt_to(rcpt_to("small@example.com"))
+            .await
+            .unwrap();
+        assert_eq!(
+            out.take(),
+            "552 5.3.4 Recipient accepts at most 100 bytes.\r\n"
+        );
+        assert!(session.data.rcpt_to.is_empty());
+        assert!(matches!(
+            session.data.last_error,
+            Some(ProtocolError::MessageTooBig(_))
+        ));
+
+        // Fine for this one
+        session
+            .handle_rcpt_to(rcpt_to("big@example.com"))
+            .await
+            .unwrap();
+        assert_eq!(out.take(), "250 2.1.5 OK\r\n");
+
+        // Unknown limit means nothing is enforced
+        session
+            .handle_rcpt_to(rcpt_to("unknown@example.com"))
+            .await
+            .unwrap();
+        assert_eq!(out.take(), "250 2.1.5 OK\r\n");
+
+        assert_eq!(
+            session
+                .data
+                .rcpt_to
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec!["big@example.com", "unknown@example.com"]
+        );
+    }
+
+    /// Without a declared SIZE there is nothing to compare against, so the hook
+    /// must not even be consulted.
+    #[tokio::test]
+    async fn test_rcpt_to_size_limit_not_checked_without_declared_size() {
+        let resolver = SizeLimitedResolver::new(&[("small@example.com", Some(1))]);
+        let (mut session, out) = session_with_declared_size(resolver.clone(), 0).await;
+
+        session
+            .handle_rcpt_to(rcpt_to("small@example.com"))
+            .await
+            .unwrap();
+
+        assert_eq!(out.take(), "250 2.1.5 OK\r\n");
+        assert_eq!(resolver.size_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(session.data.rcpt_to.len(), 1);
+    }
+
+    /// Exactly at the limit is accepted.
+    #[tokio::test]
+    async fn test_rcpt_to_size_limit_boundary() {
+        let resolver = SizeLimitedResolver::new(&[("a@example.com", Some(200))]);
+        let (mut session, out) = session_with_declared_size(resolver.clone(), 200).await;
+
+        session
+            .handle_rcpt_to(rcpt_to("a@example.com"))
+            .await
+            .unwrap();
+        assert_eq!(out.take(), "250 2.1.5 OK\r\n");
+
+        let (mut session, out) = session_with_declared_size(resolver, 201).await;
+        session
+            .handle_rcpt_to(rcpt_to("a@example.com"))
+            .await
+            .unwrap();
+        assert_eq!(
+            out.take(),
+            "552 5.3.4 Recipient accepts at most 200 bytes.\r\n"
+        );
     }
 }

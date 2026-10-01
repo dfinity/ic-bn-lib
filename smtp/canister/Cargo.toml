@@ -1,0 +1,25 @@
+[package]
+name = "ic-smtp-poc-canister"
+version.workspace = true
+edition.workspace = true
+description = "Proof-of-concept canister implementing the IC SMTP protocol, for integration testing"
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+
+# Test fixture only - this must never be published or deployed.
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+candid = { workspace = true }
+ic-cdk = { workspace = true }
+# Required even though `candid::Deserialize` is a re-export: the derive macro
+# it expands to references `::serde` by path.
+serde = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+candid_parser = { workspace = true }

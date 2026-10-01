@@ -1,7 +1,17 @@
 [workspace]
 resolver = "3"
-members = ["ic-bn-lib", "custom-domains/canister", "custom-domains/api"]
-default-members = ["ic-bn-lib", "custom-domains/canister", "custom-domains/api"]
+members = [
+    "ic-bn-lib",
+    "custom-domains/canister",
+    "custom-domains/api",
+    "smtp/canister",
+]
+default-members = [
+    "ic-bn-lib",
+    "custom-domains/canister",
+    "custom-domains/api",
+    "smtp/canister",
+]
 
 [workspace.package]
 version = "0.1.0"
