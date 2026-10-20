@@ -1599,7 +1599,8 @@ mod tests {
     // =======================================================================
 
     use crate::smtp::ic::candid::{
-        SMTP_UPLOAD_PROTOCOL_VERSION, SmtpUploadChunk, SmtpUploadChunkOk, SmtpUploadStatus,
+        SHA256_LEN, SMTP_UPLOAD_PROTOCOL_VERSION, SmtpUploadChunk, SmtpUploadChunkOk,
+        SmtpUploadStatus,
     };
     use sha2::{Digest, Sha256};
     use std::collections::BTreeMap;
@@ -1746,7 +1747,7 @@ mod tests {
 
             // The canister verifies the payload digest BEFORE storing, so a
             // corrupt transfer costs one chunk rather than the whole upload.
-            let digest: [u8; 32] = Sha256::digest(&chunk.payload).into();
+            let digest: [u8; SHA256_LEN] = Sha256::digest(&chunk.payload).into();
             if digest.to_vec() != chunk.payload_sha256 {
                 return Ok(SmtpUploadChunkResponse::Err(Self::reject(
                     550,
@@ -1834,11 +1835,11 @@ mod tests {
             let mut rolling = Sha256::new();
             let mut body = Vec::with_capacity(up.body_size as usize);
             for payload in up.chunks.values() {
-                let d: [u8; 32] = Sha256::digest(payload).into();
+                let d: [u8; SHA256_LEN] = Sha256::digest(payload).into();
                 rolling.update(d);
                 body.extend_from_slice(payload);
             }
-            let derived: [u8; 32] = rolling.finalize().into();
+            let derived: [u8; SHA256_LEN] = rolling.finalize().into();
 
             if derived.to_vec() != commit.body_sha256 {
                 return Ok(SmtpResponse::Err(Self::reject(550, "body digest mismatch")));
@@ -2358,8 +2359,6 @@ mod tests {
     /// correct gateway, where it never can.
     #[tokio::test]
     async fn test_commit_verifies_the_derived_digest() {
-        use crate::smtp::ic::candid::SHA256_LEN;
-
         let exec = ChunkingExecutor::with_caps(ChunkingExecutor::chunking_caps());
         let canister = principal!("aaaaa-aa");
         let env = tiny_envelope();

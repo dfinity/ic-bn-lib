@@ -4,7 +4,7 @@
 //! module and its installer hard-codes the custom-domains `InitArg`.
 //!
 //! The canister-side types below are **mirrors** of the ones in
-//! `smtp/canister/src/types.rs`. The canister is `crate-type = ["cdylib"]`, so
+//! `smtp/canister/src/lib.rs`. The canister is `crate-type = ["cdylib"]`, so
 //! there is no Rust API to import - Candid matches records by field-name hash,
 //! not by declaration order, so a structurally equal mirror is enough. The
 //! protocol types themselves are deliberately NOT mirrored: those come from

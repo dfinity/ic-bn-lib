@@ -16,6 +16,7 @@ crate-type = ["cdylib"]
 [dependencies]
 candid = { workspace = true }
 ic-cdk = { workspace = true }
+ic-smtp-gateway-protocol = { workspace = true }
 # Required even though `candid::Deserialize` is a re-export: the derive macro
 # it expands to references `::serde` by path.
 serde = { workspace = true }

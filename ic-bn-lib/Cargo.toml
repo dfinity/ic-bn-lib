@@ -38,6 +38,7 @@ pubsub = []
 sev-snp = ["dep:sev"]
 smtp = [
     "custom-domains",
+    "dep:ic-smtp-gateway-protocol",
     "dep:mail-auth",
     "dep:mail-parser",
     "dep:smtp-proto",
@@ -78,6 +79,7 @@ hyper-rustls = { workspace = true, optional = true }
 hyper-util = { workspace = true }
 ic-agent = { workspace = true }
 ic-custom-domains-canister-api = { workspace = true }
+ic-smtp-gateway-protocol = { workspace = true, optional = true }
 ic-transport-types = { workspace = true }
 indoc = { workspace = true }
 instant-acme = { workspace = true, optional = true }

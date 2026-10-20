@@ -26,7 +26,8 @@ use crate::{
         ic::{
             Metrics,
             candid::{
-                SMTP_UPLOAD_PROTOCOL_VERSION, SmtpCapabilities, SmtpResponse, SmtpUploadCommit,
+                SHA256_LEN, SMTP_UPLOAD_PROTOCOL_VERSION, SmtpCapabilities, SmtpResponse,
+                SmtpUploadCommit,
             },
             delivery_agent::IcSmtpDeliveryAgent,
             upload::IcSmtpUploadConfig,
@@ -318,7 +319,7 @@ async fn smtp_commit_is_idempotent() -> anyhow::Result<()> {
     let commit = SmtpUploadCommit {
         version: SMTP_UPLOAD_PROTOCOL_VERSION,
         message_id: id.to_string(),
-        body_sha256: vec![0; 32], // deliberately wrong - the memo must win
+        body_sha256: vec![0; SHA256_LEN], // deliberately wrong - the memo must win
         total_chunks: 1,
     };
 

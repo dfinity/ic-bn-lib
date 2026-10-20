@@ -35,15 +35,73 @@
 
 use std::{cell::RefCell, collections::HashMap};
 
-use candid::Principal;
+use candid::{CandidType, Deserialize, Principal};
 use ic_cdk::{
     api::{msg_caller, time},
     init, query, update,
 };
 use sha2::{Digest, Sha256};
 
-mod types;
-pub use types::*;
+// The protocol types come from the crate that ships alongside the normative
+// `.did` specification, so this fixture cannot drift from the gateway by
+// re-declaring them.
+pub use ic_smtp_gateway_protocol::*;
+
+// ---------------------------------------------------------------------------
+// Installation & introspection. Not part of the SMTP protocol.
+// ---------------------------------------------------------------------------
+
+/// Fields are deliberately required rather than `opt`: a rename then fails at
+/// install time instead of silently arriving as `None`.
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct InitArg {
+    /// The only principal allowed to call the SMTP methods.
+    pub authorized: Principal,
+    /// Local parts this canister accepts mail for, e.g. `["jane", "john"]`.
+    pub mailboxes: Vec<String>,
+    /// Advertised via `smtp_capabilities` and enforced on arrival.
+    pub max_message_size: u64,
+    pub max_open_uploads: u32,
+    pub max_buffered_bytes: u64,
+    pub upload_ttl_secs: u64,
+}
+
+/// Which path a delivered message arrived by.
+#[derive(Clone, Copy, Debug, CandidType, Deserialize, Eq, PartialEq)]
+pub enum DeliveryPath {
+    SingleShot,
+    Chunked,
+}
+
+/// What the canister actually received, as reported by `poc_delivered`.
+///
+/// `body_sha256` is a plain `SHA256` over the reassembled body, computed here -
+/// it is deliberately NOT an echo of `SmtpUploadCommit::body_sha256` (which
+/// hashes the chunk digests). Echoing that value would only assert that the
+/// gateway agrees with itself; hashing the body independently is what makes the
+/// test end to end.
+#[derive(Clone, Debug, CandidType, Deserialize, Eq, PartialEq)]
+pub struct Delivered {
+    pub envelope: Envelope,
+    pub headers: Vec<Header>,
+    pub gateway_flags: Option<Vec<String>>,
+    pub body_len: u64,
+    pub body_sha256: Vec<u8>,
+    /// First/last 64 bytes, so a digest mismatch is debuggable: "prefix matches,
+    /// suffix does not" points straight at a truncated final chunk.
+    pub body_prefix: Vec<u8>,
+    pub body_suffix: Vec<u8>,
+    pub chunks_seen: u32,
+    pub via: DeliveryPath,
+}
+
+#[derive(Clone, Copy, Debug, Default, CandidType, Deserialize, Eq, PartialEq)]
+pub struct Stats {
+    pub delivered: u64,
+    pub open_uploads: u64,
+    pub reserved_bytes: u64,
+    pub rejected: u64,
+}
 
 /// Upper bound on chunk count, so a malformed `total_chunks` cannot make the
 /// canister allocate an enormous index.
@@ -370,7 +428,11 @@ fn smtp_upload_chunk(chunk: SmtpUploadChunk) -> SmtpUploadChunkResponse {
         }
 
         if chunk.payload_sha256.len() != SHA256_LEN {
-            return err_chunk(state, 554, "payload_sha256 must be 32 bytes");
+            return err_chunk(
+                state,
+                554,
+                &format!("payload_sha256 must be {SHA256_LEN} bytes"),
+            );
         }
 
         // Verify BEFORE storing, so a corrupt transfer costs one chunk rather
@@ -545,14 +607,16 @@ fn smtp_upload_commit(commit: SmtpUploadCommit) -> SmtpResponse {
             return err_response(state, 450, "upload is incomplete");
         }
 
-        // Re-derive the chain from the digests verified on arrival. Hashing
-        // `32 * total_chunks` bytes rather than re-reading the whole body is
-        // the point of defining it this way.
-        let mut rolling = Sha256::new();
-        for d in &up.digests {
-            rolling.update(d.expect("every chunk is present"));
-        }
-        let derived: [u8; SHA256_LEN] = rolling.finalize().into();
+        // Re-derive the chain from the digests verified on arrival - never from
+        // anything the caller supplied. Hashing `32 * total_chunks` bytes
+        // rather than re-reading the whole body is the point of defining it
+        // this way.
+        let digests = up
+            .digests
+            .iter()
+            .map(|d| d.expect("every chunk is present"))
+            .collect::<Vec<_>>();
+        let derived = body_sha256(&digests);
 
         if derived.as_slice() != commit.body_sha256.as_slice() {
             // Terminal: the body the gateway described is not the body we hold.

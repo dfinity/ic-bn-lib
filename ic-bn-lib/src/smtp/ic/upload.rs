@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crate::smtp::ic::candid::{
     Envelope, Header, Message, SHA256_LEN, SMTP_UPLOAD_PROTOCOL_VERSION, SmtpRequest,
-    SmtpUploadChunk, SmtpUploadCommit,
+    SmtpUploadChunk, SmtpUploadCommit, body_sha256,
 };
 
 /// Errors from planning an upload
@@ -228,22 +228,21 @@ pub fn plan_chunks(
 
     // Calculate the hashes
     let mut payload_sha256 = Vec::with_capacity(total_chunks as usize);
-    let mut body_sha256 = Sha256::new();
     for i in 0..total_chunks as usize {
         let start = i * chunk_size;
         let end = (start + chunk_size).min(body.len());
-        let digest: [u8; SHA256_LEN] = Sha256::digest(&body[start..end]).into();
-
-        body_sha256.update(digest);
-        payload_sha256.push(digest);
+        payload_sha256.push(Sha256::digest(&body[start..end]).into());
     }
 
     Ok(UploadPlan {
         chunk_size,
         total_chunks,
         body_size: body.len(),
+        // Shared with the canister, which re-derives it at commit from the
+        // payloads it stored. Hand-rolling it on either side is the one way
+        // the two can silently disagree.
+        body_sha256: body_sha256(&payload_sha256),
         payload_sha256,
-        body_sha256: body_sha256.finalize().into(),
     })
 }
 
