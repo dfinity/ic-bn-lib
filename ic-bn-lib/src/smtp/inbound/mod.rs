@@ -140,6 +140,11 @@ pub struct SessionConfig {
 }
 
 impl SessionConfig {
+    /// Largest message this server advertises in EHLO and accepts in DATA.
+    pub const fn max_message_size(&self) -> usize {
+        self.max_message_size
+    }
+
     pub fn new(hostname: &str, max_message_size: usize) -> Self {
         let greeting = Bytes::from(format!("220 {hostname} ESMTP IC SMTP Gateway\r\n"));
         let helo = Bytes::from(format!("250 {hostname} you had me at HELO\r\n"));
@@ -240,6 +245,10 @@ pub struct SessionData {
     mail_from: Option<EmailAddress>,
     rcpt_to: Vec<EmailAddress>,
     message: Vec<u8>,
+    /// Message size the sender declared with `MAIL FROM ... SIZE=` command, if any.
+    /// Needed so that RCPT TO can refuse the transfer for a recipient that cannot
+    /// take a message this large, before any of the body is even sent.
+    declared_size: Option<usize>,
 }
 
 impl Default for SessionData {
@@ -255,6 +264,7 @@ impl Default for SessionData {
             mail_from: None,
             rcpt_to: vec![],
             message: vec![],
+            declared_size: None,
         }
     }
 }

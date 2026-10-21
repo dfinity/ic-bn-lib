@@ -132,6 +132,12 @@ pub trait ResolvesRecipient: Send + Sync + Debug {
         from: &EmailAddress,
         rcpt: &EmailAddress,
     ) -> Result<RecipientPolicy, RecipientResolveError>;
+
+    /// Largest message this particular recipient can accept, if known.
+    /// Lets the server answer `552` during RCPT TO - when the sender declared a size.
+    async fn recipient_max_message_size(&self, _rcpt: &EmailAddress) -> Option<usize> {
+        None
+    }
 }
 
 /// Gets notifications about events
@@ -262,7 +268,9 @@ impl Metrics {
                 format!("smtp_message_size"),
                 format!("Size of the SMTP messages in bytes"),
                 LABELS,
-                vec![1024.0, 16384.0, 131072.0, 524288.0, 2097152.0],
+                vec![
+                    1024.0, 16384.0, 131072.0, 524288.0, 2097152.0, 8388608.0, 33554432.0,
+                ],
                 registry
             )
             .unwrap(),
@@ -755,7 +763,9 @@ mod test {
         assert!(line("smtp_session_duration_sum").ends_with(" 1"));
 
         // The buckets defined for the message size
-        for le in ["1024", "16384", "131072", "524288", "2097152"] {
+        for le in [
+            "1024", "16384", "131072", "524288", "2097152", "8388608", "33554432",
+        ] {
             assert!(
                 text.lines()
                     .any(|x| x.starts_with("smtp_message_size_bucket")

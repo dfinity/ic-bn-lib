@@ -1,7 +1,17 @@
 [workspace]
 resolver = "3"
-members = ["ic-bn-lib", "custom-domains/canister", "custom-domains/api"]
-default-members = ["ic-bn-lib", "custom-domains/canister", "custom-domains/api"]
+members = [
+    "ic-bn-lib",
+    "custom-domains/canister",
+    "custom-domains/api",
+    "smtp/canister",
+]
+default-members = [
+    "ic-bn-lib",
+    "custom-domains/canister",
+    "custom-domains/api",
+    "smtp/canister",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -68,6 +78,7 @@ ic-cdk = "0.20"
 ic-cdk-timers = "1.0"
 ic-custom-domains-canister-api = { version = "0.3", path = "./custom-domains/api" }
 ic-http-types = "0.1.0"
+ic-smtp-gateway-protocol = "0.1"
 ic-stable-structures = "0.7.0"
 ic-transport-types = "0.49"
 ic-verify-bls-signature = "0.6"

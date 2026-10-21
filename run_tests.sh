@@ -10,6 +10,8 @@ export CANISTER_WASM_PATH="${CARGO_TARGET_DIR}/wasm32-unknown-unknown/release/ic
 # never ship in the WASM used by the other (non-`--features bench`) tests above.
 export BENCH_CANISTER_TARGET_DIR="${WORKDIR}/target/bench"
 export BENCH_CANISTER_WASM_PATH="${BENCH_CANISTER_TARGET_DIR}/wasm32-unknown-unknown/release/ic_custom_domains_canister.wasm"
+# PoC canister implementing the IC SMTP protocol, used by the SMTP E2E tests.
+export SMTP_CANISTER_WASM_PATH="${CARGO_TARGET_DIR}/wasm32-unknown-unknown/release/ic_smtp_poc_canister.wasm"
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >&2; }
 
@@ -66,6 +68,10 @@ log "Canister wasm built successfully at ${CANISTER_WASM_PATH}"
 log "Building the canister wasm with the bench feature"
 CARGO_TARGET_DIR="${BENCH_CANISTER_TARGET_DIR}" cargo build --package ic-custom-domains-canister --target wasm32-unknown-unknown --release --features bench || { log "Failed to build the bench canister wasm"; exit 1; }
 log "Bench canister wasm built successfully at ${BENCH_CANISTER_WASM_PATH}"
+
+log "Building the SMTP PoC canister wasm"
+cargo build --package ic-smtp-poc-canister --target wasm32-unknown-unknown --release || { log "Failed to build the SMTP PoC canister wasm"; exit 1; }
+log "SMTP PoC canister wasm built successfully at ${SMTP_CANISTER_WASM_PATH}"
 
 log "Running canister interface compatibility test (without bench feature)"
 cargo test --profile dev -p ic-custom-domains-canister --lib || { log "Canister unit tests failed"; exit 1; }

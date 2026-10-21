@@ -2650,6 +2650,7 @@ dependencies = [
  "hyper-util",
  "ic-agent",
  "ic-custom-domains-canister-api",
+ "ic-smtp-gateway-protocol",
  "ic-transport-types 0.49.2",
  "ic-verify-bls-signature",
  "indoc",
@@ -2858,6 +2859,29 @@ dependencies = [
  "candid",
  "serde",
  "serde_bytes",
+]
+
+[[package]]
+name = "ic-smtp-gateway-protocol"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a57ce2ae38cc11b8f4319af37f5a63d083135b87bb4d3053db85aa5b6d7b0d72"
+dependencies = [
+ "candid",
+ "serde",
+ "sha2 0.11.0",
+]
+
+[[package]]
+name = "ic-smtp-poc-canister"
+version = "0.1.0"
+dependencies = [
+ "candid",
+ "candid_parser",
+ "ic-cdk",
+ "ic-smtp-gateway-protocol",
+ "serde",
+ "sha2 0.11.0",
 ]
 
 [[package]]
