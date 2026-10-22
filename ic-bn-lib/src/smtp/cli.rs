@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use anyhow::anyhow;
 use clap::Args;
@@ -104,6 +104,12 @@ pub struct SmtpServerCli {
     /// For how long to cache canister SMTP capabilities
     #[clap(env, long, default_value = "10m", value_parser = parse_duration)]
     pub smtp_server_ic_capabilities_cache_ttl: Duration,
+
+    /// Path to the IC identity certificate file.
+    /// If specified - the SMTP server will use this identity for the IC requests,
+    /// anonymous identity will be used otherwise.
+    #[clap(env, long)]
+    pub smtp_server_ic_identity: Option<PathBuf>,
 
     /// Whether to enforce usage of STARTTLS.
     /// Be advised that it's effectively against standards/RFCs to do that.
