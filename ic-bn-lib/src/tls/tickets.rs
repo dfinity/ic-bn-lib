@@ -23,8 +23,8 @@ impl Metrics {
     pub fn new(registry: &Registry) -> Self {
         Self {
             processed: register_int_counter_vec_with_registry!(
-                format!("tls_tickets"),
-                format!("Number of TLS tickets that were processed"),
+                "tls_tickets",
+                "Number of TLS tickets that were processed",
                 &["action", "result"],
                 registry
             )

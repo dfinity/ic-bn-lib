@@ -27,32 +27,32 @@ impl Metrics {
     pub fn new(registry: &Registry) -> Self {
         Self {
             resolve_count: register_int_counter_vec_with_registry!(
-                format!("tls_resolver_total"),
-                format!("Counts the number of resolves"),
+                "tls_resolver_total",
+                "Counts the number of resolves",
                 &["found"],
                 registry
             )
             .unwrap(),
 
             supported_scheme: register_int_counter_vec_with_registry!(
-                format!("tls_resolver_supported_scheme"),
-                format!("Counts the number clients that support given scheme"),
+                "tls_resolver_supported_scheme",
+                "Counts the number clients that support given scheme",
                 &["scheme"],
                 registry
             )
             .unwrap(),
 
             supported_cipher: register_int_counter_vec_with_registry!(
-                format!("tls_resolver_supported_cipher"),
-                format!("Counts the number clients that support given ciphersuite"),
+                "tls_resolver_supported_cipher",
+                "Counts the number clients that support given ciphersuite",
                 &["cipher"],
                 registry
             )
             .unwrap(),
 
             resolve_duration: register_histogram_vec_with_registry!(
-                format!("tls_resolver_duration_sec"),
-                format!("Records the duration of resolves in seconds"),
+                "tls_resolver_duration_sec",
+                "Records the duration of resolves in seconds",
                 &["found"],
                 [0.0001, 0.0005, 0.001, 0.002, 0.004, 0.008, 0.016, 0.032].to_vec(),
                 registry

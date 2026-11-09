@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, str::FromStr, sync::Mutex};
 
 use async_trait::async_trait;
-use mail_parser::{Addr, Address, MessageParser};
+use mail_parser::MessageParser;
 use mail_send::{SmtpClientBuilder, mail_builder::MessageBuilder};
 use prometheus::Registry;
 use rustls::{ClientConfig, ProtocolVersion, pki_types::ServerName};
@@ -679,13 +679,21 @@ async fn test_with_smtp_client() {
 
     let parsed = MessageParser::new().parse(&msg.body).unwrap();
     assert_eq!(parsed.subject(), Some("Hello"));
+    let from = parsed.from().unwrap();
+    assert!(!from.has_groups());
     assert_eq!(
-        *parsed.from().unwrap(),
-        Address::List(vec![Addr::new(Some("John Doe"), "john@doe.com")])
+        from.mailboxes()
+            .map(|m| (m.name(), m.address()))
+            .collect::<Vec<_>>(),
+        vec![(Some("John Doe"), Some("john@doe.com"))]
     );
+    let to = parsed.to().unwrap();
+    assert!(!to.has_groups());
     assert_eq!(
-        *parsed.to().unwrap(),
-        Address::List(vec![Addr::new(Some("Jane Doe"), "jane@doe.com")])
+        to.mailboxes()
+            .map(|m| (m.name(), m.address()))
+            .collect::<Vec<_>>(),
+        vec![(Some("Jane Doe"), Some("jane@doe.com"))]
     );
     assert_eq!(parsed.body_text(0).unwrap(), "Blah\r\n");
 

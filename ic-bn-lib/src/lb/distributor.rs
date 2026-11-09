@@ -28,24 +28,24 @@ impl Metrics {
     pub fn new(registry: &Registry) -> Self {
         Self {
             inflight: register_int_gauge_vec_with_registry!(
-                format!("distributor_inflight"),
-                format!("Stores the current number of in-flight requests"),
+                "distributor_inflight",
+                "Stores the current number of in-flight requests",
                 &["target"],
                 registry
             )
             .unwrap(),
 
             requests: register_int_counter_vec_with_registry!(
-                format!("distributor_requests"),
-                format!("Counts the number of requests and results"),
+                "distributor_requests",
+                "Counts the number of requests and results",
                 &["target", "result"],
                 registry
             )
             .unwrap(),
 
             duration: register_histogram_vec_with_registry!(
-                format!("distributor_duration"),
-                format!("Records the duration of requests in seconds"),
+                "distributor_duration",
+                "Records the duration of requests in seconds",
                 &["target"],
                 [0.01, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2].to_vec(),
                 registry

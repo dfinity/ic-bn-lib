@@ -29,24 +29,24 @@ impl Metrics {
     pub fn new(registry: &Registry) -> Self {
         Self {
             state: register_int_gauge_vec_with_registry!(
-                format!("health_checker_state"),
-                format!("Stores the current health state of targets"),
+                "health_checker_state",
+                "Stores the current health state of targets",
                 &["target"],
                 registry
             )
             .unwrap(),
 
             checks: register_int_counter_vec_with_registry!(
-                format!("health_checker_checks"),
-                format!("Counts the number of health check results"),
+                "health_checker_checks",
+                "Counts the number of health check results",
                 &["target", "result"],
                 registry
             )
             .unwrap(),
 
             duration: register_histogram_vec_with_registry!(
-                format!("health_checker_duration"),
-                format!("Records the duration of health checks in seconds"),
+                "health_checker_duration",
+                "Records the duration of health checks in seconds",
                 &["target"],
                 [0.01, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2].to_vec(),
                 registry

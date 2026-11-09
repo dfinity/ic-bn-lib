@@ -32,7 +32,7 @@ async-channel = "2.3.1"
 async-trait = "0.1.83"
 axum = "0.8.1"
 axum-extra = { version = "0.12.6", features = ["middleware", "typed-header"] }
-axum-server = "0.8.0"
+axum-server = "0.9.0"
 base64 = "0.23.1"
 bytes = "1.10.0"
 candid = "0.10.10"
@@ -88,12 +88,12 @@ instant-acme = { version = "0.8.5", default-features = false, features = [
     "hyper-rustls",
 ] }
 itertools = "0.15.0"
-mail-auth = "0.12.0"
-mail-parser = { version = "0.11.3", features = ["full_encoding"] }
-mail-send = { version = "0.6.0", default-features = false, features = [
+mail-auth = "0.15.1"
+mail-parser = { version = "1.0.1", features = ["full_encoding"] }
+mail-send = { version = "0.7.0", default-features = false, features = [
     "builder",
 ] }
-maxminddb = { version = "0.29", features = ["mmap", "simdutf8"] }
+maxminddb = { version = "0.32", features = ["mmap"] }
 mockall = "0.15"
 mock-io = { version = "0.3.2", features = ["full"] }
 moka = { version = "0.12.15", features = ["sync"] }
@@ -173,13 +173,13 @@ tower-service = "0.3.3"
 tower-http = { version = "0.7", features = ["trace"] }
 tracing = { version = "0.1.40", features = ["attributes"] }
 url = "2.5.3"
-utoipa = { version = "5.4.0", features = ["axum_extras"] }
-utoipa-swagger-ui = { version = "9.0.2", features = ["axum", "vendored"] }
+utoipa = { version = "6", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "10", features = ["axum", "vendored"] }
 # DO NOT upgrade, this breaks monorepo compatibility
 # Read https://github.com/uuid-rs/uuid/releases/tag/1.13.0
 uuid = { version = "=1.12.1", features = ["v7", "serde"] }
-vrl = { version = "0.34.0", default-features = false, features = ["value"] }
+vrl = { version = "0.38.0", default-features = false, features = ["value"] }
 webpki-root-certs = "1.0.1"
 x509-parser = "0.18.1"
 zeroize = { version = "1.8.1", features = ["derive"] }
-zstd = "0.13.2"
+zstd = "0.14"

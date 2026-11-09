@@ -35,56 +35,56 @@ impl Metrics {
 
         Self {
             conns: register_int_counter_vec_with_registry!(
-                format!("conn_total"),
-                format!("Counts the number of connections"),
+                "conn_total",
+                "Counts the number of connections",
                 LABELS,
                 registry
             )
             .unwrap(),
 
             conns_open: register_int_gauge_vec_with_registry!(
-                format!("conn_open"),
-                format!("Number of currently open connections"),
+                "conn_open",
+                "Number of currently open connections",
                 &LABELS[0..4],
                 registry
             )
             .unwrap(),
 
             requests: register_int_counter_vec_with_registry!(
-                format!("conn_requests_total"),
-                format!("Counts the number of requests"),
+                "conn_requests_total",
+                "Counts the number of requests",
                 LABELS,
                 registry
             )
             .unwrap(),
 
             requests_inflight: register_int_gauge_vec_with_registry!(
-                format!("conn_requests_inflight"),
-                format!("Counts the number of requests that are currently executed"),
+                "conn_requests_inflight",
+                "Counts the number of requests that are currently executed",
                 &LABELS[0..4],
                 registry
             )
             .unwrap(),
 
             bytes_sent: register_int_counter_vec_with_registry!(
-                format!("conn_bytes_sent_total"),
-                format!("Counts number of bytes sent"),
+                "conn_bytes_sent_total",
+                "Counts number of bytes sent",
                 LABELS,
                 registry
             )
             .unwrap(),
 
             bytes_rcvd: register_int_counter_vec_with_registry!(
-                format!("conn_bytes_rcvd_total"),
-                format!("Counts number of bytes received"),
+                "conn_bytes_rcvd_total",
+                "Counts number of bytes received",
                 LABELS,
                 registry
             )
             .unwrap(),
 
             conn_duration: register_histogram_vec_with_registry!(
-                format!("conn_duration_sec"),
-                format!("Records the duration of connection in seconds"),
+                "conn_duration_sec",
+                "Records the duration of connection in seconds",
                 LABELS,
                 CONN_DURATION_BUCKETS.to_vec(),
                 registry
@@ -92,8 +92,8 @@ impl Metrics {
             .unwrap(),
 
             requests_per_conn: register_histogram_vec_with_registry!(
-                format!("conn_requests_per_conn"),
-                format!("Records the number of requests per connection"),
+                "conn_requests_per_conn",
+                "Records the number of requests per connection",
                 LABELS,
                 CONN_REQUESTS.to_vec(),
                 registry
@@ -101,8 +101,8 @@ impl Metrics {
             .unwrap(),
 
             conn_tls_handshake_duration: register_histogram_vec_with_registry!(
-                format!("conn_tls_handshake_duration_sec"),
-                format!("Records the duration of the TLS handshake in seconds"),
+                "conn_tls_handshake_duration_sec",
+                "Records the duration of the TLS handshake in seconds",
                 &LABELS[0..4],
                 HANDSHAKE_DURATION_BUCKETS.to_vec(),
                 registry

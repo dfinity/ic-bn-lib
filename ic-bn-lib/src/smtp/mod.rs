@@ -225,48 +225,48 @@ impl Metrics {
 
         Self {
             bytes_rx: register_int_counter_vec_with_registry!(
-                format!("smtp_bytes_rx"),
-                format!("Number of bytes received"),
+                "smtp_bytes_rx",
+                "Number of bytes received",
                 LABELS,
                 registry
             )
             .unwrap(),
 
             bytes_tx: register_int_counter_vec_with_registry!(
-                format!("smtp_bytes_tx"),
-                format!("Number of bytes sent"),
+                "smtp_bytes_tx",
+                "Number of bytes sent",
                 LABELS,
                 registry
             )
             .unwrap(),
 
             commands: register_int_counter_vec_with_registry!(
-                format!("smtp_commands"),
-                format!("Number of SMTP commands received"),
+                "smtp_commands",
+                "Number of SMTP commands received",
                 &[LABELS[0], LABELS[1], "command"],
                 registry
             )
             .unwrap(),
 
             replies: register_int_counter_vec_with_registry!(
-                format!("smtp_replies"),
-                format!("Number of SMTP replies sent"),
+                "smtp_replies",
+                "Number of SMTP replies sent",
                 &[LABELS[0], LABELS[1], "code", "ext"],
                 registry
             )
             .unwrap(),
 
             messages: register_int_counter_vec_with_registry!(
-                format!("smtp_messages"),
-                format!("Number of SMTP messages submitted"),
+                "smtp_messages",
+                "Number of SMTP messages submitted",
                 &[LABELS[0], LABELS[1], "error"],
                 registry
             )
             .unwrap(),
 
             message_size: register_histogram_vec_with_registry!(
-                format!("smtp_message_size"),
-                format!("Size of the SMTP messages in bytes"),
+                "smtp_message_size",
+                "Size of the SMTP messages in bytes",
                 LABELS,
                 vec![
                     1024.0, 16384.0, 131072.0, 524288.0, 2097152.0, 8388608.0, 33554432.0,
@@ -276,32 +276,32 @@ impl Metrics {
             .unwrap(),
 
             protocol_errors: register_int_counter_vec_with_registry!(
-                format!("smtp_protocol_errors"),
-                format!("Number of SMTP protocol errors"),
+                "smtp_protocol_errors",
+                "Number of SMTP protocol errors",
                 &[LABELS[0], LABELS[1], "error"],
                 registry
             )
             .unwrap(),
 
             sessions_open: register_int_gauge_vec_with_registry!(
-                format!("smtp_sessions_open"),
-                format!("Number of SMTP sessions currently open"),
+                "smtp_sessions_open",
+                "Number of SMTP sessions currently open",
                 &[LABELS[0]],
                 registry
             )
             .unwrap(),
 
             sessions_processed: register_int_counter_vec_with_registry!(
-                format!("smtp_sessions_processed"),
-                format!("Number of SMTP sessions processed"),
+                "smtp_sessions_processed",
+                "Number of SMTP sessions processed",
                 &[LABELS[0], LABELS[1], "error"],
                 registry
             )
             .unwrap(),
 
             session_duration: register_histogram_vec_with_registry!(
-                format!("smtp_session_duration"),
-                format!("Time in seconds that the session was open"),
+                "smtp_session_duration",
+                "Time in seconds that the session was open",
                 LABELS,
                 vec![5.0, 10.0, 30.0, 60.0, 120.0],
                 registry

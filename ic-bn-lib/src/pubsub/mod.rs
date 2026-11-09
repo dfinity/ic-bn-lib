@@ -72,29 +72,29 @@ impl Metrics {
     pub fn new(registry: &Registry) -> Self {
         Self {
             topics: register_int_gauge_with_registry!(
-                format!("pubsub_topics"),
-                format!("Number of topics currently active"),
+                "pubsub_topics",
+                "Number of topics currently active",
                 registry
             )
             .unwrap(),
 
             msgs_sent: register_int_counter_with_registry!(
-                format!("pubsub_msgs_published"),
-                format!("Number of messages published"),
+                "pubsub_msgs_published",
+                "Number of messages published",
                 registry
             )
             .unwrap(),
 
             msgs_dropped: register_int_counter_with_registry!(
-                format!("pubsub_msgs_dropped"),
-                format!("Number of messages dropped"),
+                "pubsub_msgs_dropped",
+                "Number of messages dropped",
                 registry
             )
             .unwrap(),
 
             subscribers: register_int_gauge_with_registry!(
-                format!("pubsub_subscribers"),
-                format!("Number of subscribers currently active"),
+                "pubsub_subscribers",
+                "Number of subscribers currently active",
                 registry
             )
             .unwrap(),

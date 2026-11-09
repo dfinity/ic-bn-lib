@@ -290,16 +290,16 @@ impl Metrics {
 
         Self {
             canister_id_lookups: register_int_counter_vec_with_registry!(
-                format!("smtp_ic_agent_canister_id_lookups"),
-                format!("Number of canister ID lookups"),
+                "smtp_ic_agent_canister_id_lookups",
+                "Number of canister ID lookups",
                 CANISTER_LABELS,
                 registry
             )
             .unwrap(),
 
             canister_id_lookup_latency: register_histogram_vec_with_registry!(
-                format!("smtp_ic_agent_canister_id_lookup_latency"),
-                format!("Time it took to resolve the canister ID"),
+                "smtp_ic_agent_canister_id_lookup_latency",
+                "Time it took to resolve the canister ID",
                 CANISTER_LABELS,
                 vec![0.01, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6],
                 registry
@@ -307,16 +307,16 @@ impl Metrics {
             .unwrap(),
 
             smtp_requests: register_int_counter_vec_with_registry!(
-                format!("smtp_ic_agent_smtp_requests"),
-                format!("Number of IC SMTP requests"),
+                "smtp_ic_agent_smtp_requests",
+                "Number of IC SMTP requests",
                 REQUEST_LABELS,
                 registry
             )
             .unwrap(),
 
             smtp_request_latency: register_histogram_vec_with_registry!(
-                format!("smtp_ic_agent_smtp_request_latency"),
-                format!("Time it took to execute IC SMTP request"),
+                "smtp_ic_agent_smtp_request_latency",
+                "Time it took to execute IC SMTP request",
                 REQUEST_LABELS,
                 vec![0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8, 25.6, 51.2, 102.4],
                 registry
@@ -324,32 +324,32 @@ impl Metrics {
             .unwrap(),
 
             deliveries: register_int_counter_vec_with_registry!(
-                format!("smtp_ic_agent_deliveries"),
-                format!("Number of message deliveries by transfer mode"),
+                "smtp_ic_agent_deliveries",
+                "Number of message deliveries by transfer mode",
                 &["mode", "error"],
                 registry
             )
             .unwrap(),
 
             capability_lookups: register_int_counter_vec_with_registry!(
-                format!("smtp_ic_agent_capability_lookups"),
-                format!("Number of canister SMTP capability lookups"),
+                "smtp_ic_agent_capability_lookups",
+                "Number of canister SMTP capability lookups",
                 &["cached", "chunking"],
                 registry
             )
             .unwrap(),
 
             upload_calls: register_int_counter_vec_with_registry!(
-                format!("smtp_ic_agent_upload_calls"),
-                format!("Number of chunked upload protocol calls"),
+                "smtp_ic_agent_upload_calls",
+                "Number of chunked upload protocol calls",
                 UPLOAD_LABELS,
                 registry
             )
             .unwrap(),
 
             upload_call_latency: register_histogram_vec_with_registry!(
-                format!("smtp_ic_agent_upload_call_latency"),
-                format!("Time it took to execute a single chunked upload call"),
+                "smtp_ic_agent_upload_call_latency",
+                "Time it took to execute a single chunked upload call",
                 UPLOAD_LABELS,
                 vec![0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0],
                 registry
@@ -357,8 +357,8 @@ impl Metrics {
             .unwrap(),
 
             upload_duration: register_histogram_vec_with_registry!(
-                format!("smtp_ic_agent_upload_duration"),
-                format!("Time it took to upload & commit a whole message"),
+                "smtp_ic_agent_upload_duration",
+                "Time it took to upload & commit a whole message",
                 &["error"],
                 vec![1.0, 2.0, 5.0, 10.0, 20.0, 40.0, 80.0, 160.0],
                 registry
@@ -366,16 +366,16 @@ impl Metrics {
             .unwrap(),
 
             upload_chunk_retries: register_int_counter_vec_with_registry!(
-                format!("smtp_ic_agent_upload_chunk_retries"),
-                format!("Number of chunk upload retries"),
+                "smtp_ic_agent_upload_chunk_retries",
+                "Number of chunk upload retries",
                 &["error"],
                 registry
             )
             .unwrap(),
 
             upload_bytes: register_int_counter_with_registry!(
-                format!("smtp_ic_agent_upload_bytes"),
-                format!("Number of body bytes uploaded in chunks"),
+                "smtp_ic_agent_upload_bytes",
+                "Number of body bytes uploaded in chunks",
                 registry
             )
             .unwrap(),
@@ -481,22 +481,28 @@ fn split_email(raw: &[u8]) -> Result<(Vec<Header>, usize), IcSmtpDeliveryAgentEr
     let parsed = MessageParser::new()
         .parse(raw)
         // Make sure there's at least one standard header present
-        .filter(|p| p.headers().iter().any(|h| !h.name.is_other()))
+        .filter(|p| p.headers().iter().any(|h| !h.name().is_other()))
         .ok_or(IcSmtpDeliveryAgentError::Parser(
             "No parsable message found".into(),
         ))?;
 
+    // Raw header values (everything after the colon incl. the trailing line break).
+    // Names are canonical for known headers and as-written for others.
+    // Headers with non-UTF8 values are skipped.
     let headers = parsed
-        .headers_raw()
-        .map(|(k, v)| Header {
-            name: k.into(),
-            value: v.into(),
+        .headers()
+        .iter()
+        .filter_map(|h| {
+            Some(Header {
+                name: h.name().as_str().into(),
+                value: std::str::from_utf8(h.raw_value()).ok()?.into(),
+            })
         })
         .collect::<Vec<_>>();
 
     // Get the offset to the beginning of the body.
     // In case of an empty body the offset would be == len.
-    let body_offset = parsed.root_part().offset_body as usize;
+    let body_offset = parsed.root_part().offset_body() as usize;
     if body_offset > raw.len() {
         // Should never happen, unless the parser is broken
         return Err(IcSmtpDeliveryAgentError::Parser(

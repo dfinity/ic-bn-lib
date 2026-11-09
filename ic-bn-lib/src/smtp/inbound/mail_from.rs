@@ -175,7 +175,7 @@ impl<S: AsyncReadWrite> Session<S> {
             let output = self
                 .cfg
                 .authenticator
-                .verify_spf(SpfParameters::verify_mail_from(
+                .verify_spf(SpfParameters::mail_from(
                     self.remote_ip,
                     &helo_hostname,
                     &self.cfg.hostname,
