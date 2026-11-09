@@ -481,22 +481,28 @@ fn split_email(raw: &[u8]) -> Result<(Vec<Header>, usize), IcSmtpDeliveryAgentEr
     let parsed = MessageParser::new()
         .parse(raw)
         // Make sure there's at least one standard header present
-        .filter(|p| p.headers().iter().any(|h| !h.name.is_other()))
+        .filter(|p| p.headers().iter().any(|h| !h.name().is_other()))
         .ok_or(IcSmtpDeliveryAgentError::Parser(
             "No parsable message found".into(),
         ))?;
 
+    // Raw header values (everything after the colon incl. the trailing line break).
+    // Names are canonical for known headers and as-written for others.
+    // Headers with non-UTF8 values are skipped.
     let headers = parsed
-        .headers_raw()
-        .map(|(k, v)| Header {
-            name: k.into(),
-            value: v.into(),
+        .headers()
+        .iter()
+        .filter_map(|h| {
+            Some(Header {
+                name: h.name().as_str().into(),
+                value: std::str::from_utf8(h.raw_value()).ok()?.into(),
+            })
         })
         .collect::<Vec<_>>();
 
     // Get the offset to the beginning of the body.
     // In case of an empty body the offset would be == len.
-    let body_offset = parsed.root_part().offset_body as usize;
+    let body_offset = parsed.root_part().offset_body() as usize;
     if body_offset > raw.len() {
         // Should never happen, unless the parser is broken
         return Err(IcSmtpDeliveryAgentError::Parser(

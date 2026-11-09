@@ -88,9 +88,9 @@ instant-acme = { version = "0.8.5", default-features = false, features = [
     "hyper-rustls",
 ] }
 itertools = "0.15.0"
-mail-auth = "0.12.0"
-mail-parser = { version = "0.11.3", features = ["full_encoding"] }
-mail-send = { version = "0.6.0", default-features = false, features = [
+mail-auth = "0.15.1"
+mail-parser = { version = "1.0.1", features = ["full_encoding"] }
+mail-send = { version = "0.7.0", default-features = false, features = [
     "builder",
 ] }
 maxminddb = { version = "0.29", features = ["mmap", "simdutf8"] }
