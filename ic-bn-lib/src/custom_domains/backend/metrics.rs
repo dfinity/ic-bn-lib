@@ -26,15 +26,15 @@ impl HttpMetrics {
     pub fn new(registry: Registry) -> Self {
         Self {
             requests: register_int_counter_vec_with_registry!(
-                format!("custom_domains_http_requests_total"),
-                format!("Custom Domains: Total number of HTTP requests"),
+                "custom_domains_http_requests_total",
+                "Custom Domains: Total number of HTTP requests",
                 &["method", "endpoint", "status"],
                 registry
             )
             .unwrap(),
             duration: register_histogram_vec_with_registry!(
-                format!("custom_domains_http_request_duration_seconds"),
-                format!("Custom Domains: HTTP request latency in seconds"),
+                "custom_domains_http_request_duration_seconds",
+                "Custom Domains: HTTP request latency in seconds",
                 &["method", "endpoint"],
                 HTTP_DURATION_BUCKETS.to_vec(),
                 registry

@@ -56,88 +56,88 @@ impl Metrics {
     pub fn new(registry: &Registry) -> Self {
         Self {
             sent: register_int_counter_vec_with_registry!(
-                format!("vector_sent"),
-                format!("Number of bytes sent"),
+                "vector_sent",
+                "Number of bytes sent",
                 &["namespace"],
                 registry
             )
             .unwrap(),
 
             sent_compressed: register_int_counter_vec_with_registry!(
-                format!("vector_sent_compressed"),
-                format!("Number of bytes sent (compressed)"),
+                "vector_sent_compressed",
+                "Number of bytes sent (compressed)",
                 &["namespace"],
                 registry
             )
             .unwrap(),
 
             sent_events: register_int_counter_vec_with_registry!(
-                format!("vector_sent_events"),
-                format!("Number of events sent"),
+                "vector_sent_events",
+                "Number of events sent",
                 &["namespace"],
                 registry
             )
             .unwrap(),
 
             buffer_event_size: register_int_gauge_vec_with_registry!(
-                format!("vector_event_buffer_size"),
-                format!("Number of events in the incoming buffer"),
+                "vector_event_buffer_size",
+                "Number of events in the incoming buffer",
                 &["namespace"],
                 registry
             )
             .unwrap(),
 
             batch_size: register_int_gauge_vec_with_registry!(
-                format!("vector_batch_size"),
-                format!("Current size of the events queued for the next batch"),
+                "vector_batch_size",
+                "Current size of the events queued for the next batch",
                 &["namespace"],
                 registry
             )
             .unwrap(),
 
             buffer_drops: register_int_counter_vec_with_registry!(
-                format!("vector_buffer_drops"),
-                format!("Number of events that were dropped due to buffer overflow"),
+                "vector_buffer_drops",
+                "Number of events that were dropped due to buffer overflow",
                 &["namespace"],
                 registry
             )
             .unwrap(),
 
             encoding_failures: register_int_counter_vec_with_registry!(
-                format!("vector_encoding_failures"),
-                format!("Number of events that were dropped due to encoding failure"),
+                "vector_encoding_failures",
+                "Number of events that were dropped due to encoding failure",
                 &["namespace"],
                 registry
             )
             .unwrap(),
 
             batch_buffer_size: register_int_gauge_vec_with_registry!(
-                format!("vector_batch_buffer_size"),
-                format!("Number of batches in the outgoing buffer"),
+                "vector_batch_buffer_size",
+                "Number of batches in the outgoing buffer",
                 &["namespace"],
                 registry
             )
             .unwrap(),
 
             batch_flush_retries: register_int_counter_vec_with_registry!(
-                format!("vector_batch_flush_retries"),
-                format!("Number of batch flush retries"),
+                "vector_batch_flush_retries",
+                "Number of batch flush retries",
                 &["namespace"],
                 registry
             )
             .unwrap(),
 
             batch_flushes: register_int_counter_vec_with_registry!(
-                format!("vector_batch_flushes"),
-                format!("Count of batch flushes"),
+                "vector_batch_flushes",
+                "Count of batch flushes",
                 &["namespace", "ok"],
                 registry
             )
             .unwrap(),
 
             batch_queue_duration: register_histogram_vec_with_registry!(
-                format!("vector_batch_queue_duration"),
-                format!("Time it takes to queue the batch"),
+                "vector_batch_queue_duration",
+                "Time it takes to queue the batch",
                 &["namespace"],
                 vec![0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2],
                 registry
@@ -145,8 +145,8 @@ impl Metrics {
             .unwrap(),
 
             batch_encode_duration: register_histogram_vec_with_registry!(
-                format!("vector_batch_encode_duration"),
-                format!("Time it takes to encode the batch"),
+                "vector_batch_encode_duration",
+                "Time it takes to encode the batch",
                 &["namespace"],
                 vec![0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2],
                 registry
@@ -154,8 +154,8 @@ impl Metrics {
             .unwrap(),
 
             batch_flush_duration: register_histogram_vec_with_registry!(
-                format!("vector_batch_flush_duration"),
-                format!("Time it takes to flush the batch"),
+                "vector_batch_flush_duration",
+                "Time it takes to flush the batch",
                 &["namespace"],
                 vec![0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2],
                 registry
@@ -163,8 +163,8 @@ impl Metrics {
             .unwrap(),
 
             batch_sizes: register_histogram_vec_with_registry!(
-                format!("vector_batch_sizes"),
-                format!("Batch sizes histogram"),
+                "vector_batch_sizes",
+                "Batch sizes histogram",
                 &["namespace"],
                 vec![
                     128.0 * KB,
@@ -396,7 +396,10 @@ impl Batcher {
         }
 
         let len = self.batch.len();
-        // Drain all elements from the batch without deallocating backing memory
+        // Drain all elements from the batch without deallocating backing memory.
+        // Don't use `mem::take` as clippy suggests: it would drop the capacity
+        // that `add_to_batch()` relies on to decide when to flush.
+        #[allow(clippy::drain_collect)]
         let batch = self.batch.drain(..).collect::<Vec<_>>();
         debug!("{self}: queueing batch ({len} events)");
 

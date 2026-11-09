@@ -114,24 +114,24 @@ impl Metrics {
 
         Self {
             requests: register_int_counter_vec_with_registry!(
-                format!("http_client_requests_total"),
-                format!("Counts the number of requests"),
+                "http_client_requests_total",
+                "Counts the number of requests",
                 LABELS,
                 registry
             )
             .unwrap(),
 
             requests_inflight: register_int_gauge_vec_with_registry!(
-                format!("http_client_requests_inflight"),
-                format!("Counts the number of requests that are currently executed"),
+                "http_client_requests_inflight",
+                "Counts the number of requests that are currently executed",
                 LABELS,
                 registry
             )
             .unwrap(),
 
             request_duration: register_histogram_vec_with_registry!(
-                format!("http_client_request_duration_sec"),
-                format!("Records the duration of requests in seconds"),
+                "http_client_request_duration_sec",
+                "Records the duration of requests in seconds",
                 LABELS,
                 [0.01, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2].to_vec(),
                 registry

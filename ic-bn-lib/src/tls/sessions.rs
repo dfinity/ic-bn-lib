@@ -90,22 +90,22 @@ impl Metrics {
     pub fn new(registry: &Registry) -> Self {
         Self {
             count: register_int_gauge_with_registry!(
-                format!("tls_session_cache_count"),
-                format!("Number of TLS sessions in the cache"),
+                "tls_session_cache_count",
+                "Number of TLS sessions in the cache",
                 registry
             )
             .unwrap(),
 
             size: register_int_gauge_with_registry!(
-                format!("tls_session_cache_size"),
-                format!("Size of TLS sessions in the cache"),
+                "tls_session_cache_size",
+                "Size of TLS sessions in the cache",
                 registry
             )
             .unwrap(),
 
             processed: register_int_counter_vec_with_registry!(
-                format!("tls_sessions"),
-                format!("Number of TLS sessions that were processed"),
+                "tls_sessions",
+                "Number of TLS sessions that were processed",
                 &["action", "found"],
                 registry
             )

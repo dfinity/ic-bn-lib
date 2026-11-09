@@ -5,6 +5,8 @@
 #![allow(clippy::cognitive_complexity)]
 #![allow(clippy::field_reassign_with_default)]
 #![allow(clippy::collapsible_if)]
+// False positive on `#[derive(new)]` (derive-new) since clippy 1.99
+#![allow(clippy::redundant_field_names)]
 
 #[cfg(feature = "custom-domains")]
 pub mod custom_domains;

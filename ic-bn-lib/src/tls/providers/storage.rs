@@ -19,8 +19,8 @@ impl Metrics {
     pub fn new(registry: &Registry) -> Self {
         Self {
             count: register_int_gauge_vec_with_registry!(
-                format!("cert_storage_count_total"),
-                format!("Counts the number of certificates in the storage"),
+                "cert_storage_count_total",
+                "Counts the number of certificates in the storage",
                 &["wildcard"],
                 registry
             )
