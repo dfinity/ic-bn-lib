@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use axum::{body::Body, extract::Request, middleware::Next, response::Response};
 use bytes::Bytes;
 use http::{
-    Method,
-    header::{CACHE_CONTROL, RANGE},
+    HeaderMap, Method,
+    header::{AUTHORIZATION, CACHE_CONTROL, RANGE, SET_COOKIE, VARY},
 };
 use http_body::Body as _;
 use moka::{
@@ -91,6 +91,12 @@ pub enum CacheBypassReason<R: CustomBypassReason> {
     UnableToExtractKey,
     UnableToRunBypasser,
     CacheControl,
+    /// Request carries `Authorization`, so the response is specific to the caller
+    Authorization,
+    /// Response sets a cookie, so it's specific to the caller
+    SetCookie,
+    /// Response varies on request headers that aren't part of the cache key
+    Vary,
     Custom(R),
 }
 
@@ -280,33 +286,70 @@ enum CacheControl {
     MaxAge(Duration),
 }
 
-/// Tries to infer the caching TTL from the response headers
-fn infer_ttl<T>(req: &Response<T>) -> Option<CacheControl> {
-    // Extract the Cache-Control header & try to parse it as a string
-    let hdr = req
-        .headers()
-        .get(CACHE_CONTROL)
-        .and_then(|x| x.to_str().ok())?;
+/// Tries to infer the caching TTL from the response headers.
+///
+/// This is a shared cache, so:
+/// - `no-store`, `no-cache` & `private` forbid caching wherever they appear,
+///   regardless of the other directives and their order.
+/// - `s-maxage` takes precedence over `max-age`.
+fn infer_ttl<T>(resp: &Response<T>) -> Option<CacheControl> {
+    let (mut max_age, mut s_maxage) = (None, None);
 
-    // Iterate over the key-value pairs (or just keys)
-    hdr.split(',').find_map(|x| {
-        let (k, v) = {
-            let mut split = x.split('=').map(|s| s.trim());
-            (split.next().unwrap(), split.next())
+    // There might be several Cache-Control headers, all of them count
+    for hdr in resp.headers().get_all(CACHE_CONTROL) {
+        // Do not cache if we can't read what we're asked for
+        let Ok(hdr) = hdr.to_str() else {
+            return Some(CacheControl::NoCache);
         };
 
-        if ["no-cache", "no-store"].contains(&k) {
-            Some(CacheControl::NoCache)
-        } else if k == "max-age" {
-            let v = v.and_then(|x| x.parse::<u64>().ok());
-            if v == Some(0) {
-                Some(CacheControl::NoCache)
-            } else {
-                v.map(|x| CacheControl::MaxAge(Duration::from_secs(x)))
+        // Iterate over the key-value pairs (or just keys)
+        for directive in hdr.split(',') {
+            let (k, v) = {
+                let mut split = directive.splitn(2, '=').map(str::trim);
+                (split.next().unwrap_or_default(), split.next())
+            };
+
+            if ["no-cache", "no-store", "private"]
+                .iter()
+                .any(|x| k.eq_ignore_ascii_case(x))
+            {
+                return Some(CacheControl::NoCache);
             }
-        } else {
-            None
+
+            let secs = v.and_then(|x| x.parse::<u64>().ok());
+            if k.eq_ignore_ascii_case("s-maxage") {
+                s_maxage = s_maxage.or(secs);
+            } else if k.eq_ignore_ascii_case("max-age") {
+                max_age = max_age.or(secs);
+            }
         }
+    }
+
+    match s_maxage.or(max_age)? {
+        0 => Some(CacheControl::NoCache),
+        v => Some(CacheControl::MaxAge(Duration::from_secs(v))),
+    }
+}
+
+/// Request headers that a response can list in `Vary` and still be cached.
+/// They aren't part of the cache key, so the cached response is shared between their values.
+const VARY_IGNORED: [&str; 4] = [
+    "accept-encoding",
+    "origin",
+    "access-control-request-method",
+    "access-control-request-headers",
+];
+
+/// Checks if the response can be shared between the requests as far as its `Vary` header goes.
+/// It can't if it varies on anything outside of `VARY_IGNORED` (e.g. `Cookie` or `*`).
+fn vary_allows_sharing(headers: &HeaderMap) -> bool {
+    headers.get_all(VARY).iter().all(|hdr| {
+        hdr.to_str().is_ok_and(|hdr| {
+            hdr.split(',')
+                .map(str::trim)
+                .filter(|x| !x.is_empty())
+                .all(|x| VARY_IGNORED.iter().any(|y| x.eq_ignore_ascii_case(y)))
+        })
     })
 }
 
@@ -404,6 +447,13 @@ impl<K: KeyExtractor, B: Bypasser> CacheBuilder<K, B> {
     }
 
     /// Whether to obey `Cache-Control` headers in the *response*. Defaults to false.
+    ///
+    /// When enabled, `no-store`, `no-cache` & `private` prevent caching, while
+    /// `s-maxage` or `max-age` override the default TTL.
+    ///
+    /// Regardless of this setting, requests with `Authorization` bypass the cache, and
+    /// responses that have `Set-Cookie` or `Vary` on anything but `Accept-Encoding`,
+    /// `Origin` & CORS preflight headers are never stored.
     pub const fn obey_cache_control(mut self, v: bool) -> Self {
         self.opts.obey_cache_control = v;
         self
@@ -582,6 +632,15 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
             ));
         }
 
+        // Requests with credentials get responses that are specific to the caller,
+        // so they're neither served from the cache nor stored there.
+        if request.headers().contains_key(AUTHORIZATION) {
+            return Ok((
+                CacheStatus::Bypass(CacheBypassReason::Authorization),
+                next.run(request).await,
+            ));
+        }
+
         // Use cached response if found
         let Ok(key) = self.key_extractor.extract(&request) else {
             return Ok((
@@ -668,6 +727,20 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
                 response,
                 CacheBypassReason::HTTPError,
             ));
+        }
+
+        // Do not cache responses that set cookies: they're specific to the caller
+        // and replaying them would hand one client's cookie to another.
+        if response.headers().contains_key(SET_COOKIE) {
+            return Ok(ResponseType::Streamed(
+                response,
+                CacheBypassReason::SetCookie,
+            ));
+        }
+
+        // Do not cache responses that vary on request headers which aren't in the cache key
+        if !vary_allows_sharing(response.headers()) {
+            return Ok(ResponseType::Streamed(response, CacheBypassReason::Vary));
         }
 
         // Extract content length from the response header if there's one
@@ -804,7 +877,7 @@ mod tests {
         response::IntoResponse,
         routing::{get, post},
     };
-    use http::{Request, Response, StatusCode, Uri};
+    use http::{HeaderName, HeaderValue, Request, Response, StatusCode, Uri, header::COOKIE};
     use sha1::Digest;
     use tower::{Service, ServiceExt};
 
@@ -876,6 +949,80 @@ mod tests {
 
     async fn handler_cache_control_no_store(_request: Request<Body>) -> impl IntoResponse {
         [(CACHE_CONTROL, "no-store")]
+    }
+
+    async fn handler_cache_control_private(_request: Request<Body>) -> impl IntoResponse {
+        [(CACHE_CONTROL, "max-age=60, private")]
+    }
+
+    /// Returns the credentials of the request so that the tests can tell whose response they got
+    fn credentials(request: &Request<Body>) -> String {
+        ["cookie", "authorization"]
+            .iter()
+            .filter_map(|x| request.headers().get(*x))
+            .filter_map(|x| x.to_str().ok())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    async fn handler_echo(request: Request<Body>) -> impl IntoResponse {
+        credentials(&request)
+    }
+
+    /// Per-user response that is marked as such in every way possible
+    async fn handler_per_user(request: Request<Body>) -> impl IntoResponse {
+        let user = credentials(&request);
+
+        (
+            [
+                (CACHE_CONTROL, "private, max-age=60".to_string()),
+                (VARY, "Cookie".to_string()),
+                (SET_COOKIE, format!("session={user}")),
+            ],
+            user,
+        )
+    }
+
+    async fn handler_set_cookie(request: Request<Body>) -> impl IntoResponse {
+        let user = credentials(&request);
+        ([(SET_COOKIE, format!("session={user}"))], user)
+    }
+
+    async fn handler_vary_cookie(request: Request<Body>) -> impl IntoResponse {
+        ([(VARY, "Accept-Encoding, Cookie")], credentials(&request))
+    }
+
+    async fn handler_vary_star(request: Request<Body>) -> impl IntoResponse {
+        ([(VARY, "*")], credentials(&request))
+    }
+
+    async fn handler_vary_ignored(request: Request<Body>) -> impl IntoResponse {
+        ([(VARY, "Accept-Encoding, origin")], credentials(&request))
+    }
+
+    /// Sends a GET request with an optional header, returns the cache status, response headers & body
+    async fn dispatch_with_header(
+        router: &mut Router,
+        uri: &str,
+        header: Option<(HeaderName, &'static str)>,
+    ) -> (CacheStatus, HeaderMap, String) {
+        let mut req = Request::get(uri).body(Body::from("")).unwrap();
+        if let Some((k, v)) = header {
+            req.headers_mut().insert(k, HeaderValue::from_static(v));
+        }
+
+        let result = router.call(req).await.unwrap();
+        assert_eq!(result.status(), StatusCode::OK);
+
+        let cache_status = result.extensions().get::<CacheStatus>().cloned().unwrap();
+        let (parts, body) = result.into_parts();
+        let body = to_bytes(body, usize::MAX).await.unwrap().to_vec();
+
+        (
+            cache_status,
+            parts.headers,
+            String::from_utf8_lossy(&body).to_string(),
+        )
     }
 
     async fn middleware(
@@ -964,16 +1111,62 @@ mod tests {
             .insert(CACHE_CONTROL, hval!("no-store, no-cache"));
         assert_eq!(infer_ttl(&req), Some(CacheControl::NoCache));
 
-        // Order matters
+        // Order doesn't matter, directives that forbid caching always win
         req.headers_mut()
             .insert(CACHE_CONTROL, hval!("no-store, no-cache, max-age=1"));
         assert_eq!(infer_ttl(&req), Some(CacheControl::NoCache));
 
         req.headers_mut()
             .insert(CACHE_CONTROL, hval!("max-age=1, no-store, no-cache"));
+        assert_eq!(infer_ttl(&req), Some(CacheControl::NoCache));
+
+        // Private responses must not be stored by a shared cache
+        for v in [
+            "private",
+            "Private",
+            "private, max-age=60",
+            "max-age=60, private",
+            "max-age=60,private",
+            "public, max-age=60, PRIVATE",
+            "private=\"set-cookie\", max-age=60",
+        ] {
+            req.headers_mut()
+                .insert(CACHE_CONTROL, HeaderValue::from_static(v));
+            assert_eq!(infer_ttl(&req), Some(CacheControl::NoCache), "{v}");
+        }
+
+        // All Cache-Control headers are considered, not only the first one
+        req.headers_mut().insert(CACHE_CONTROL, hval!("max-age=60"));
+        req.headers_mut().append(CACHE_CONTROL, hval!("private"));
+        assert_eq!(infer_ttl(&req), Some(CacheControl::NoCache));
+
+        // Unreadable header forbids caching
+        req.headers_mut().insert(
+            CACHE_CONTROL,
+            HeaderValue::from_bytes(b"max-age=60\xff").unwrap(),
+        );
+        assert_eq!(infer_ttl(&req), Some(CacheControl::NoCache));
+
+        // s-maxage takes precedence over max-age in any order
+        for v in ["s-maxage=5, max-age=60", "max-age=60, S-MaxAge=5"] {
+            req.headers_mut()
+                .insert(CACHE_CONTROL, HeaderValue::from_static(v));
+            assert_eq!(
+                infer_ttl(&req),
+                Some(CacheControl::MaxAge(Duration::from_secs(5))),
+                "{v}"
+            );
+        }
+
+        req.headers_mut()
+            .insert(CACHE_CONTROL, hval!("s-maxage=0, max-age=60"));
+        assert_eq!(infer_ttl(&req), Some(CacheControl::NoCache));
+
+        req.headers_mut()
+            .insert(CACHE_CONTROL, hval!("s-maxage=foo, max-age=60"));
         assert_eq!(
             infer_ttl(&req),
-            Some(CacheControl::MaxAge(Duration::from_secs(1)))
+            Some(CacheControl::MaxAge(Duration::from_secs(60)))
         );
 
         // Max-age
@@ -1214,10 +1407,25 @@ mod tests {
                 "/cache_control_max_age_7d",
                 get(handler_cache_control_max_age_7d),
             )
+            .route("/cache_control_private", get(handler_cache_control_private))
             .layer(from_fn_with_state(Arc::clone(&cache), middleware));
 
         // Cache-Control no-cache
         let req = Request::get("/cache_control_no_cache")
+            .body(Body::from("foobar"))
+            .unwrap();
+        let result = app.call(req).await.unwrap();
+        let cache_status = result.extensions().get::<CacheStatus>().cloned().unwrap();
+        assert_eq!(
+            cache_status,
+            CacheStatus::Bypass(CacheBypassReason::CacheControl)
+        );
+        assert_eq!(result.status(), StatusCode::OK);
+        cache.housekeep();
+        assert_eq!(cache.len(), 0);
+
+        // Cache-Control private (even with max-age in front of it)
+        let req = Request::get("/cache_control_private")
             .body(Body::from("foobar"))
             .unwrap();
         let result = app.call(req).await.unwrap();
@@ -1389,6 +1597,141 @@ mod tests {
         assert_eq!(result.status(), StatusCode::OK);
         cache.housekeep();
         assert_eq!(cache.len(), 4);
+    }
+
+    #[test]
+    fn test_vary_allows_sharing() {
+        let mut headers = HeaderMap::new();
+        assert!(vary_allows_sharing(&headers));
+
+        // Headers that we ignore
+        for v in [
+            "",
+            "Accept-Encoding",
+            "accept-encoding, Origin",
+            "Origin,Access-Control-Request-Method, Access-Control-Request-Headers, ",
+        ] {
+            headers.insert(VARY, HeaderValue::from_static(v));
+            assert!(vary_allows_sharing(&headers), "{v}");
+        }
+
+        // Anything else makes the response specific to the request
+        for v in [
+            "*",
+            "Cookie",
+            "cookie",
+            "Authorization",
+            "User-Agent",
+            "Accept-Encoding, Cookie",
+            "Accept-Encoding, *",
+        ] {
+            headers.insert(VARY, HeaderValue::from_static(v));
+            assert!(!vary_allows_sharing(&headers), "{v}");
+        }
+
+        // All Vary headers are considered, not only the first one
+        headers.insert(VARY, hval!("Accept-Encoding"));
+        headers.append(VARY, hval!("Cookie"));
+        assert!(!vary_allows_sharing(&headers));
+
+        // Unreadable header
+        headers.insert(VARY, HeaderValue::from_bytes(b"Origin\xff").unwrap());
+        assert!(!vary_allows_sharing(&headers));
+    }
+
+    #[tokio::test]
+    async fn test_cache_per_user_responses() {
+        // These protections don't depend on whether we obey Cache-Control or not
+        for obey_cache_control in [true, false] {
+            let cache = Arc::new(
+                CacheBuilder::new(KeyExtractorTest)
+                    .obey_cache_control(obey_cache_control)
+                    .build()
+                    .unwrap(),
+            );
+
+            let mut app = Router::new()
+                .route("/echo", get(handler_echo))
+                .route("/per_user", get(handler_per_user))
+                .route("/set_cookie", get(handler_set_cookie))
+                .route("/vary_cookie", get(handler_vary_cookie))
+                .route("/vary_star", get(handler_vary_star))
+                .route("/vary_ignored", get(handler_vary_ignored))
+                .layer(from_fn_with_state(Arc::clone(&cache), middleware));
+
+            // Two users with different sessions request the same URL one after another,
+            // each of them should get their own response & cookie.
+            for user in ["alice", "bob"] {
+                let (status, headers, body) =
+                    dispatch_with_header(&mut app, "/per_user", Some((COOKIE, user))).await;
+                assert_eq!(status, CacheStatus::Bypass(CacheBypassReason::SetCookie));
+                assert_eq!(body, user);
+                assert_eq!(headers.get(SET_COOKIE).unwrap(), &format!("session={user}"));
+            }
+
+            // Response with Set-Cookie is never stored
+            for user in ["alice", "bob"] {
+                let (status, headers, body) =
+                    dispatch_with_header(&mut app, "/set_cookie", Some((COOKIE, user))).await;
+                assert_eq!(status, CacheStatus::Bypass(CacheBypassReason::SetCookie));
+                assert_eq!(body, user);
+                assert_eq!(headers.get(SET_COOKIE).unwrap(), &format!("session={user}"));
+            }
+
+            // Response that varies on something that's not in the cache key is never stored
+            for uri in ["/vary_cookie", "/vary_star"] {
+                for user in ["alice", "bob"] {
+                    let (status, _, body) =
+                        dispatch_with_header(&mut app, uri, Some((COOKIE, user))).await;
+                    assert_eq!(status, CacheStatus::Bypass(CacheBypassReason::Vary));
+                    assert_eq!(body, user);
+                }
+            }
+
+            cache.housekeep();
+            assert_eq!(cache.len(), 0);
+
+            // Request with Authorization is not stored
+            let (status, _, body) =
+                dispatch_with_header(&mut app, "/echo", Some((AUTHORIZATION, "Bearer alice")))
+                    .await;
+            assert_eq!(
+                status,
+                CacheStatus::Bypass(CacheBypassReason::Authorization)
+            );
+            assert_eq!(body, "Bearer alice");
+            cache.housekeep();
+            assert_eq!(cache.len(), 0);
+
+            // Anonymous request doesn't get the response of an authorized one & gets cached
+            let (status, _, body) = dispatch_with_header(&mut app, "/echo", None).await;
+            assert!(matches!(status, CacheStatus::Miss(_)));
+            assert_eq!(body, "");
+            cache.housekeep();
+            assert_eq!(cache.len(), 1);
+
+            // Request with Authorization isn't served from the cache either
+            let (status, _, body) =
+                dispatch_with_header(&mut app, "/echo", Some((AUTHORIZATION, "Bearer bob"))).await;
+            assert_eq!(
+                status,
+                CacheStatus::Bypass(CacheBypassReason::Authorization)
+            );
+            assert_eq!(body, "Bearer bob");
+
+            // ... and it doesn't replace the cached anonymous response
+            let (status, _, body) = dispatch_with_header(&mut app, "/echo", None).await;
+            assert!(matches!(status, CacheStatus::Hit(_)));
+            assert_eq!(body, "");
+
+            // Response that varies only on the headers that we ignore is still cached
+            let (status, _, _) = dispatch_with_header(&mut app, "/vary_ignored", None).await;
+            assert!(matches!(status, CacheStatus::Miss(_)));
+            let (status, _, _) = dispatch_with_header(&mut app, "/vary_ignored", None).await;
+            assert!(matches!(status, CacheStatus::Hit(_)));
+            cache.housekeep();
+            assert_eq!(cache.len(), 2);
+        }
     }
 
     #[tokio::test(start_paused = true)]
