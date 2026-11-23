@@ -316,7 +316,13 @@ fn infer_ttl<T>(resp: &Response<T>) -> Option<CacheControl> {
                 return Some(CacheControl::NoCache);
             }
 
-            let secs = v.and_then(|x| x.parse::<u64>().ok());
+            let secs = v.and_then(|x| {
+                let x = x
+                    .strip_prefix('"')
+                    .and_then(|x| x.strip_suffix('"'))
+                    .unwrap_or(x);
+                x.parse::<u64>().ok()
+            });
             if k.eq_ignore_ascii_case("s-maxage") {
                 s_maxage = s_maxage.or(secs);
             } else if k.eq_ignore_ascii_case("max-age") {
