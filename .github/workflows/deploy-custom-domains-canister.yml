@@ -27,6 +27,12 @@ concurrency:
 
 jobs:
   deploy:
+    # Only deploy reviewed code from main. The controller identities must be environment secrets
+    # (not repository secrets) of these environments, which must require reviewer approval and
+    # restrict deployment branches to main, so a modified copy of this workflow cannot obtain them.
+    if: github.ref == 'refs/heads/main'
+    environment: custom-domains-canister-${{ inputs.environment }}
+
     runs-on: ubuntu-latest
 
     timeout-minutes: 30
@@ -113,16 +119,15 @@ jobs:
       - name: Import controller identity
         env:
           SUFFIX: ${{ steps.config.outputs.suffix }}
-          IDENTITY_DEV: ${{ secrets.CUSTOM_DOMAINS_CANISTER_IDENTITY_DEV }}
-          IDENTITY_PROD: ${{ secrets.CUSTOM_DOMAINS_CANISTER_IDENTITY_PROD }}
+          # Only the selected environment's identity is exposed to this step
+          IDENTITY: ${{ inputs.environment == 'prod' && secrets.CUSTOM_DOMAINS_CANISTER_IDENTITY_PROD || inputs.environment == 'dev' && secrets.CUSTOM_DOMAINS_CANISTER_IDENTITY_DEV || '' }}
         run: |
           set -eEuo pipefail
           umask 077
 
-          var="IDENTITY_${SUFFIX}"
-          pem="${!var:-}"
+          pem="${IDENTITY:-}"
           if [ -z "${pem}" ]; then
-            echo "Repository secret CUSTOM_DOMAINS_CANISTER_${var} is unset or empty"
+            echo "Environment secret CUSTOM_DOMAINS_CANISTER_IDENTITY_${SUFFIX} is unset or empty"
             exit 1
           fi
 
