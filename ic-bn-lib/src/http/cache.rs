@@ -12,8 +12,11 @@ use async_trait::async_trait;
 use axum::{body::Body, extract::Request, middleware::Next, response::Response};
 use bytes::Bytes;
 use http::{
-    HeaderMap, Method,
-    header::{AUTHORIZATION, CACHE_CONTROL, RANGE, SET_COOKIE, VARY},
+    HeaderMap, HeaderName, Method,
+    header::{
+        ACCEPT_ENCODING, ACCESS_CONTROL_REQUEST_HEADERS, ACCESS_CONTROL_REQUEST_METHOD,
+        AUTHORIZATION, CACHE_CONTROL, ORIGIN, RANGE, SET_COOKIE, VARY,
+    },
 };
 use http_body::Body as _;
 use moka::{
@@ -63,6 +66,15 @@ pub trait KeyExtractor: Clone + Send + Sync + Debug + 'static {
 
     /// Extraction method, will return [`Error`] response when the extraction failed
     fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, CacheError>;
+
+    /// Request headers whose values are fully included in the extracted key.
+    ///
+    /// A response that varies (as per its `Vary` header) only on these headers can be cached,
+    /// any other `Vary` value makes the response uncacheable.
+    /// Defaults to none, i.e. any `Vary` prevents caching.
+    fn vary_headers(&self) -> &[HeaderName] {
+        &[]
+    }
 }
 
 /// Reason for bypassing caching of the request
@@ -337,24 +349,17 @@ fn infer_ttl<T>(resp: &Response<T>) -> Option<CacheControl> {
     }
 }
 
-/// Request headers that a response can list in `Vary` and still be cached.
-/// They aren't part of the cache key, so the cached response is shared between their values.
-const VARY_IGNORED: [&str; 4] = [
-    "accept-encoding",
-    "origin",
-    "access-control-request-method",
-    "access-control-request-headers",
-];
-
-/// Checks if the response can be shared between the requests as far as its `Vary` header goes.
-/// It can't if it varies on anything outside of `VARY_IGNORED` (e.g. `Cookie` or `*`).
-fn vary_allows_sharing(headers: &HeaderMap) -> bool {
+/// Checks if the response can be shared between the requests with the same cache key
+/// as far as its `Vary` header goes.
+/// It can't if it varies on anything outside of `allowed`, i.e. on headers that
+/// aren't part of the cache key (e.g. `Cookie` or `*`).
+fn vary_allows_sharing(headers: &HeaderMap, allowed: &[HeaderName]) -> bool {
     headers.get_all(VARY).iter().all(|hdr| {
         hdr.to_str().is_ok_and(|hdr| {
             hdr.split(',')
                 .map(str::trim)
                 .filter(|x| !x.is_empty())
-                .all(|x| VARY_IGNORED.iter().any(|y| x.eq_ignore_ascii_case(y)))
+                .all(|x| allowed.iter().any(|y| x.eq_ignore_ascii_case(y.as_str())))
         })
     })
 }
@@ -458,8 +463,8 @@ impl<K: KeyExtractor, B: Bypasser> CacheBuilder<K, B> {
     /// `s-maxage` or `max-age` override the default TTL.
     ///
     /// Regardless of this setting, requests with `Authorization` bypass the cache, and
-    /// responses that have `Set-Cookie` or `Vary` on anything but `Accept-Encoding`,
-    /// `Origin` & CORS preflight headers are never stored.
+    /// responses that have `Set-Cookie` or `Vary` on any header not covered by the cache key
+    /// (see [`KeyExtractor::vary_headers`]) are never stored.
     pub const fn obey_cache_control(mut self, v: bool) -> Self {
         self.opts.obey_cache_control = v;
         self
@@ -745,7 +750,7 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
         }
 
         // Do not cache responses that vary on request headers which aren't in the cache key
-        if !vary_allows_sharing(response.headers()) {
+        if !vary_allows_sharing(response.headers(), self.key_extractor.vary_headers()) {
             return Ok(ResponseType::Streamed(response, CacheBypassReason::Vary));
         }
 
@@ -841,7 +846,29 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
     }
 }
 
-/// Key extractor that is keyed by URI and a `Range` header
+/// Request headers that [`KeyExtractorUriRange`] includes in the key.
+///
+/// Canisters choose the content encoding based on `Accept-Encoding` (often without `Vary`),
+/// and might reflect `Origin` in CORS headers, so the responses differ between their values.
+/// CORS preflight headers are absent in regular requests, they're included so that
+/// the responses with a common `Vary: Origin, Access-Control-Request-Method,
+/// Access-Control-Request-Headers` can still be cached.
+static KEY_HEADERS: [HeaderName; 5] = [
+    RANGE,
+    ACCEPT_ENCODING,
+    ORIGIN,
+    ACCESS_CONTROL_REQUEST_METHOD,
+    ACCESS_CONTROL_REQUEST_HEADERS,
+];
+
+/// Feeds a length-prefixed field into the hash, so that the adjacent fields can't run into each other
+fn hash_field(hash: &mut Sha1, field: &[u8]) {
+    hash.update((field.len() as u64).to_le_bytes());
+    hash.update(field);
+}
+
+/// Key extractor that is keyed by authority, path & query and the values of
+/// `Range`, `Accept-Encoding`, `Origin` and CORS preflight request headers.
 #[derive(Clone, Debug)]
 pub struct KeyExtractorUriRange;
 
@@ -860,12 +887,25 @@ impl KeyExtractor for KeyExtractorUriRange {
             .as_bytes();
 
         // Compute a composite hash
-        let mut hash = Sha1::new().chain_update(authority).chain_update(paq);
-        if let Some(v) = request.headers().get(RANGE) {
-            hash = hash.chain_update(v.as_bytes());
+        let mut hash = Sha1::new();
+        hash_field(&mut hash, authority);
+        hash_field(&mut hash, paq);
+
+        // Each header is represented by the count of its values followed by the values,
+        // so that the absent header & a header with an empty value differ.
+        for name in &KEY_HEADERS {
+            let values = request.headers().get_all(name);
+            hash.update((values.iter().count() as u64).to_le_bytes());
+            for v in values {
+                hash_field(&mut hash, v.as_bytes());
+            }
         }
 
         Ok(hash.finalize().into())
+    }
+
+    fn vary_headers(&self) -> &[HeaderName] {
+        &KEY_HEADERS
     }
 }
 
@@ -883,7 +923,12 @@ mod tests {
         response::IntoResponse,
         routing::{get, post},
     };
-    use http::{HeaderName, HeaderValue, Request, Response, StatusCode, Uri, header::COOKIE};
+    use std::collections::HashSet;
+
+    use http::{
+        HeaderValue, Request, Response, StatusCode, Uri,
+        header::{ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_ENCODING, COOKIE},
+    };
     use sha1::Digest;
     use tower::{Service, ServiceExt};
 
@@ -1002,8 +1047,54 @@ mod tests {
         ([(VARY, "*")], credentials(&request))
     }
 
-    async fn handler_vary_ignored(request: Request<Body>) -> impl IntoResponse {
+    async fn handler_vary_key_headers(request: Request<Body>) -> impl IntoResponse {
         ([(VARY, "Accept-Encoding, origin")], credentials(&request))
+    }
+
+    /// Chooses the content encoding the way asset canisters do: from `Accept-Encoding`, w/o `Vary`
+    async fn handler_encoding(request: Request<Body>) -> Response<Body> {
+        let accepts_br = request
+            .headers()
+            .get(ACCEPT_ENCODING)
+            .and_then(|x| x.to_str().ok())
+            .is_some_and(|x| x.split(',').any(|x| x.trim().eq_ignore_ascii_case("br")));
+
+        if accepts_br {
+            let mut response = Response::new(Body::from("br"));
+            response.headers_mut().insert(CONTENT_ENCODING, hval!("br"));
+            response
+        } else {
+            Response::new(Body::from("identity"))
+        }
+    }
+
+    async fn handler_encoding_vary(request: Request<Body>) -> Response<Body> {
+        let mut response = handler_encoding(request).await;
+        response
+            .headers_mut()
+            .insert(VARY, hval!("Accept-Encoding"));
+        response
+    }
+
+    /// Reflects the `Origin` in the CORS headers
+    async fn handler_reflect_origin(request: Request<Body>) -> impl IntoResponse {
+        let origin = request
+            .headers()
+            .get(ORIGIN)
+            .cloned()
+            .unwrap_or_else(|| hval!("null"));
+
+        (
+            [
+                (ACCESS_CONTROL_ALLOW_ORIGIN, origin),
+                (VARY, hval!("Origin")),
+            ],
+            "body",
+        )
+    }
+
+    async fn handler_path(request: Request<Body>) -> String {
+        request.uri().path().to_string()
     }
 
     /// Sends a GET request with an optional header, returns the cache status, response headers & body
@@ -1031,8 +1122,8 @@ mod tests {
         )
     }
 
-    async fn middleware(
-        State(cache): State<Arc<Cache<KeyExtractorTest>>>,
+    async fn middleware<K: KeyExtractor>(
+        State(cache): State<Arc<Cache<K>>>,
         request: Request<Body>,
         next: Next,
     ) -> impl IntoResponse {
@@ -1094,10 +1185,62 @@ mod tests {
 
         // Make sure that adding Range header changes the key
         let mut req = Request::new("foo");
-        *req.uri_mut() = Uri::from_static("http://foo.bar.bar:80/foo/bar?abc=1");
+        *req.uri_mut() = Uri::from_static("http://foo.bar.baz:80/foo/bar?abc=1");
         (*req.headers_mut()).insert(RANGE, hval!("1000-2000"));
         let key2 = x.extract(&req).unwrap();
         assert_ne!(key1, key2);
+
+        // Range value can't make the request look like the one for another path
+        let mut req = Request::new("foo");
+        *req.uri_mut() = Uri::from_static("http://foo.bar.baz/main.js");
+        let key_path = x.extract(&req).unwrap();
+        let mut req = Request::new("foo");
+        *req.uri_mut() = Uri::from_static("http://foo.bar.baz/");
+        req.headers_mut().insert(RANGE, hval!("main.js"));
+        assert_ne!(key_path, x.extract(&req).unwrap());
+
+        // Computes the key of the baseline request with given headers added
+        let key = |headers: &[(&HeaderName, &'static str)]| {
+            let mut req = Request::new("foo");
+            *req.uri_mut() = Uri::from_static("http://foo.bar.baz:80/foo/bar?abc=1");
+            for &(k, v) in headers {
+                req.headers_mut().append(k, HeaderValue::from_static(v));
+            }
+            x.extract(&req).unwrap()
+        };
+        assert_eq!(key(&[]), key1);
+
+        // Headers outside of the key don't affect it
+        assert_eq!(key(&[(&COOKIE, "foo")]), key1);
+
+        let mut keys = HashSet::new();
+        for name in &KEY_HEADERS {
+            // Different values give different keys, same values give the same key
+            assert_ne!(key(&[(name, "foo")]), key1, "{name}");
+            assert_ne!(key(&[(name, "foo")]), key(&[(name, "bar")]), "{name}");
+            assert_eq!(key(&[(name, "foo")]), key(&[(name, "foo")]), "{name}");
+
+            // Absent header differs from the empty one
+            assert_ne!(key(&[(name, "")]), key1, "{name}");
+
+            // All the values of a header are considered
+            assert_ne!(
+                key(&[(name, "foo"), (name, "bar")]),
+                key(&[(name, "foo")]),
+                "{name}"
+            );
+
+            keys.insert(key(&[(name, "foo")]));
+        }
+
+        // The same value in different headers gives different keys
+        assert_eq!(keys.len(), KEY_HEADERS.len());
+
+        // Values can't move between the adjacent headers
+        assert_ne!(
+            key(&[(&ACCEPT_ENCODING, "foo"), (&ORIGIN, "")]),
+            key(&[(&ACCEPT_ENCODING, ""), (&ORIGIN, "foo")]),
+        );
     }
 
     #[test]
@@ -1174,6 +1317,32 @@ mod tests {
             infer_ttl(&req),
             Some(CacheControl::MaxAge(Duration::from_secs(60)))
         );
+
+        // Quoted values are accepted
+        req.headers_mut()
+            .insert(CACHE_CONTROL, hval!("s-maxage=\"0\", max-age=60"));
+        assert_eq!(infer_ttl(&req), Some(CacheControl::NoCache));
+
+        req.headers_mut()
+            .insert(CACHE_CONTROL, hval!("s-maxage=\"5\", max-age=60"));
+        assert_eq!(
+            infer_ttl(&req),
+            Some(CacheControl::MaxAge(Duration::from_secs(5)))
+        );
+
+        req.headers_mut()
+            .insert(CACHE_CONTROL, hval!("max-age=\"60\""));
+        assert_eq!(
+            infer_ttl(&req),
+            Some(CacheControl::MaxAge(Duration::from_secs(60)))
+        );
+
+        // Unbalanced quotes are invalid
+        for v in ["max-age=\"60", "max-age=60\"", "max-age=\""] {
+            req.headers_mut()
+                .insert(CACHE_CONTROL, HeaderValue::from_static(v));
+            assert_eq!(infer_ttl(&req), None, "{v}");
+        }
 
         // Max-age
         req.headers_mut()
@@ -1608,17 +1777,19 @@ mod tests {
     #[test]
     fn test_vary_allows_sharing() {
         let mut headers = HeaderMap::new();
-        assert!(vary_allows_sharing(&headers));
+        assert!(vary_allows_sharing(&headers, &KEY_HEADERS));
+        assert!(vary_allows_sharing(&headers, &[]));
 
-        // Headers that we ignore
+        // Headers that are in the key
         for v in [
             "",
             "Accept-Encoding",
             "accept-encoding, Origin",
+            "Range",
             "Origin,Access-Control-Request-Method, Access-Control-Request-Headers, ",
         ] {
             headers.insert(VARY, HeaderValue::from_static(v));
-            assert!(vary_allows_sharing(&headers), "{v}");
+            assert!(vary_allows_sharing(&headers, &KEY_HEADERS), "{v}");
         }
 
         // Anything else makes the response specific to the request
@@ -1632,17 +1803,24 @@ mod tests {
             "Accept-Encoding, *",
         ] {
             headers.insert(VARY, HeaderValue::from_static(v));
-            assert!(!vary_allows_sharing(&headers), "{v}");
+            assert!(!vary_allows_sharing(&headers, &KEY_HEADERS), "{v}");
         }
+
+        // Headers are allowed only if they're in the key
+        headers.insert(VARY, hval!("Accept-Encoding"));
+        assert!(!vary_allows_sharing(&headers, &[]));
+        assert!(!vary_allows_sharing(&headers, &[ORIGIN]));
+        headers.insert(VARY, hval!(""));
+        assert!(vary_allows_sharing(&headers, &[]));
 
         // All Vary headers are considered, not only the first one
         headers.insert(VARY, hval!("Accept-Encoding"));
         headers.append(VARY, hval!("Cookie"));
-        assert!(!vary_allows_sharing(&headers));
+        assert!(!vary_allows_sharing(&headers, &KEY_HEADERS));
 
         // Unreadable header
         headers.insert(VARY, HeaderValue::from_bytes(b"Origin\xff").unwrap());
-        assert!(!vary_allows_sharing(&headers));
+        assert!(!vary_allows_sharing(&headers, &KEY_HEADERS));
     }
 
     #[tokio::test]
@@ -1662,7 +1840,7 @@ mod tests {
                 .route("/set_cookie", get(handler_set_cookie))
                 .route("/vary_cookie", get(handler_vary_cookie))
                 .route("/vary_star", get(handler_vary_star))
-                .route("/vary_ignored", get(handler_vary_ignored))
+                .route("/vary_key_headers", get(handler_vary_key_headers))
                 .layer(from_fn_with_state(Arc::clone(&cache), middleware));
 
             // Two users with different sessions request the same URL one after another,
@@ -1730,14 +1908,91 @@ mod tests {
             assert!(matches!(status, CacheStatus::Hit(_)));
             assert_eq!(body, "");
 
-            // Response that varies only on the headers that we ignore is still cached
-            let (status, _, _) = dispatch_with_header(&mut app, "/vary_ignored", None).await;
-            assert!(matches!(status, CacheStatus::Miss(_)));
-            let (status, _, _) = dispatch_with_header(&mut app, "/vary_ignored", None).await;
-            assert!(matches!(status, CacheStatus::Hit(_)));
+            // The test key extractor doesn't include any headers in the key,
+            // so even the headers that the URI one includes prevent caching
+            let (status, _, _) = dispatch_with_header(&mut app, "/vary_key_headers", None).await;
+            assert_eq!(status, CacheStatus::Bypass(CacheBypassReason::Vary));
             cache.housekeep();
-            assert_eq!(cache.len(), 2);
+            assert_eq!(cache.len(), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn test_cache_varying_requests() {
+        let cache = Arc::new(CacheBuilder::new(KeyExtractorUriRange).build().unwrap());
+
+        let mut app = Router::new()
+            .route("/encoding", get(handler_encoding))
+            .route("/encoding_vary", get(handler_encoding_vary))
+            .route("/origin", get(handler_reflect_origin))
+            .route("/", get(handler_path))
+            .route("/main.js", get(handler_path))
+            .layer(from_fn_with_state(Arc::clone(&cache), middleware));
+
+        // Each client gets an encoding that it accepts, whether the response declares Vary or not
+        let encodings = [("gzip, deflate, br", "br"), ("gzip", "identity")];
+        for uri in [
+            "http://example.com/encoding",
+            "http://example.com/encoding_vary",
+        ] {
+            for (accept, expected) in encodings {
+                let (status, _, body) =
+                    dispatch_with_header(&mut app, uri, Some((ACCEPT_ENCODING, accept))).await;
+                assert!(matches!(status, CacheStatus::Miss(_)), "{uri} {accept}");
+                assert_eq!(body, expected, "{uri} {accept}");
+            }
+
+            // Repeated requests are served from the cache, each with its own encoding
+            for (accept, expected) in encodings {
+                let (status, headers, body) =
+                    dispatch_with_header(&mut app, uri, Some((ACCEPT_ENCODING, accept))).await;
+                assert!(matches!(status, CacheStatus::Hit(_)), "{uri} {accept}");
+                assert_eq!(body, expected, "{uri} {accept}");
+                assert_eq!(
+                    headers.get(CONTENT_ENCODING).and_then(|x| x.to_str().ok()),
+                    (expected == "br").then_some("br"),
+                    "{uri} {accept}"
+                );
+            }
+        }
+
+        // CORS headers that reflect the Origin aren't replayed to other origins
+        let origins = ["https://a.example", "https://b.example"];
+        for origin in origins {
+            let (status, headers, _) = dispatch_with_header(
+                &mut app,
+                "http://example.com/origin",
+                Some((ORIGIN, origin)),
+            )
+            .await;
+            assert!(matches!(status, CacheStatus::Miss(_)), "{origin}");
+            assert_eq!(headers.get(ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(), origin);
+        }
+
+        for origin in origins {
+            let (status, headers, _) = dispatch_with_header(
+                &mut app,
+                "http://example.com/origin",
+                Some((ORIGIN, origin)),
+            )
+            .await;
+            assert!(matches!(status, CacheStatus::Hit(_)), "{origin}");
+            assert_eq!(headers.get(ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(), origin);
+        }
+
+        // Range value can't make the response land under the key of another path
+        let (status, _, body) =
+            dispatch_with_header(&mut app, "http://example.com/", Some((RANGE, "main.js"))).await;
+        assert!(matches!(status, CacheStatus::Miss(_)));
+        assert_eq!(body, "/");
+
+        let (status, _, body) =
+            dispatch_with_header(&mut app, "http://example.com/main.js", None).await;
+        assert!(matches!(status, CacheStatus::Miss(_)));
+        assert_eq!(body, "/main.js");
+
+        cache.housekeep();
+        assert_eq!(cache.len(), 8);
     }
 
     #[tokio::test(start_paused = true)]
