@@ -83,6 +83,44 @@ pub fn strip_connection_headers(headers: &mut HeaderMap) {
     }
 }
 
+/// Sets the header, replacing its existing values, without panicking when the map is full.
+///
+/// `HeaderMap::insert` panics once the map reaches its maximum capacity, and the number of
+/// headers in a response is controlled by the upstream. If the header can't be set, its
+/// existing values are removed, so the header is either ours or absent.
+pub(crate) fn set_header(headers: &mut HeaderMap, name: &HeaderName, value: HeaderValue) {
+    if headers.try_insert(name, value).is_err() {
+        headers.remove(name);
+    }
+}
+
+/// Builds a header map that is at its maximum capacity, so that no header can be added to it.
+/// The given headers are appended first.
+#[cfg(test)]
+pub(crate) fn full_header_map(headers: &[(HeaderName, HeaderValue)]) -> HeaderMap {
+    let mut map = HeaderMap::new();
+    for (k, v) in headers {
+        map.append(k, v.clone());
+    }
+
+    // A failed insert alone doesn't mean that the map is full: it might be a failed attempt
+    // to grow it because of the hash collisions, after which the inserts succeed again.
+    for i in 0.. {
+        let name = HeaderName::try_from(format!("x-fill-{i}")).unwrap();
+        if map.try_insert(name, hval!("x")).is_err() && map.keys_len() == map.capacity() {
+            break;
+        }
+    }
+
+    // Make sure that it's indeed full
+    assert!(
+        map.clone()
+            .try_insert(hname!("x-probe"), hval!("x"))
+            .is_err()
+    );
+    map
+}
+
 #[cfg(test)]
 mod test {
     use http::HeaderValue;
@@ -167,6 +205,34 @@ mod test {
         assert!(headers.get("x-foo").is_none());
         assert!(headers.get("x-bar").is_none());
         assert_eq!(headers.get("x-baz").unwrap(), "3");
+    }
+
+    #[test]
+    fn test_set_header() {
+        let name = hname!("x-foo");
+
+        // Replaces all the existing values
+        let mut headers = HeaderMap::new();
+        headers.append(&name, hval!("1"));
+        headers.append(&name, hval!("2"));
+        set_header(&mut headers, &name, hval!("3"));
+        assert_eq!(headers.get_all(&name).iter().count(), 1);
+        assert_eq!(headers.get(&name).unwrap(), "3");
+
+        // Doesn't panic when the map is full, removes all the existing values instead
+        let mut headers =
+            full_header_map(&[(name.clone(), hval!("1")), (name.clone(), hval!("2"))]);
+        let len = headers.len();
+        set_header(&mut headers, &name, hval!("3"));
+        assert!(headers.get(&name).is_none());
+        assert_eq!(headers.len(), len - 2);
+
+        // Doesn't panic when the map is full and the header is absent
+        let mut headers = full_header_map(&[]);
+        let len = headers.len();
+        set_header(&mut headers, &name, hval!("3"));
+        assert!(headers.get(&name).is_none());
+        assert_eq!(headers.len(), len);
     }
 
     #[test]

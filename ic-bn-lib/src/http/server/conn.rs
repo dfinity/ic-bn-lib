@@ -8,8 +8,8 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
-use axum::{Router, extract::Request};
-use http::Response;
+use axum::{Router, body::Body, extract::Request, response::IntoResponse};
+use http::{Response, StatusCode};
 use hyper::body::Incoming;
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
@@ -26,7 +26,7 @@ use tokio::{
 use tokio_io_timeout::TimeoutStream;
 use tokio_util::sync::CancellationToken;
 use tower_service::Service;
-use tracing::debug;
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -41,6 +41,29 @@ use crate::{
     network::{Addr, AsyncCounter, AsyncReadWrite, Stats, TlsInfo, tls_handshake},
     tls::ALPN_ACME,
 };
+
+/// Responses with more header names than this are replaced with `502 Bad Gateway`.
+///
+/// hyper adds headers to the response (e.g. `Date` in HTTP/2, `Connection` in HTTP/1 when
+/// the keep-alive is off) using the `HeaderMap` methods that panic if the map can't take
+/// one more name, even if the header is already there. The number of headers might be
+/// controlled by an upstream, and the map can refuse a new name once it holds more than
+/// ~6.5k of them.
+const MAX_RESPONSE_HEADERS: usize = 1024;
+
+/// Replaces the response with `502 Bad Gateway` if it has too many headers,
+/// see [`MAX_RESPONSE_HEADERS`].
+fn limit_response_headers(response: Response<Body>) -> Response<Body> {
+    let count = response.headers().keys_len();
+    if count <= MAX_RESPONSE_HEADERS {
+        return response;
+    }
+
+    warn!(
+        "response has too many headers ({count} > {MAX_RESPONSE_HEADERS}), replacing it with 502"
+    );
+    StatusCode::BAD_GATEWAY.into_response()
+}
 
 /// Connection information
 #[derive(Debug)]
@@ -321,7 +344,7 @@ impl Conn {
                 // Execute the request
                 let result = router.call(request).await.map(|x| {
                     // Wrap the response body into a notifying one
-                    let (parts, body) = x.into_parts();
+                    let (parts, body) = limit_response_headers(x).into_parts();
                     let body = NotifyingBody::new(body, state_tx, RequestState::End);
                     Response::from_parts(parts, body)
                 });
@@ -440,7 +463,8 @@ mod test {
     use tokio_rustls::TlsConnector;
 
     use crate::{
-        http::server::ProxyProtocolMode,
+        http::{headers::full_header_map, server::ProxyProtocolMode},
+        hval,
         tests::{TEST_CERT_1, TEST_KEY_1},
         tls::{ALPN_H1, ALPN_H2, resolver::StubResolver, verify::NoopServerCertVerifier},
     };
@@ -1460,6 +1484,115 @@ mod test {
         assert_eq!(label(&m, "tls_version"), "no");
         assert_eq!(counter(&registry, "conn_requests_total"), 1.0);
         assert!(counter(&registry, "conn_bytes_rcvd_total") > 0.0);
+    }
+
+    #[test]
+    fn test_limit_response_headers() {
+        let response = |count: usize| {
+            let mut response = "body".into_response();
+            response.headers_mut().clear();
+            for i in 0..count {
+                let name = http::HeaderName::try_from(format!("x-h-{i}")).unwrap();
+                response.headers_mut().insert(name, hval!("x"));
+            }
+            response
+        };
+
+        let resp = limit_response_headers(response(MAX_RESPONSE_HEADERS));
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers().keys_len(), MAX_RESPONSE_HEADERS);
+
+        let resp = limit_response_headers(response(MAX_RESPONSE_HEADERS + 1));
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert!(resp.headers().keys_len() < MAX_RESPONSE_HEADERS);
+    }
+
+    /// Router that serves a response with a full header map on `/full`
+    fn full_headers_router() -> Router {
+        Router::new().route(
+            "/full",
+            get(|| async {
+                let mut resp = "full".into_response();
+                *resp.headers_mut() = full_header_map(&[
+                    // Otherwise axum adds Content-Length itself, which would panic on its own
+                    (http::header::CONTENT_LENGTH, hval!("4")),
+                    (http::header::DATE, hval!("Thu, 01 Jan 1970 00:00:00 GMT")),
+                ]);
+                resp
+            }),
+        )
+    }
+
+    /// The response with a full header map must not make hyper panic while adding
+    /// its own headers (`Connection` when the keep-alive is off), it's replaced with a 502 instead.
+    #[tokio::test]
+    async fn test_conn_handle_h1_full_response_headers() {
+        let conn = make_conn(test_opts(), &Registry::new(), full_headers_router(), None);
+        let (mut client, server) = tcp_pair().await;
+
+        let (res, resp) = timeout(Duration::from_secs(10), async {
+            tokio::join!(conn.handle(Box::new(server)), async move {
+                client.write_all(&http_get("/full", true)).await.unwrap();
+                let mut resp = vec![];
+                client.read_to_end(&mut resp).await.unwrap();
+                resp
+            })
+        })
+        .await
+        .expect("connection handling timed out");
+
+        res.unwrap();
+        let resp = String::from_utf8_lossy(&resp).to_string();
+        assert!(resp.starts_with("HTTP/1.1 502 Bad Gateway\r\n"), "{resp}");
+        assert!(!resp.contains("x-fill-0"), "{resp}");
+    }
+
+    /// The response with a full header map must not make hyper panic while adding
+    /// its own headers (`Date` in HTTP/2), it's replaced with a 502 instead.
+    #[tokio::test]
+    async fn test_conn_handle_h2c_full_response_headers() {
+        use bytes::Bytes;
+        use http_body_util::{BodyExt, Empty};
+
+        let registry = Registry::new();
+        let router = full_headers_router();
+        let opts = ServerOptions {
+            max_requests_per_conn: Some(1),
+            ..test_opts()
+        };
+        let conn = make_conn(opts, &registry, router, None);
+
+        let (client, server) = tcp_pair().await;
+
+        let (res, (status, body)) = timeout(Duration::from_secs(15), async {
+            tokio::join!(conn.handle(Box::new(server)), async move {
+                let (mut sender, h2) = hyper::client::conn::http2::handshake::<_, _, Empty<Bytes>>(
+                    TokioExecutor::new(),
+                    TokioIo::new(client),
+                )
+                .await
+                .unwrap();
+                let driver = tokio::spawn(h2);
+
+                let req = http::Request::builder()
+                    .uri("http://foo.bar/full")
+                    .body(Empty::<Bytes>::new())
+                    .unwrap();
+                let resp = sender.send_request(req).await.unwrap();
+                let status = resp.status();
+                let body = resp.into_body().collect().await.unwrap().to_bytes();
+
+                drop(sender);
+                let _ = driver.await;
+                (status, body)
+            })
+        })
+        .await
+        .expect("h2c connection did not finish");
+
+        res.unwrap();
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(!body.starts_with(b"full"));
     }
 
     /// Boundary case of `max_requests_per_conn`: with a limit of 1 the very first

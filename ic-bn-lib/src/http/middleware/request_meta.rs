@@ -22,7 +22,7 @@ use crate::{
     Error,
     geoip::GeoIp,
     http::{
-        headers::{X_REAL_IP, X_REQUEST_ID},
+        headers::{X_REAL_IP, X_REQUEST_ID, set_header},
         server::conn::ConnInfo,
     },
     uuid::Uuid,
@@ -215,7 +215,7 @@ pub async fn middleware(
         .insert(X_REQUEST_ID, request_id_hdr.clone());
 
     let mut response = next.run(request).await;
-    response.headers_mut().insert(X_REQUEST_ID, request_id_hdr);
+    set_header(response.headers_mut(), &X_REQUEST_ID, request_id_hdr);
     response.extensions_mut().insert(request_id);
 
     if let Some(v) = remote_addr {
@@ -236,11 +236,17 @@ mod test {
     use axum::{
         Router, body::Body, middleware::from_fn_with_state, response::IntoResponse, routing::get,
     };
-    use http::StatusCode;
+    use http::{StatusCode, header::CONTENT_LENGTH};
     use tower::Service;
 
     use super::*;
-    use crate::{geoip::CountryCode, hname, http::server::conn::ConnInfo, hval, network::Addr};
+    use crate::{
+        geoip::CountryCode,
+        hname,
+        http::{headers::full_header_map, server::conn::ConnInfo},
+        hval,
+        network::Addr,
+    };
 
     const X_TEST_REQUEST_ID: &str = "x-test-request-id";
     const X_TEST_REMOTE_ADDR: &str = "x-test-remote-addr";
@@ -426,6 +432,35 @@ mod test {
             resp.headers_mut().insert(hname!(X_TEST_REAL_IP), v);
         }
         resp
+    }
+
+    /// Returns a response whose header map is full, with an `X-Request-Id` of its own
+    async fn full_headers_handler() -> Response {
+        let mut resp = StatusCode::OK.into_response();
+        *resp.headers_mut() = full_header_map(&[
+            // Otherwise axum adds Content-Length itself, which would panic on its own
+            (CONTENT_LENGTH, hval!("0")),
+            (X_REQUEST_ID, hval!("not-ours")),
+        ]);
+        resp
+    }
+
+    #[tokio::test]
+    async fn middleware_full_response_headers() {
+        let state = Arc::new(RequestMetaState::new(vec![], vec![]));
+        let mut app = Router::new()
+            .route("/", get(full_headers_handler))
+            .layer(from_fn_with_state(state, middleware));
+
+        let req = Request::builder().body(Body::empty()).unwrap();
+        let resp = app.call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // There's no room for X-Request-Id, so the response is passed on without it
+        // instead of panicking, and the upstream one isn't passed on in its place.
+        assert!(resp.headers().get(X_REQUEST_ID).is_none());
+        assert!(resp.headers().contains_key("x-fill-0"));
+        assert!(resp.extensions().get::<RequestId>().is_some());
     }
 
     fn app(state: RequestMetaState) -> Router {
