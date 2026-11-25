@@ -3,7 +3,7 @@
 use std::{
     fmt::Display,
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
 
@@ -16,7 +16,7 @@ use ic_agent::Agent;
 use moka::sync::Cache;
 use show_option::ShowOption as _;
 use strum::IntoStaticStr;
-use tokio::sync::Semaphore;
+use tokio::sync::{OnceCell, Semaphore};
 use tokio_util::time::FutureExt;
 use tracing::{debug, info, warn};
 use url::Url;
@@ -24,7 +24,7 @@ use url::Url;
 use crate::{
     BoolYesNo,
     custom_domains::LooksUpCustomDomain,
-    http::Client,
+    http::{Client, body::buffer_body},
     smtp::{
         DeliversMail, DeliveryError, EmailMessage, RecipientPolicy, RecipientResolveError,
         ResolvesRecipient, SessionMeta,
@@ -46,6 +46,45 @@ use crate::{
     },
     truncate,
 };
+
+/// Maximum size of the SMTP canister ID lookup response body (after decompression).
+/// A textual principal is at most 63 characters, the rest is room for whitespace.
+const SMTP_CANISTER_ID_MAX_BODY_SIZE: usize = 128;
+/// Timeout for the whole SMTP canister ID lookup
+const SMTP_CANISTER_ID_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+type InflightLookups = Mutex<AHashMap<Principal, Arc<OnceCell<Principal>>>>;
+
+/// Removes an in-flight SMTP canister ID lookup entry when it is
+/// finished or when nobody else is waiting for it anymore
+struct InflightGuard<'a> {
+    inflight: &'a InflightLookups,
+    canister_id: Principal,
+    cell: Option<Arc<OnceCell<Principal>>>,
+}
+
+impl Drop for InflightGuard<'_> {
+    fn drop(&mut self) {
+        let Some(cell) = self.cell.take() else {
+            return;
+        };
+
+        // Clones of the cell are only created & dropped while holding the lock,
+        // so the reference count can't change concurrently.
+        let mut inflight = self.inflight.lock().unwrap_or_else(PoisonError::into_inner);
+        if inflight
+            .get(&self.canister_id)
+            .is_some_and(|x| Arc::ptr_eq(x, &cell))
+            && (cell.initialized() || Arc::strong_count(&cell) == 2)
+        {
+            inflight.remove(&self.canister_id);
+        }
+
+        // Release our reference before the lock
+        drop(cell);
+        drop(inflight);
+    }
+}
 
 #[derive(thiserror::Error, Debug, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
@@ -69,6 +108,7 @@ pub struct IcSmtpDeliveryAgent {
     http_client: Arc<dyn Client>,
     ic_base_domain: String,
     smtp_canister_id_cache: Cache<Principal, Principal, RandomState>,
+    smtp_canister_id_inflight: InflightLookups,
     caps_cache: Cache<Principal, Arc<SmtpCapabilities>, RandomState>,
     upload_cfg: IcSmtpUploadConfig,
     upload_permits: Arc<Semaphore>,
@@ -107,6 +147,7 @@ impl IcSmtpDeliveryAgent {
             http_client,
             ic_base_domain: ic_base_domain.into(),
             smtp_canister_id_cache,
+            smtp_canister_id_inflight: Mutex::default(),
             caps_cache: Self::build_caps_cache(&upload_cfg, cache_capacity),
             upload_permits: Arc::new(Semaphore::new(upload_cfg.global_concurrency)),
             upload_cfg,
@@ -264,7 +305,22 @@ impl IcSmtpDeliveryAgent {
             return None;
         }
 
-        let body = match resp.bytes().await {
+        if resp
+            .content_length()
+            .is_some_and(|x| x > SMTP_CANISTER_ID_MAX_BODY_SIZE as u64)
+        {
+            info!("{self}: {canister_id}: SMTP canister ID HTTP body is too large");
+            return None;
+        }
+
+        // Read the (decompressed) body with a strict size limit
+        let body = match buffer_body(
+            http::Response::from(resp).into_body(),
+            SMTP_CANISTER_ID_MAX_BODY_SIZE,
+            SMTP_CANISTER_ID_LOOKUP_TIMEOUT,
+        )
+        .await
+        {
             Ok(v) => v,
             Err(e) => {
                 info!("{self}: {canister_id}: SMTP canister ID HTTP body streaming failed: {e:#}");
@@ -302,18 +358,46 @@ impl IcSmtpDeliveryAgent {
             return (v, true);
         }
 
-        // Otherwise do a lookup with a fallback to canister_id
-        let smtp_canister_id = self
-            .lookup_smtp_canister_id(canister_id)
-            .await
-            .unwrap_or(canister_id);
+        // Make sure there's at most one lookup in flight per canister,
+        // concurrent callers wait for its result.
+        let cell = self
+            .smtp_canister_id_inflight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(canister_id)
+            .or_default()
+            .clone();
+        let guard = InflightGuard {
+            inflight: &self.smtp_canister_id_inflight,
+            canister_id,
+            cell: Some(cell),
+        };
 
-        // Store the SMTP canister ID in the cache.
-        // We do it even if it's the same as base canister_id
-        // to avoid repeated HTTP calls in the case when there's
-        // no dedicated SMTP canister.
-        self.smtp_canister_id_cache
-            .insert(canister_id, smtp_canister_id);
+        let smtp_canister_id = *guard
+            .cell
+            .as_ref()
+            .expect("cell is set until the guard is dropped")
+            .get_or_init(|| async {
+                // Otherwise do a lookup with a fallback to canister_id
+                let smtp_canister_id = self
+                    .lookup_smtp_canister_id(canister_id)
+                    .timeout(SMTP_CANISTER_ID_LOOKUP_TIMEOUT)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(canister_id);
+
+                // Store the SMTP canister ID in the cache.
+                // We do it even if it's the same as base canister_id
+                // to avoid repeated HTTP calls in the case when there's
+                // no dedicated SMTP canister.
+                self.smtp_canister_id_cache
+                    .insert(canister_id, smtp_canister_id);
+
+                smtp_canister_id
+            })
+            .await;
+        drop(guard);
 
         debug!("{self}: {canister_id}: SMTP canister ID obtained: {smtp_canister_id}");
         (smtp_canister_id, false)
@@ -1409,6 +1493,158 @@ mod tests {
         // The rest should be served from the cache
         delivery_agent.smtp_canister_id_cache.run_pending_tasks();
         assert_eq!(delivery_agent.smtp_canister_id_cache.entry_count(), 4);
+    }
+
+    #[derive(Debug)]
+    enum LookupStubResponse {
+        // Large body (whitespace + principal) with Content-Length
+        Large,
+        // Large body without Content-Length
+        LargeStreamed,
+        // Gzip bomb served over real HTTP to a gzip-enabled reqwest client
+        Gzip(std::net::SocketAddr),
+        // Valid response after a delay
+        Slow(Principal),
+    }
+
+    #[derive(Debug)]
+    struct LookupStubClient(LookupStubResponse, AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl Client for LookupStubClient {
+        async fn execute(
+            &self,
+            mut req: reqwest::Request,
+        ) -> Result<reqwest::Response, reqwest::Error> {
+            self.1.fetch_add(1, Ordering::SeqCst);
+            const SIZE: usize = 64 * 1024 * 1024;
+
+            let body = match &self.0 {
+                LookupStubResponse::Large => {
+                    let mut body = vec![b' '; SIZE];
+                    body.extend_from_slice(b"aaaaa-aa");
+                    reqwest::Body::from(body)
+                }
+                LookupStubResponse::LargeStreamed => {
+                    reqwest::Body::wrap_stream(stream::repeat_with(|| {
+                        Ok::<_, std::io::Error>(bytes::Bytes::from_static(&[b' '; 1024]))
+                    }))
+                }
+                LookupStubResponse::Gzip(addr) => {
+                    req.url_mut().set_scheme("http").unwrap();
+                    req.url_mut().set_ip_host(addr.ip()).unwrap();
+                    req.url_mut().set_port(Some(addr.port())).unwrap();
+                    return reqwest::Client::new().execute(req).await;
+                }
+                LookupStubResponse::Slow(v) => {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    reqwest::Body::from(v.to_string())
+                }
+            };
+
+            Ok(reqwest::Response::from(
+                http::response::Builder::new()
+                    .status(200)
+                    .body(body)
+                    .unwrap(),
+            ))
+        }
+    }
+
+    fn create_lookup_agent(
+        resp: LookupStubResponse,
+    ) -> (IcSmtpDeliveryAgent, Arc<LookupStubClient>) {
+        let http_client = Arc::new(LookupStubClient(resp, AtomicUsize::new(0)));
+        let agent = IcSmtpDeliveryAgent::new(
+            Arc::new(TestIcSmtpRequestExecutor::default()),
+            Arc::new(TestDomainResolver(HashMap::default())),
+            http_client.clone(),
+            "icp0.io",
+            Duration::from_secs(10),
+            10,
+            Metrics::new(&Registry::new()),
+            None,
+        );
+
+        (agent, http_client)
+    }
+
+    #[tokio::test]
+    async fn test_lookup_smtp_canister_id_body_limit() {
+        let canister_id = principal!("lusdn-iiaaa-aaaam-qivpa-cai");
+
+        for resp in [LookupStubResponse::Large, LookupStubResponse::LargeStreamed] {
+            let (agent, _) = create_lookup_agent(resp);
+            assert_eq!(agent.lookup_smtp_canister_id(canister_id).await, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_lookup_smtp_canister_id_gzip_bomb() {
+        use std::io::Write;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // Serves `padding_mb` MBs of whitespace followed by `data`, gzip-compressed
+        async fn serve_gzip(padding_mb: usize, data: &[u8]) -> std::net::SocketAddr {
+            let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+            let padding = vec![b' '; 1024 * 1024];
+            for _ in 0..padding_mb {
+                enc.write_all(&padding).unwrap();
+            }
+            enc.write_all(data).unwrap();
+            let gz = enc.finish().unwrap();
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let hdr = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    gz.len()
+                );
+                let _ = sock.write_all(hdr.as_bytes()).await;
+                let _ = sock.write_all(&gz).await;
+            });
+
+            addr
+        }
+
+        let canister_id = principal!("lusdn-iiaaa-aaaam-qivpa-cai");
+
+        // A small gzipped principal is decoded fine
+        let addr = serve_gzip(0, b"aaaaa-aa").await;
+        let (agent, _) = create_lookup_agent(LookupStubResponse::Gzip(addr));
+        assert_eq!(
+            agent.lookup_smtp_canister_id(canister_id).await,
+            Some(principal!("aaaaa-aa"))
+        );
+
+        // 256MB of whitespace + a principal compressed to ~256KB is rejected
+        let addr = serve_gzip(256, b"aaaaa-aa").await;
+        let (agent, _) = create_lookup_agent(LookupStubResponse::Gzip(addr));
+        assert_eq!(agent.lookup_smtp_canister_id(canister_id).await, None);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_smtp_canister_id_single_flight() {
+        let canister_id = principal!("lusdn-iiaaa-aaaam-qivpa-cai");
+        let smtp_canister_id = principal!("aaaaa-aa");
+        let (agent, http_client) = create_lookup_agent(LookupStubResponse::Slow(smtp_canister_id));
+
+        let res = join_all((0..50).map(|_| agent.resolve_smtp_canister_id(canister_id))).await;
+        assert!(res.iter().all(|x| x.0 == smtp_canister_id));
+        assert_eq!(http_client.1.load(Ordering::SeqCst), 1);
+        assert!(agent.smtp_canister_id_inflight.lock().unwrap().is_empty());
+
+        // Cancelled lookups must not leave entries behind
+        let canister_id = principal!("qoctq-giaaa-aaaaa-aaaea-cai");
+        let _ = agent
+            .resolve_smtp_canister_id(canister_id)
+            .timeout(Duration::from_millis(10))
+            .await;
+        assert!(agent.smtp_canister_id_inflight.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
