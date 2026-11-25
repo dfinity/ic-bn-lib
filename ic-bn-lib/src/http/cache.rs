@@ -298,6 +298,39 @@ enum CacheControl {
     MaxAge(Duration),
 }
 
+/// Splits a `Cache-Control` header value into directives on the commas that are
+/// outside of quoted strings, respecting the escaped characters inside them.
+/// Returns `None` if a quoted string isn't terminated.
+fn split_directives(hdr: &str) -> Option<Vec<&str>> {
+    let mut directives = vec![];
+    let (mut start, mut quoted, mut escaped) = (0, false, false);
+
+    // All the delimiters are ASCII, so splitting on their byte positions is safe
+    for (i, c) in hdr.bytes().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        match c {
+            b'\\' if quoted => escaped = true,
+            b'"' => quoted = !quoted,
+            b',' if !quoted => {
+                directives.push(&hdr[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+
+    if quoted {
+        return None;
+    }
+
+    directives.push(&hdr[start..]);
+    Some(directives)
+}
+
 /// Tries to infer the caching TTL from the response headers.
 ///
 /// This is a shared cache, so:
@@ -309,13 +342,14 @@ fn infer_ttl<T>(resp: &Response<T>) -> Option<CacheControl> {
 
     // There might be several Cache-Control headers, all of them count
     for hdr in resp.headers().get_all(CACHE_CONTROL) {
-        // Do not cache if we can't read what we're asked for
-        let Ok(hdr) = hdr.to_str() else {
+        // Do not cache if we can't read what we're asked for:
+        // the header isn't readable or has an unterminated quoted string.
+        let Some(directives) = hdr.to_str().ok().and_then(split_directives) else {
             return Some(CacheControl::NoCache);
         };
 
         // Iterate over the key-value pairs (or just keys)
-        for directive in hdr.split(',') {
+        for directive in directives {
             let (k, v) = {
                 let mut split = directive.splitn(2, '=').map(str::trim);
                 (split.next().unwrap_or_default(), split.next())
@@ -1337,12 +1371,51 @@ mod tests {
             Some(CacheControl::MaxAge(Duration::from_secs(60)))
         );
 
-        // Unbalanced quotes are invalid
-        for v in ["max-age=\"60", "max-age=60\"", "max-age=\""] {
+        // Unterminated quoted string makes the header malformed, which forbids caching
+        for v in [
+            "max-age=\"60",
+            "max-age=60\"",
+            "max-age=\"",
+            "max-age=60, ext=\"abc, private",
+            "max-age=60, ext=\"abc\\\"",
+        ] {
             req.headers_mut()
                 .insert(CACHE_CONTROL, HeaderValue::from_static(v));
-            assert_eq!(infer_ttl(&req), None, "{v}");
+            assert_eq!(infer_ttl(&req), Some(CacheControl::NoCache), "{v}");
         }
+
+        // Commas inside quoted strings don't separate directives
+        req.headers_mut()
+            .insert(CACHE_CONTROL, hval!("max-age=0, ext=\"x,s-maxage=600,y\""));
+        assert_eq!(infer_ttl(&req), Some(CacheControl::NoCache));
+
+        for v in [
+            "max-age=60, ext=\"a,s-maxage=5\"",
+            "max-age=60, ext=\"a, private, b\"",
+            "ext=\"no-store\", max-age=60",
+        ] {
+            req.headers_mut()
+                .insert(CACHE_CONTROL, HeaderValue::from_static(v));
+            assert_eq!(
+                infer_ttl(&req),
+                Some(CacheControl::MaxAge(Duration::from_secs(60))),
+                "{v}"
+            );
+        }
+
+        // Escaped quotes don't terminate the quoted string
+        req.headers_mut().insert(
+            CACHE_CONTROL,
+            hval!("max-age=0, ext=\"a\\\",s-maxage=600,\\\"b\""),
+        );
+        assert_eq!(infer_ttl(&req), Some(CacheControl::NoCache));
+
+        // Qualified forms with a list of fields still forbid caching
+        req.headers_mut().insert(
+            CACHE_CONTROL,
+            hval!("no-cache=\"Set-Cookie, Foo\", max-age=60"),
+        );
+        assert_eq!(infer_ttl(&req), Some(CacheControl::NoCache));
 
         // Max-age
         req.headers_mut()
