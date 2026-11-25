@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use ::candid::{Decode, Encode, Principal};
+use ::candid::{CandidType, Deserialize, Encode, Principal, de::DecoderConfig};
 use anyhow::Context as _;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -152,8 +152,7 @@ impl ExecutesIcSmtpRequest for IcSmtpRequestExecutor {
                 .await?
         };
 
-        let ic_smtp_response =
-            Decode!(&resp, SmtpResponse).context("unable to decode SMTP response")?;
+        let ic_smtp_response = decode_reply(&resp).context("unable to decode SMTP response")?;
         debug!("{self}: {canister_id}: got IC SMTP response: '{ic_smtp_response:?}'");
 
         Ok(ic_smtp_response)
@@ -170,7 +169,7 @@ impl ExecutesIcSmtpRequest for IcSmtpRequestExecutor {
             .call()
             .await?;
 
-        let caps = Decode!(&resp, SmtpCapabilities).context("unable to decode capabilities")?;
+        let caps = decode_reply(&resp).context("unable to decode capabilities")?;
         debug!("{self}: {canister_id}: capabilities: '{caps:?}'");
 
         Ok(caps)
@@ -197,7 +196,7 @@ impl ExecutesIcSmtpRequest for IcSmtpRequestExecutor {
             .call_and_wait()
             .await?;
 
-        Ok(Decode!(&resp, SmtpUploadChunkResponse).context("unable to decode chunk response")?)
+        Ok(decode_reply(&resp).context("unable to decode chunk response")?)
     }
 
     async fn canister_upload_commit(
@@ -218,8 +217,7 @@ impl ExecutesIcSmtpRequest for IcSmtpRequestExecutor {
             .call_and_wait()
             .await?;
 
-        let ic_smtp_response =
-            Decode!(&resp, SmtpResponse).context("unable to decode commit response")?;
+        let ic_smtp_response = decode_reply(&resp).context("unable to decode commit response")?;
         debug!("{self}: {canister_id}: commit response: '{ic_smtp_response:?}'");
 
         Ok(ic_smtp_response)
@@ -238,7 +236,7 @@ impl ExecutesIcSmtpRequest for IcSmtpRequestExecutor {
             .call()
             .await?;
 
-        Ok(Decode!(&resp, SmtpUploadStatusResponse).context("unable to decode upload status")?)
+        Ok(decode_reply(&resp).context("unable to decode upload status")?)
     }
 
     async fn canister_upload_abort(
@@ -254,7 +252,7 @@ impl ExecutesIcSmtpRequest for IcSmtpRequestExecutor {
             .call_and_wait()
             .await?;
 
-        Ok(Decode!(&resp, SmtpResponse).context("unable to decode abort response")?)
+        Ok(decode_reply(&resp).context("unable to decode abort response")?)
     }
 }
 
@@ -262,6 +260,31 @@ impl Display for IcSmtpRequestExecutor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "IcSmtpRequestExecutor")
     }
+}
+
+/// Limit on the Candid decoding work for one canister reply.
+/// The replies are tiny, so this leaves plenty of headroom for legit ones.
+const REPLY_DECODING_QUOTA: usize = 1_000_000;
+/// Limit on the work spent skipping unexpected data (extra fields/arguments) in a reply
+const REPLY_SKIPPING_QUOTA: usize = 10_000;
+
+/// Decodes a canister reply with bounded decoding work.
+///
+/// The destination canister is picked by the SMTP client, so the reply is untrusted.
+/// Plain `Decode!` applies no quota and a few bytes can then demand
+/// an unbounded amount of work (e.g. a huge `vec null`), blocking the async worker.
+fn decode_reply<T>(bytes: &[u8]) -> Result<T, ::candid::Error>
+where
+    T: CandidType + for<'a> Deserialize<'a>,
+{
+    let mut config = DecoderConfig::new();
+    config
+        .set_decoding_quota(REPLY_DECODING_QUOTA)
+        .set_skipping_quota(REPLY_SKIPPING_QUOTA)
+        // Don't hex-dump the whole reply into the error
+        .set_full_error_message(false);
+
+    ::candid::decode_one_with_config(bytes, &config)
 }
 
 #[derive(Clone, Debug)]
@@ -539,7 +562,153 @@ pub fn parse_email_bytes(raw: &Bytes) -> Result<ParsedEmail, IcSmtpDeliveryAgent
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::smtp::ic::candid::{SmtpOk, SmtpRequestError, SmtpUploadChunkOk, SmtpUploadStatus};
+    use ::candid::types::{Serializer, Type, TypeInner};
     use indoc::indoc;
+    use std::time::Instant;
+
+    /// `vec null` of the given length: it takes only the LEB128 length on the wire
+    struct NullVec(usize);
+
+    impl CandidType for NullVec {
+        fn _ty() -> Type {
+            TypeInner::Vec(TypeInner::Null.into()).into()
+        }
+
+        fn idl_serialize<S: Serializer>(&self, s: S) -> Result<(), S::Error> {
+            s.serialize_vec(self.0).map(|_| ())
+        }
+    }
+
+    /// Error arm of the variant replies with an unexpected extra field
+    #[derive(CandidType)]
+    enum PaddedErr {
+        Err {
+            code: u64,
+            message: String,
+            pad: NullVec,
+        },
+    }
+
+    /// `SmtpCapabilities` with an unexpected extra field
+    #[derive(CandidType)]
+    struct PaddedCaps {
+        upload_protocol_version: Option<u32>,
+        pad: NullVec,
+    }
+
+    /// `SmtpCapabilities` with a mismatched option field
+    #[derive(CandidType)]
+    struct MismatchedCaps {
+        max_message_size: Option<NullVec>,
+    }
+
+    const HUGE: usize = 1 << 60;
+
+    fn padded_err(len: usize) -> Vec<u8> {
+        Encode!(&PaddedErr::Err {
+            code: 451,
+            message: "x".into(),
+            pad: NullVec(len),
+        })
+        .unwrap()
+    }
+
+    fn assert_rejected_fast<T: CandidType + for<'a> Deserialize<'a> + Debug>(
+        site: &str,
+        bytes: &[u8],
+    ) {
+        let start = Instant::now();
+        let res = decode_reply::<T>(bytes);
+        let elapsed = start.elapsed();
+
+        assert!(res.is_err(), "{site}: hostile reply decoded: {res:?}");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "{site}: rejecting hostile reply took {elapsed:?}"
+        );
+    }
+
+    fn check_site<T>(site: &str, legit: T, hostile_field: &[u8])
+    where
+        T: CandidType + for<'a> Deserialize<'a> + Debug + PartialEq,
+    {
+        // Legit replies still decode, also with a few unknown extra values
+        assert_eq!(decode_reply::<T>(&Encode!(&legit).unwrap()).unwrap(), legit);
+        assert_eq!(
+            decode_reply::<T>(&Encode!(&legit, &NullVec(100)).unwrap()).unwrap(),
+            legit
+        );
+
+        // Huge zero-sized collection as an extra argument
+        assert_rejected_fast::<T>(site, &Encode!(&legit, &NullVec(HUGE)).unwrap());
+        // Huge zero-sized collection as an extra record field
+        assert_rejected_fast::<T>(site, hostile_field);
+    }
+
+    /// Feeds hostile replies through the decoding used by each of
+    /// `IcSmtpRequestExecutor` methods
+    #[test]
+    fn test_decode_reply_bounded() {
+        let ok = SmtpResponse::Ok(SmtpOk {});
+        let err = SmtpResponse::Err(SmtpRequestError {
+            code: 550,
+            message: "no such user".into(),
+        });
+
+        // Small padding is fine
+        assert!(decode_reply::<SmtpResponse>(&padded_err(100)).is_ok());
+
+        // canister_request (smtp_request & smtp_request_validate)
+        check_site("smtp_request", ok.clone(), &padded_err(HUGE));
+        check_site("smtp_request", err.clone(), &padded_err(HUGE));
+
+        // canister_capabilities
+        let caps = SmtpCapabilities {
+            upload_protocol_version: Some(1),
+            max_message_size: Some(1 << 20),
+        };
+        check_site(
+            "smtp_capabilities",
+            caps,
+            &Encode!(&PaddedCaps {
+                upload_protocol_version: Some(1),
+                pad: NullVec(HUGE),
+            })
+            .unwrap(),
+        );
+        assert_rejected_fast::<SmtpCapabilities>(
+            "smtp_capabilities",
+            &Encode!(&MismatchedCaps {
+                max_message_size: Some(NullVec(HUGE)),
+            })
+            .unwrap(),
+        );
+
+        // canister_upload_chunk
+        check_site(
+            "smtp_upload_chunk",
+            SmtpUploadChunkResponse::Ok(SmtpUploadChunkOk { chunks_received: 3 }),
+            &padded_err(HUGE),
+        );
+
+        // canister_upload_commit
+        check_site("smtp_upload_commit", ok.clone(), &padded_err(HUGE));
+
+        // canister_upload_status
+        check_site(
+            "smtp_upload_status",
+            SmtpUploadStatusResponse::Ok(SmtpUploadStatus {
+                known: true,
+                committed: true,
+                result: Some(err),
+            }),
+            &padded_err(HUGE),
+        );
+
+        // canister_upload_abort
+        check_site("smtp_upload_abort", ok, &padded_err(HUGE));
+    }
 
     #[test]
     fn test_parser() {
