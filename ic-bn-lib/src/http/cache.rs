@@ -901,7 +901,7 @@ fn hash_field(hash: &mut Sha1, field: &[u8]) {
     hash.update(field);
 }
 
-/// Key extractor that is keyed by authority, path & query and the values of
+/// Key extractor that is keyed by method, authority, path & query and the values of
 /// `Range`, `Accept-Encoding`, `Origin` and CORS preflight request headers.
 #[derive(Clone, Debug)]
 pub struct KeyExtractorUriRange;
@@ -922,6 +922,7 @@ impl KeyExtractor for KeyExtractorUriRange {
 
         // Compute a composite hash
         let mut hash = Sha1::new();
+        hash_field(&mut hash, request.method().as_str().as_bytes());
         hash_field(&mut hash, authority);
         hash_field(&mut hash, paq);
 
@@ -1232,6 +1233,38 @@ mod tests {
         *req.uri_mut() = Uri::from_static("http://foo.bar.baz/");
         req.headers_mut().insert(RANGE, hval!("main.js"));
         assert_ne!(key_path, x.extract(&req).unwrap());
+
+        // Computes the key of a request for the given URI with an optional Range header
+        let key_range = |uri: &'static str, range: Option<&'static str>| {
+            let mut req = Request::new("foo");
+            *req.uri_mut() = Uri::from_static(uri);
+            if let Some(v) = range {
+                req.headers_mut().insert(RANGE, HeaderValue::from_static(v));
+            }
+            x.extract(&req).unwrap()
+        };
+
+        // A path prefix plus the rest of the path in Range doesn't collide with the full path
+        assert_ne!(
+            key_range("http://foo.bar.baz/app.js", None),
+            key_range("http://foo.bar.baz/a", Some("pp.js")),
+        );
+
+        // The boundary between the path and Range can't be shifted when both carry Range
+        assert_ne!(
+            key_range("http://foo.bar.baz/app", Some(".js")),
+            key_range("http://foo.bar.baz/a", Some("pp.js")),
+        );
+        assert_ne!(
+            key_range("http://foo.bar.baz/a?b", Some("=1")),
+            key_range("http://foo.bar.baz/a?b=1", Some("")),
+        );
+
+        // Different methods give different keys
+        let mut req = Request::new("foo");
+        *req.uri_mut() = Uri::from_static("http://foo.bar.baz:80/foo/bar?abc=1");
+        *req.method_mut() = Method::HEAD;
+        assert_ne!(key1, x.extract(&req).unwrap());
 
         // Computes the key of the baseline request with given headers added
         let key = |headers: &[(&HeaderName, &'static str)]| {
