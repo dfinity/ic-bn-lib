@@ -2,7 +2,7 @@ use anyhow::anyhow;
 use candid::{Decode, Encode, Principal};
 use ic_custom_domains_canister_api::{
     CERTIFICATE_VALIDITY_FRACTION, DomainStatus, HasNextTaskError, HasNextTaskResult,
-    IssueCertificateOutput, MAX_TASK_FAILURES, MIN_TASK_RETRY_DELAY, RegistrationStatus,
+    IssueCertificateOutput, MAX_TASK_FAILURES, MAX_TASK_RETRY_DELAY, RegistrationStatus,
     STALE_DOMAINS_CLEANUP_INTERVAL, ScheduledTask as ScheduledTaskApi, ScheduledTask,
     SubmitTaskError, TASK_TIMEOUT, TaskFailReason, TaskKind, TaskOutcome, TaskOutput, TaskResult,
     UNREGISTERED_DOMAIN_EXPIRATION_TIME,
@@ -14,8 +14,8 @@ use tracing::info;
 use helpers::{TestEnv, init_logging};
 
 const TICKS_AFTER_TIME_ADVANCE: u32 = 5; // make pocket-ic progress by some blocks to ensure time advancement takes place
-const CERTIFICATE_VALIDITY_DURATION_SECS: u64 = 100_000;
-const RATE_LIMIT_MAX_ATTEMPTS: u32 = 25;
+const CERTIFICATE_VALIDITY_DURATION_SECS: u64 = 500_000;
+const RATE_LIMIT_MAX_ATTEMPTS: u32 = 3;
 
 mod e2e_test;
 mod helpers;
@@ -172,9 +172,7 @@ async fn test_comprehensive_registration_scenario() -> anyhow::Result<()> {
     info!("Step 6: Test task timeout and automatic rescheduling for {domain_with_failure}");
     let task2 = simulate_task_timeout_and_rescheduling(&env, &task2, canister_id2).await?;
 
-    info!(
-        "Step 7: Test rate-limited failure handling with unlimited retries for {domain_with_failure}"
-    );
+    info!("Step 7: Test rate-limited failure handling with retries for {domain_with_failure}");
     let task2 =
         simulate_retries_after_rate_limited_errors(&env, task2, RATE_LIMIT_MAX_ATTEMPTS).await?;
 
@@ -471,7 +469,7 @@ async fn simulate_retries_after_rate_limited_errors(
 
         assert_has_no_next_task(env).await?;
 
-        advance_time_and_tick(env, MIN_TASK_RETRY_DELAY, TICKS_AFTER_TIME_ADVANCE).await;
+        advance_time_and_tick(env, MAX_TASK_RETRY_DELAY, TICKS_AFTER_TIME_ADVANCE).await;
 
         task = fetch_next_task(env).await?;
 
@@ -500,7 +498,7 @@ async fn simulate_retries_after_generic_failures(
 
         assert_has_no_next_task(env).await?;
 
-        advance_time_and_tick(env, MIN_TASK_RETRY_DELAY, TICKS_AFTER_TIME_ADVANCE).await;
+        advance_time_and_tick(env, MAX_TASK_RETRY_DELAY, TICKS_AFTER_TIME_ADVANCE).await;
 
         if attempt < max_attempts {
             task = fetch_next_task(env).await?;

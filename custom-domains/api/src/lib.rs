@@ -37,11 +37,16 @@ pub const UNREGISTERED_DOMAIN_EXPIRATION_TIME: Duration = Duration::from_secs(24
 pub const EXPIRED_DOMAIN_EXPIRATION_TIME: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 // If a task fails this many times with a recoverable error, it is no longer rescheduled.
+// The same limit applies to rate-limited attempts of domains that never had a certificate issued.
 // User is expected to resubmit the task.
 pub const MAX_TASK_FAILURES: u32 = 20;
 
 // If a task fails, it will not be rescheduled earlier than this interval.
+// The delay doubles with every consecutive failure, up to MAX_TASK_RETRY_DELAY.
 pub const MIN_TASK_RETRY_DELAY: Duration = Duration::from_secs(30);
+
+// Upper bound for the exponential retry delay of failed tasks.
+pub const MAX_TASK_RETRY_DELAY: Duration = Duration::from_secs(60 * 60);
 
 // Default number of domains returned per page when no limit is specified or limit is zero
 pub const DEFAULT_PAGE_LIMIT: u32 = 100;

@@ -7,10 +7,10 @@ use ic_custom_domains_canister_api::{
     EXPIRED_DOMAIN_EXPIRATION_TIME, FetchTaskResult, GetDomainEntryResult, GetDomainStatusResult,
     GetLastChangeTimeResult, HasNextTaskResult, InputTask, ListCertificatesPageInput,
     ListCertificatesPageResult, ListDomainsPageInput, ListDomainsPageResult, ListedDomainEntry,
-    MAX_PAGE_LIMIT, MAX_TASK_FAILURES, MIN_TASK_RETRY_DELAY, RegisteredDomain, RegistrationStatus,
-    ScheduledTask, SubmitTaskError, SubmitTaskResult, TASK_TIMEOUT, TaskFailReason, TaskKind,
-    TaskOutcome, TaskOutput, TaskResult, TryAddTaskError, TryAddTaskResult,
-    UNREGISTERED_DOMAIN_EXPIRATION_TIME,
+    MAX_PAGE_LIMIT, MAX_TASK_FAILURES, MAX_TASK_RETRY_DELAY, MIN_TASK_RETRY_DELAY,
+    RegisteredDomain, RegistrationStatus, ScheduledTask, SubmitTaskError, SubmitTaskResult,
+    TASK_TIMEOUT, TaskFailReason, TaskKind, TaskOutcome, TaskOutput, TaskResult, TryAddTaskError,
+    TryAddTaskResult, UNREGISTERED_DOMAIN_EXPIRATION_TIME,
 };
 use ic_http_types::{HttpResponse, HttpResponseBuilder};
 use ic_stable_structures::{
@@ -263,11 +263,14 @@ impl CanisterState {
     pub fn fetch_next_task(&mut self, now: UtcTimestamp) -> FetchTaskResult {
         let mut domains_to_update = Vec::new();
         let mut oldest_candidate_task = None;
-        let mut oldest_task_created_at = u64::MAX;
+        // (not renewal-critical, task_created_at): tasks of registrations whose certificate
+        // needs renewal are always scheduled first, so they can't be starved by any number
+        // of other (e.g. new registration) tasks.
+        let mut oldest_task_key = (true, u64::MAX);
 
         // Pass through all domains:
         // - create all needed renewal tasks and track domain entries that need updates
-        // - find the oldest pending task
+        // - find the oldest pending task, prioritizing renewal-critical ones
         for entry in self.domains.iter() {
             let domain = entry.key();
             let mut domain_entry = entry.value();
@@ -282,9 +285,10 @@ impl CanisterState {
 
                 // Keep track of the oldest task
                 if let Some(task_created_at) = domain_entry.task_created_at
-                    && task_created_at < oldest_task_created_at
+                    && let task_key = (!renewal_due(&domain_entry, now), task_created_at)
+                    && task_key < oldest_task_key
                 {
-                    oldest_task_created_at = task_created_at;
+                    oldest_task_key = task_key;
                     oldest_candidate_task = Some((domain.clone(), domain_entry.clone()));
                 }
             }
@@ -492,10 +496,17 @@ impl CanisterState {
 
                 // Prevent scheduling concurrent tasks for domain if:
                 // - there is already a task for the domain that is not a renewal task
-                // - there is a renewal task for the domain that is not yet near expiration or already taken
+                // - there is a renewal task for the domain, unless it is a `Delete` (which only
+                //   the owner can pass validation for) of a near-expiry renewal not yet taken
+                // - a renewal is due but not yet created, and the task is not a `Delete`
+                // Submissions must never replace or defer a renewal.
                 if (entry.task.is_some() && entry.task != Some(TaskKind::Renew))
                     || (entry.task == Some(TaskKind::Renew)
-                        && (!entry.is_nearing_expiration(now) || entry.taken_at.is_some()))
+                        && (task.kind != TaskKind::Delete
+                            || !entry.is_nearing_expiration(now)
+                            || entry.taken_at.is_some()))
+                    || (task.kind != TaskKind::Delete
+                        && next_pending_task(&entry, now) == Some(TaskKind::Renew))
                 {
                     return Err(TryAddTaskError::AnotherTaskInProgress(domain));
                 }
@@ -652,7 +663,7 @@ impl CanisterState {
             }
 
             TaskOutcome::Failure(failure) => {
-                // Note: rate-limited failures do not impact the retry limit, they are just counted
+                // Note: rate-limited failures are counted separately (see `retries_exhausted`)
                 if failure == TaskFailReason::RateLimited {
                     entry.rate_limit_failures_count += 1;
                 } else {
@@ -666,7 +677,7 @@ impl CanisterState {
                 entry.task_created_at = Some(now);
 
                 // Delete the task if the retry limit is reached
-                if entry.failures_count >= MAX_TASK_FAILURES {
+                if retries_exhausted(&entry) {
                     entry.task = None;
                 }
             }
@@ -814,18 +825,40 @@ fn next_pending_task(entry: &DomainEntry, now: UtcTimestamp) -> Option<TaskKind>
     None
 }
 
+/// Whether a domain entry's failures reached the retry limit. Rate-limited attempts are
+/// capped too for domains that never had a certificate issued; for registered domains they
+/// are only backed off, as renewals must keep being attempted until the domain is cleaned up.
+fn retries_exhausted(entry: &DomainEntry) -> bool {
+    entry.failures_count >= MAX_TASK_FAILURES
+        || (entry.not_after.is_none() && entry.rate_limit_failures_count >= MAX_TASK_FAILURES)
+}
+
 /// Whether a domain entry's failure history currently permits starting/retrying a task.
 fn retry_allowed(entry: &DomainEntry, now: UtcTimestamp) -> bool {
-    if entry.failures_count >= MAX_TASK_FAILURES {
+    if retries_exhausted(entry) {
         return false;
     }
 
     match entry.last_fail_time {
         Some(last_fail_time) => {
-            now >= last_fail_time.saturating_add(MIN_TASK_RETRY_DELAY.as_secs())
+            // Exponential back-off: the delay doubles with every consecutive failure
+            let failures = entry
+                .failures_count
+                .saturating_add(entry.rate_limit_failures_count);
+            let delay = MIN_TASK_RETRY_DELAY
+                .as_secs()
+                .saturating_mul(1u64 << failures.saturating_sub(1).min(16))
+                .min(MAX_TASK_RETRY_DELAY.as_secs());
+
+            now >= last_fail_time.saturating_add(delay)
         }
         None => true,
     }
+}
+
+/// Whether the entry has a certificate that needs renewal.
+fn renewal_due(entry: &DomainEntry, now: UtcTimestamp) -> bool {
+    matches!((entry.not_before, entry.not_after), (Some(not_before), Some(not_after)) if renewal_needed(not_before, not_after, now))
 }
 
 fn handle_existing_task(
@@ -1527,7 +1560,20 @@ mod tests {
                 let fail_time = created_at + 200;
                 domain.last_fail_time = Some(fail_time);
                 domain.failures_count = MAX_TASK_FAILURES - 1; // One attempt is still allowed
-                let now = fail_time.saturating_add(MIN_TASK_RETRY_DELAY.as_secs());
+                let now = fail_time.saturating_add(MAX_TASK_RETRY_DELAY.as_secs());
+                assert!(next_pending_task(&domain, now - 1).is_none());
+                assert_eq!(next_pending_task(&domain, now), Some(task_kind));
+            }
+
+            // Retry delay doubles with every consecutive failure (rate-limited ones included)
+            {
+                let mut domain = DomainEntry::new(Some(task_kind), created_at);
+                let fail_time = created_at + 200;
+                domain.last_fail_time = Some(fail_time);
+                domain.failures_count = 1;
+                domain.rate_limit_failures_count = 2;
+                let now = fail_time.saturating_add(4 * MIN_TASK_RETRY_DELAY.as_secs());
+                assert!(next_pending_task(&domain, now - 1).is_none());
                 assert_eq!(next_pending_task(&domain, now), Some(task_kind));
             }
 
@@ -1563,6 +1609,159 @@ mod tests {
             let now = not_before + 1340; // 1340 = 0.67*(2500 - 500)
             assert_eq!(next_pending_task(&domain, now), Some(TaskKind::Renew));
         }
+    }
+
+    fn input_task(domain: &str, kind: TaskKind) -> InputTask {
+        InputTask {
+            domain: domain.to_string(),
+            kind,
+            wildcard: None,
+            canister_id: None,
+        }
+    }
+
+    fn fail_task(
+        state: &mut CanisterState,
+        task: &ScheduledTask,
+        reason: TaskFailReason,
+        now: u64,
+    ) {
+        state
+            .submit_task_result(
+                TaskResult {
+                    domain: task.domain.clone(),
+                    outcome: TaskOutcome::Failure(reason),
+                    task_id: task.id,
+                    task_kind: task.kind,
+                    duration_secs: 1,
+                },
+                now,
+            )
+            .unwrap();
+    }
+
+    /// Inserts a registered domain whose renewal becomes due at `renewal_at`
+    /// (validity 10000s, so it is nearing expiration from `renewal_at + 1400`).
+    fn insert_registered(state: &mut CanisterState, domain: &str, renewal_at: u64) {
+        let mut entry = DomainEntry::new(None, 0);
+        entry.not_before = Some(renewal_at - 6600);
+        entry.not_after = Some(renewal_at + 3400);
+        entry.canister_id = Some(Principal::from_text("rdmx6-jaaaa-aaaaa-aaadq-cai").unwrap());
+        state.domains.insert(domain.to_string(), entry);
+        state
+            .certificates
+            .insert(domain.to_string(), CertificateEntry::default());
+    }
+
+    #[test]
+    fn test_renewal_scheduled_ahead_of_failing_backlog() {
+        let mut state = create_test_empty_state();
+        let start = 1000;
+        let renewal_at = 100_000;
+
+        // A large backlog of `Issue` tasks, all queued and failing before the renewal is due
+        let backlog = 200;
+        for i in 0..backlog {
+            state
+                .try_add_task(
+                    input_task(&format!("backlog-{i}.com"), TaskKind::Issue),
+                    start,
+                )
+                .unwrap();
+        }
+        for _ in 0..backlog {
+            let task = state.fetch_next_task(start).unwrap().unwrap();
+            assert_eq!(task.kind, TaskKind::Issue);
+            fail_task(&mut state, &task, TaskFailReason::RateLimited, start);
+        }
+
+        // A registered domain whose renewal becomes due afterwards jumps the whole backlog
+        insert_registered(&mut state, "victim.com", renewal_at);
+        let task = state.fetch_next_task(renewal_at).unwrap().unwrap();
+        assert_eq!(task.kind, TaskKind::Renew);
+        assert_eq!(task.domain, "victim.com");
+
+        // The backlog is still served afterwards
+        let task = state.fetch_next_task(renewal_at).unwrap().unwrap();
+        assert_eq!(task.kind, TaskKind::Issue);
+    }
+
+    #[test]
+    fn test_rate_limited_never_issued_entry_is_abandoned() {
+        let mut state = create_test_empty_state();
+        let mut now = 1000;
+        state
+            .try_add_task(input_task("limited.com", TaskKind::Issue), now)
+            .unwrap();
+
+        for _ in 0..MAX_TASK_FAILURES {
+            let task = state.fetch_next_task(now).unwrap().unwrap();
+            fail_task(&mut state, &task, TaskFailReason::RateLimited, now);
+            // Retries are backed off
+            assert!(
+                state
+                    .fetch_next_task(now + MIN_TASK_RETRY_DELAY.as_secs() - 1)
+                    .unwrap()
+                    .is_none()
+            );
+            now += MAX_TASK_RETRY_DELAY.as_secs();
+        }
+
+        assert!(state.fetch_next_task(now).unwrap().is_none());
+        assert!(state.fetch_next_task(now + 1_000_000).unwrap().is_none());
+        assert_eq!(
+            state.domains.get(&"limited.com".to_string()).unwrap().task,
+            None
+        );
+    }
+
+    #[test]
+    fn test_submissions_do_not_replace_or_defer_renewal() {
+        let mut state = create_test_empty_state();
+        let renewal_at = 100_000;
+        let near_expiry = renewal_at + 2000;
+
+        // Older task of another domain
+        state
+            .try_add_task(input_task("other.com", TaskKind::Issue), 1000)
+            .unwrap();
+
+        // Pending, untaken, near-expiry renewal
+        insert_registered(&mut state, "pending.com", renewal_at);
+        let mut entry = state.domains.get(&"pending.com".to_string()).unwrap();
+        entry.task = Some(TaskKind::Renew);
+        entry.task_created_at = Some(renewal_at);
+        state
+            .domains
+            .insert("pending.com".to_string(), entry.clone());
+        assert!(entry.is_nearing_expiration(near_expiry));
+
+        // Renewal due, but not yet created by `fetch_next_task`
+        insert_registered(&mut state, "due.com", renewal_at);
+
+        for _ in 0..3 {
+            for domain in ["pending.com", "due.com"] {
+                for kind in [TaskKind::Update, TaskKind::Issue] {
+                    assert!(matches!(
+                        state.try_add_task(input_task(domain, kind), near_expiry),
+                        Err(TryAddTaskError::AnotherTaskInProgress(_))
+                    ));
+                }
+            }
+        }
+        assert_eq!(
+            state.domains.get(&"pending.com".to_string()).unwrap(),
+            entry
+        );
+
+        // Both renewals are handed out first
+        let mut renewed: Vec<_> = (0..2)
+            .map(|_| state.fetch_next_task(near_expiry).unwrap().unwrap())
+            .inspect(|task| assert_eq!(task.kind, TaskKind::Renew))
+            .map(|task| task.domain)
+            .collect();
+        renewed.sort();
+        assert_eq!(renewed, ["due.com", "pending.com"]);
     }
 
     #[test]
