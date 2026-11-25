@@ -27,6 +27,15 @@ concurrency:
 
 jobs:
   deploy:
+    # Only deploy reviewed code from main. Each controller identity must be the environment secret
+    # CUSTOM_DOMAINS_CANISTER_IDENTITY of its environment, with no repository or organization secret
+    # of that name, and the environments must require reviewer approval and restrict deployment
+    # branches to main, so a modified copy of this workflow cannot obtain them. Likewise, each
+    # environment sets its own CUSTOM_DOMAINS_CANISTER_ID and CUSTOM_DOMAINS_AUTHORIZED_PRINCIPAL
+    # variables, with no repository or organization variables of those names.
+    if: github.ref == 'refs/heads/main'
+    environment: custom-domains-canister-${{ inputs.environment }}
+
     runs-on: ubuntu-latest
 
     timeout-minutes: 30
@@ -43,48 +52,43 @@ jobs:
         id: config
         env:
           ENVIRONMENT: ${{ inputs.environment }}
-          CANISTER_ID_DEV: ${{ vars.CUSTOM_DOMAINS_CANISTER_ID_DEV }}
-          CANISTER_ID_PROD: ${{ vars.CUSTOM_DOMAINS_CANISTER_ID_PROD }}
-          AUTHORIZED_PRINCIPAL_DEV: ${{ vars.CUSTOM_DOMAINS_AUTHORIZED_PRINCIPAL_DEV }}
-          AUTHORIZED_PRINCIPAL_PROD: ${{ vars.CUSTOM_DOMAINS_AUTHORIZED_PRINCIPAL_PROD }}
+          # Environment variables: each environment holds its own values
+          CANISTER_ID: ${{ vars.CUSTOM_DOMAINS_CANISTER_ID }}
+          AUTHORIZED_PRINCIPAL: ${{ vars.CUSTOM_DOMAINS_AUTHORIZED_PRINCIPAL }}
         run: |
           set -eEuo pipefail
 
           case "${ENVIRONMENT}" in
-            dev) suffix=DEV ;;
-            prod) suffix=PROD ;;
+            dev | prod) ;;
             *) echo "Unknown environment '${ENVIRONMENT}'"; exit 1 ;;
           esac
 
           principal_re='^[a-z2-7]+(-[a-z2-7]+)+$'
 
-          for name in CANISTER_ID AUTHORIZED_PRINCIPAL; do
-            var="${name}_${suffix}"
-            value="${!var:-}"
-            if [ -z "${value}" ]; then
-              echo "Variable CUSTOM_DOMAINS_${var} is unset or empty"
+          check_principal() {
+            if [ -z "$2" ]; then
+              echo "Variable $1 is unset or empty"
               exit 1
             fi
-            if ! printf '%s' "${value}" | grep -Eq "${principal_re}"; then
-              echo "CUSTOM_DOMAINS_${var}='${value}' is not a textual principal"
+            if ! printf '%s' "$2" | grep -Eq "${principal_re}"; then
+              echo "$1='$2' is not a textual principal"
               exit 1
             fi
-          done
+          }
 
-          canister_id_var="CANISTER_ID_${suffix}"
-          authorized_principal_var="AUTHORIZED_PRINCIPAL_${suffix}"
+          check_principal CUSTOM_DOMAINS_CANISTER_ID "${CANISTER_ID:-}"
+          check_principal CUSTOM_DOMAINS_AUTHORIZED_PRINCIPAL "${AUTHORIZED_PRINCIPAL:-}"
 
           # post_upgrade() calls init(), which overwrites AUTHORIZED_PRINCIPAL. If it ends up None,
           # every caller becomes authorized.
-          init_arg="(record { authorized_principal = opt principal \"${!authorized_principal_var}\" })"
+          init_arg="(record { authorized_principal = opt principal \"${AUTHORIZED_PRINCIPAL}\" })"
 
           echo "environment:  ${ENVIRONMENT}"
-          echo "canister id:  ${!canister_id_var}"
+          echo "canister id:  ${CANISTER_ID}"
           echo "init arg:     ${init_arg}"
 
           {
-            echo "suffix=${suffix}"
-            echo "canister_id=${!canister_id_var}"
+            echo "canister_id=${CANISTER_ID}"
             echo "init_arg=${init_arg}"
           } >> "${GITHUB_OUTPUT}"
 
@@ -112,17 +116,15 @@ jobs:
 
       - name: Import controller identity
         env:
-          SUFFIX: ${{ steps.config.outputs.suffix }}
-          IDENTITY_DEV: ${{ secrets.CUSTOM_DOMAINS_CANISTER_IDENTITY_DEV }}
-          IDENTITY_PROD: ${{ secrets.CUSTOM_DOMAINS_CANISTER_IDENTITY_PROD }}
+          # Environment secret: each environment holds only its own controller identity
+          IDENTITY: ${{ secrets.CUSTOM_DOMAINS_CANISTER_IDENTITY }}
         run: |
           set -eEuo pipefail
           umask 077
 
-          var="IDENTITY_${SUFFIX}"
-          pem="${!var:-}"
+          pem="${IDENTITY:-}"
           if [ -z "${pem}" ]; then
-            echo "Repository secret CUSTOM_DOMAINS_CANISTER_${var} is unset or empty"
+            echo "Environment secret CUSTOM_DOMAINS_CANISTER_IDENTITY is unset or empty"
             exit 1
           fi
 
