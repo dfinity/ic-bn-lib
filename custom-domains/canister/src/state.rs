@@ -409,13 +409,24 @@ impl CanisterState {
         Ok(Some(domain_entry_to_api(entry, cert)))
     }
 
-    /// Removes unregistered domains that have been in the system for too long
+    /// Removes unregistered domains that have been in the system for too long.
+    /// Also drops pending tasks that ran out of retries without being dropped by
+    /// `submit_task_result` (e.g. rate-limited more than `MAX_TASK_FAILURES` times before
+    /// that cap applied to them), so the domain can be resubmitted or removed.
     pub fn cleanup_stale_domains(&mut self, now: UtcTimestamp) {
         let mut domains_to_remove = Vec::new();
+        let mut domains_to_update = Vec::new();
 
         for entry in self.domains.iter() {
             let domain = entry.key().clone();
-            let domain_entry = entry.value();
+            let mut domain_entry = entry.value();
+
+            let task_exhausted = domain_entry.task.is_some()
+                && domain_entry.taken_at.is_none()
+                && retries_exhausted(&domain_entry);
+            if task_exhausted {
+                domain_entry.task = None;
+            }
 
             // Remove domain if it stayed unregistered for more than UNREGISTERED_DOMAIN_EXPIRATION_TIME
             // This covers new registrations that fail to be completed
@@ -436,7 +447,13 @@ impl CanisterState {
 
             if unregistered_too_long || cert_expired_too_long_ago {
                 domains_to_remove.push(domain);
+            } else if task_exhausted {
+                domains_to_update.push((domain, domain_entry));
             }
+        }
+
+        for (domain, domain_entry) in domains_to_update {
+            self.domains.insert(domain, domain_entry);
         }
 
         // Remove expired/unregistered domains, along with any associated certificate
@@ -498,14 +515,14 @@ impl CanisterState {
                 // - there is already a task for the domain that is not a renewal task
                 // - there is a renewal task for the domain, unless it is a `Delete` (which only
                 //   the owner can pass validation for) of a near-expiry renewal not yet taken
-                // - a renewal is due but not yet created, and the task is not a `Delete`
+                // - a renewal is due but not yet created, and the task is an `Issue`/`Update`
                 // Submissions must never replace or defer a renewal.
                 if (entry.task.is_some() && entry.task != Some(TaskKind::Renew))
                     || (entry.task == Some(TaskKind::Renew)
                         && (task.kind != TaskKind::Delete
                             || !entry.is_nearing_expiration(now)
                             || entry.taken_at.is_some()))
-                    || (task.kind != TaskKind::Delete
+                    || (matches!(task.kind, TaskKind::Issue | TaskKind::Update)
                         && next_pending_task(&entry, now) == Some(TaskKind::Renew))
                 {
                     return Err(TryAddTaskError::AnotherTaskInProgress(domain));
@@ -1762,6 +1779,76 @@ mod tests {
             .collect();
         renewed.sort();
         assert_eq!(renewed, ["due.com", "pending.com"]);
+    }
+
+    #[test]
+    fn test_explicit_renew_accepted_when_renewal_due() {
+        let mut state = create_test_empty_state();
+        let renewal_at = 100_000;
+        insert_registered(&mut state, "due.com", renewal_at);
+
+        state
+            .try_add_task(input_task("due.com", TaskKind::Renew), renewal_at)
+            .expect("explicit renewal of a due domain should be accepted");
+
+        let task = state.fetch_next_task(renewal_at).unwrap().unwrap();
+        assert_eq!(task.kind, TaskKind::Renew);
+        assert_eq!(task.domain, "due.com");
+    }
+
+    #[test]
+    fn test_cleanup_drops_exhausted_pending_tasks() {
+        let created_at = 1000;
+        let domain = "stuck.com".to_string();
+
+        // Entry rate-limited beyond the cap before the cap existed: still has a pending task
+        let mut stuck = DomainEntry::new(Some(TaskKind::Issue), created_at);
+        stuck.task_created_at = Some(created_at + 100);
+        stuck.last_fail_time = Some(created_at + 100);
+        stuck.rate_limit_failures_count = MAX_TASK_FAILURES + 5;
+        stuck.last_failure_reason = Some(TaskFailReason::RateLimited);
+
+        // Within the unregistered expiration window: task is dropped, entry is kept
+        {
+            let mut state = create_test_empty_state();
+            state.domains.insert(domain.clone(), stuck.clone());
+            let now = created_at + 1000;
+
+            assert!(state.fetch_next_task(now).unwrap().is_none());
+            assert!(matches!(
+                state.try_add_task(input_task(&domain, TaskKind::Issue), now),
+                Err(TryAddTaskError::AnotherTaskInProgress(_))
+            ));
+
+            state.cleanup_stale_domains(now);
+            assert_eq!(state.domains.get(&domain).unwrap().task, None);
+
+            state
+                .try_add_task(input_task(&domain, TaskKind::Issue), now)
+                .expect("resubmission should be accepted after cleanup");
+            assert_eq!(state.fetch_next_task(now).unwrap().unwrap().domain, domain);
+        }
+
+        // Past the unregistered expiration window: entry is removed
+        {
+            let mut state = create_test_empty_state();
+            state.domains.insert(domain.clone(), stuck.clone());
+            let now = created_at + UNREGISTERED_DOMAIN_EXPIRATION_TIME.as_secs();
+
+            state.cleanup_stale_domains(now);
+            assert!(state.domains.get(&domain).is_none());
+        }
+
+        // In-flight tasks are left alone
+        {
+            let mut state = create_test_empty_state();
+            let mut taken = stuck.clone();
+            taken.taken_at = Some(created_at + 200);
+            state.domains.insert(domain.clone(), taken.clone());
+
+            state.cleanup_stale_domains(created_at + 1000);
+            assert_eq!(state.domains.get(&domain).unwrap(), taken);
+        }
     }
 
     #[test]
