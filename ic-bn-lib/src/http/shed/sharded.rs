@@ -158,7 +158,7 @@ mod test {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_sharded_shedder() {
         let opts = ShardedOptions {
             extractor: StubExtractor(0),
@@ -198,7 +198,8 @@ mod test {
         }
 
         // Now try 10 of concurrent requests with high latency
-        // 8 of them should be shedded
+        // 9 of them should be shedded: 8 right away and the queued one after
+        // waiting for the target latency while the running one holds the permit.
         let shedded = Arc::new(AtomicUsize::new(0));
         let tracker = TaskTracker::new();
         for _ in 0..10 {
@@ -215,9 +216,10 @@ mod test {
 
         tracker.close();
         tracker.wait().await;
-        assert_eq!(shedded.load(Ordering::SeqCst), 8);
+        assert_eq!(shedded.load(Ordering::SeqCst), 9);
 
-        // Now try requests with low latency and limited concurrency
+        // Now try requests with low latency (well below the 1ms target,
+        // so the queued one never waits for that long) and limited concurrency
         let shedded = Arc::new(AtomicUsize::new(0));
         let tracker = TaskTracker::new();
         let sem = Arc::new(tokio::sync::Semaphore::new(2));
@@ -230,7 +232,7 @@ mod test {
             tracker.spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
 
-                let resp = shedder.oneshot(Duration::from_millis(1)).await.unwrap();
+                let resp = shedder.oneshot(Duration::ZERO).await.unwrap();
                 if matches!(resp, ShedResponse::Overload(ShedReason::Latency)) {
                     shedded.fetch_add(1, Ordering::SeqCst);
                 }
@@ -373,7 +375,7 @@ mod test {
         assert!(dbg.contains("target: 0.02"), "unexpected shard: {dbg}");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_sharded_shards_are_independent() {
         let layer = keyed_layer(
             vec![
@@ -416,9 +418,10 @@ mod test {
             assert_eq!(resp, ShedResponse::Inner(1));
         }
 
+        // The queued request in shard 0 gives up after waiting for the target latency
         tracker.close();
         tracker.wait().await;
-        assert_eq!(shedded.load(Ordering::SeqCst), 8);
+        assert_eq!(shedded.load(Ordering::SeqCst), 9);
     }
 
     #[tokio::test]
@@ -457,7 +460,7 @@ mod test {
         assert_eq!(served.load(Ordering::SeqCst), SHARDS as usize);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_sharded_unconfigured_types_are_not_shed() {
         // Only type 0 is shedded, type 9 isn't configured at all
         let layer = keyed_layer(vec![TypeLatency(0, Duration::from_millis(1))], 0);
@@ -501,7 +504,9 @@ mod test {
 
         tracker.close();
         tracker.wait().await;
-        assert_eq!(shedded_configured.load(Ordering::SeqCst), 8);
+        // One running, the rest is shed: 8 right away and the queued one after
+        // waiting for the target latency
+        assert_eq!(shedded_configured.load(Ordering::SeqCst), 9);
         assert_eq!(shedded_unknown.load(Ordering::SeqCst), 0);
         assert_eq!(served_unknown.load(Ordering::SeqCst), 10);
     }
