@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use candid::Principal;
 use ic_stable_structures::{
     DefaultMemoryImpl, StableBTreeMap, StableCell,
-    memory_manager::{MemoryId, MemoryManager},
+    memory_manager::{MemoryId, MemoryManager, VirtualMemory},
 };
 
 use crate::state::CanisterState;
@@ -15,7 +15,11 @@ thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
         RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
 
-    pub static AUTHORIZED_PRINCIPAL: RefCell<Option<Principal>> = RefCell::default();
+    /// The only principal allowed to call the guarded methods. Kept in stable memory so that it
+    /// survives upgrades. `None` means that no caller is authorized.
+    pub static AUTHORIZED_PRINCIPAL: RefCell<StableCell<Option<Principal>, VirtualMemory<DefaultMemoryImpl>>> = RefCell::new(
+        StableCell::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(3))), None)
+    );
 
     pub static STATE: RefCell<CanisterState> = RefCell::new(
         CanisterState {

@@ -35,6 +35,7 @@ pub struct TestEnv {
     pub sender: Principal,
     pub authorized_principal: Option<Principal>,
     pub controller: Principal,
+    pub wasm: Vec<u8>,
 }
 
 #[allow(dead_code)]
@@ -67,7 +68,7 @@ impl TestEnv {
 
         let controller = Principal::from_text("2vxsx-fae")?;
 
-        let canister_id = install_canister(&pic, controller, authorized_principal, wasm)
+        let canister_id = install_canister(&pic, controller, authorized_principal, wasm.clone())
             .await
             .context("unable to install canister")?;
 
@@ -77,6 +78,7 @@ impl TestEnv {
             sender,
             authorized_principal,
             controller,
+            wasm,
         })
     }
 

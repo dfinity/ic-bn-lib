@@ -1,7 +1,7 @@
 use anyhow::anyhow;
 use candid::{Decode, Encode, Principal};
 use ic_custom_domains_canister_api::{
-    CERTIFICATE_VALIDITY_FRACTION, DomainStatus, HasNextTaskError, HasNextTaskResult,
+    CERTIFICATE_VALIDITY_FRACTION, DomainStatus, HasNextTaskError, HasNextTaskResult, InitArg,
     IssueCertificateOutput, MAX_TASK_FAILURES, MAX_TASK_RETRY_DELAY, RegistrationStatus,
     STALE_DOMAINS_CLEANUP_INTERVAL, ScheduledTask as ScheduledTaskApi, ScheduledTask,
     SubmitTaskError, TASK_TIMEOUT, TaskFailReason, TaskKind, TaskOutcome, TaskOutput, TaskResult,
@@ -35,6 +35,44 @@ async fn test_canister_authorization() -> anyhow::Result<()> {
 
     info!("Step 2: Test call rejection by unauthorized principal");
     verify_unauthorized_principal_rejection(&env).await?;
+
+    info!("Step 3: Upgrade without a principal keeps the stored one");
+    env.pic
+        .upgrade_canister(
+            env.canister_id,
+            env.wasm.clone(),
+            Encode!(&InitArg {
+                authorized_principal: None
+            })?,
+            Some(env.controller),
+        )
+        .await
+        .map_err(|err| anyhow!("Upgrade failed: {err:?}"))?;
+    verify_authorized_principal_access(&env).await?;
+    verify_unauthorized_principal_rejection(&env).await?;
+
+    Ok(())
+}
+
+/// Without a configured principal, the canister must reject every caller
+#[ignore]
+#[tokio::test]
+async fn test_canister_without_authorized_principal() -> anyhow::Result<()> {
+    init_logging();
+
+    let sender = Principal::from_text("oqjvn-fqaaa-aaaab-qab5q-cai")?;
+    let env = TestEnv::new(None, sender).await?;
+
+    let arg = Encode!(&())?;
+    let result = env
+        .pic
+        .query_call(env.canister_id, env.sender, "has_next_task", arg)
+        .await
+        .map_err(|err| anyhow!("Query call rejected: {err:?}"))?;
+    assert_eq!(
+        Decode!(&result, HasNextTaskResult)?,
+        Err(HasNextTaskError::Unauthorized)
+    );
 
     Ok(())
 }

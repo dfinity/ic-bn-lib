@@ -1,3 +1,4 @@
+use candid::Principal;
 use ic_cdk::{
     api::{accept_message, msg_caller, time},
     init, inspect_message, post_upgrade, query, trap, update,
@@ -28,9 +29,7 @@ mod storage;
 /// Inspect ingress messages in the pre-consensus phase and reject early, if the caller is unauthorized
 #[inspect_message]
 fn inspect_message() {
-    if let Some(authorized_principal) = AUTHORIZED_PRINCIPAL.with(|p| *p.borrow())
-        && authorized_principal != msg_caller()
-    {
+    if !is_authorized_caller() {
         trap("message_inspection_failed: unauthorized call");
     }
 
@@ -41,10 +40,16 @@ pub fn get_time_secs() -> UtcTimestamp {
     time() / 1_000_000_000
 }
 
+/// Fails closed: if no principal is configured, nobody is authorized.
+/// The anonymous principal is never authorized.
+fn is_authorized_caller() -> bool {
+    let caller = msg_caller();
+    caller != Principal::anonymous()
+        && AUTHORIZED_PRINCIPAL.with(|p| *p.borrow().get() == Some(caller))
+}
+
 fn validate_caller<T>(unauthorized_error: T) -> Result<(), T> {
-    if let Some(authorized_principal) = AUTHORIZED_PRINCIPAL.with(|p| *p.borrow())
-        && authorized_principal != msg_caller()
-    {
+    if !is_authorized_caller() {
         return Err(unauthorized_error);
     }
 
@@ -53,8 +58,14 @@ fn validate_caller<T>(unauthorized_error: T) -> Result<(), T> {
 
 #[init]
 fn init(init_arg: InitArg) {
-    // Initialize the authorized principal
-    AUTHORIZED_PRINCIPAL.with(|p| *p.borrow_mut() = init_arg.authorized_principal);
+    // An absent principal keeps the stored one (or none at all on a fresh install, which
+    // rejects every caller), so an upgrade argument without it cannot remove access control.
+    if let Some(principal) = init_arg.authorized_principal {
+        if principal == Principal::anonymous() {
+            trap("the anonymous principal cannot be the authorized principal");
+        }
+        AUTHORIZED_PRINCIPAL.with(|p| p.borrow_mut().set(Some(principal)));
+    }
 
     set_timer_interval(STALE_DOMAINS_CLEANUP_INTERVAL, async move || {
         let now = get_time_secs();
