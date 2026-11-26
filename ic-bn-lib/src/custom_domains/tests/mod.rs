@@ -74,6 +74,26 @@ async fn test_canister_without_authorized_principal() -> anyhow::Result<()> {
         Err(HasNextTaskError::Unauthorized)
     );
 
+    // Same state as after upgrading from a version that kept the principal only on the heap
+    info!("An upgrade with no principal stored or provided must fail");
+    async fn upgrade(env: &TestEnv, authorized_principal: Option<Principal>) -> anyhow::Result<()> {
+        env.pic
+            .upgrade_canister(
+                env.canister_id,
+                env.wasm.clone(),
+                Encode!(&InitArg {
+                    authorized_principal
+                })?,
+                Some(env.controller),
+            )
+            .await
+            .map_err(|err| anyhow!("Upgrade failed: {err:?}"))
+    }
+    assert!(upgrade(&env, None).await.is_err());
+    upgrade(&env, Some(sender)).await?;
+    verify_authorized_principal_access(&env).await?;
+    verify_unauthorized_principal_rejection(&env).await?;
+
     Ok(())
 }
 
@@ -374,18 +394,23 @@ async fn verify_authorized_principal_access(env: &TestEnv) -> anyhow::Result<()>
 }
 
 async fn verify_unauthorized_principal_rejection(env: &TestEnv) -> anyhow::Result<()> {
-    let arg = Encode!(&()).map_err(|err| anyhow!("Failed to encode arguments: {err:?}"))?;
+    // The controller is the anonymous principal; also check a non-anonymous one
+    let other = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai")?;
 
-    let result = env
-        .pic
-        .query_call(env.canister_id, env.controller, "has_next_task", arg)
-        .await
-        .map_err(|err| anyhow!("Query call from unauthorized principal rejected: {err:?}"))?;
+    for caller in [env.controller, other] {
+        let arg = Encode!(&()).map_err(|err| anyhow!("Failed to encode arguments: {err:?}"))?;
 
-    let unauthorized_result = Decode!(&result, HasNextTaskResult)
-        .map_err(|err| anyhow!("Failed to decode unauthorized response: {err:?}"))?;
+        let result = env
+            .pic
+            .query_call(env.canister_id, caller, "has_next_task", arg)
+            .await
+            .map_err(|err| anyhow!("Query call from unauthorized principal rejected: {err:?}"))?;
 
-    assert_eq!(unauthorized_result, Err(HasNextTaskError::Unauthorized));
+        let unauthorized_result = Decode!(&result, HasNextTaskResult)
+            .map_err(|err| anyhow!("Failed to decode unauthorized response: {err:?}"))?;
+
+        assert_eq!(unauthorized_result, Err(HasNextTaskError::Unauthorized));
+    }
 
     Ok(())
 }
