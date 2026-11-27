@@ -12,7 +12,7 @@ use prometheus::{
     register_histogram_vec_with_registry, register_int_counter_vec_with_registry,
 };
 
-use crate::reqwest::StatusCode;
+use crate::{http::http_method, reqwest::StatusCode};
 
 pub const HTTP_DURATION_BUCKETS: &[f64] = &[0.05, 0.2, 1.0, 2.0];
 
@@ -51,7 +51,8 @@ pub async fn metrics_middleware(
     next: Next,
 ) -> Response {
     let start = Instant::now();
-    let method = req.method().to_string();
+    // Map to a fixed set of values: a raw extension method would be an unbounded label
+    let method = http_method(req.method());
     let path = matched_path
         .as_ref()
         .map(|mp| mp.as_str())
@@ -61,12 +62,12 @@ pub async fn metrics_middleware(
 
     state
         .requests
-        .with_label_values(&[method.as_str(), path, status.as_str()])
+        .with_label_values(&[method, path, status.as_str()])
         .inc();
 
     state
         .duration
-        .with_label_values(&[method.as_str(), path])
+        .with_label_values(&[method, path])
         .observe(start.elapsed().as_secs_f64());
 
     response
@@ -325,6 +326,62 @@ mod test {
                 ("status".to_string(), "404".to_string()),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn middleware_buckets_extension_methods_into_a_single_label_value() {
+        let registry = Registry::new();
+        let router = app(&registry);
+
+        let mut methods = (0..50).map(|i| format!("FOO{i}")).collect::<Vec<_>>();
+        methods.push("X".repeat(4096));
+
+        for m in &methods {
+            assert_eq!(
+                call(&router, m, "/v1/example.org").await,
+                StatusCode::METHOD_NOT_ALLOWED
+            );
+        }
+
+        let families = registry.gather();
+        assert_eq!(
+            only_labels(&families, REQUESTS),
+            vec![
+                ("endpoint".to_string(), "/v1/{id}".to_string()),
+                ("method".to_string(), String::new()),
+                ("status".to_string(), "405".to_string()),
+            ]
+        );
+        let requests = family(&families, REQUESTS);
+        assert!(
+            (requests.metric[0].counter.value() - methods.len() as f64).abs() < f64::EPSILON,
+            "got {}",
+            requests.metric[0].counter.value()
+        );
+        assert_eq!(
+            family(&families, DURATION).metric[0]
+                .histogram
+                .sample_count(),
+            methods.len() as u64
+        );
+
+        // Unmatched paths must be bounded too
+        call(&router, "BAR", "/does/not/exist").await;
+
+        let families = registry.gather();
+        for name in [REQUESTS, DURATION] {
+            let metrics = &family(&families, name).metric;
+            assert_eq!(metrics.len(), 2, "unexpected {name} series count");
+
+            for m in metrics {
+                for (_, v) in labels(m) {
+                    assert!(
+                        v != "BAR" && !methods.contains(&v),
+                        "request method leaked into {name} label: {v}"
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]
