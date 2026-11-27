@@ -1511,6 +1511,8 @@ mod tests {
         Gzip(std::net::SocketAddr),
         // Valid response after a delay
         Slow(Principal),
+        // Never responds
+        Hang,
     }
 
     #[derive(Debug)]
@@ -1546,6 +1548,7 @@ mod tests {
                     tokio::time::sleep(Duration::from_millis(200)).await;
                     reqwest::Body::from(v.to_string())
                 }
+                LookupStubResponse::Hang => return std::future::pending().await,
             };
 
             Ok(reqwest::Response::from(
@@ -1682,6 +1685,29 @@ mod tests {
         drop(blocker);
         assert_eq!(resolve.await.0, cached_id);
         assert_eq!(http_client.1.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_resolve_smtp_canister_id_lookup_timeout() {
+        let canister_id = principal!("lusdn-iiaaa-aaaam-qivpa-cai");
+        let (agent, http_client) = create_lookup_agent(LookupStubResponse::Hang);
+
+        // The lookup must give up on its own, well before this outer limit
+        let start = tokio::time::Instant::now();
+        let res = join_all((0..10).map(|_| agent.resolve_smtp_canister_id(canister_id)))
+            .timeout(SMTP_CANISTER_ID_LOOKUP_TIMEOUT * 2)
+            .await
+            .expect("lookup did not time out on its own");
+        assert!(start.elapsed() >= SMTP_CANISTER_ID_LOOKUP_TIMEOUT);
+
+        // All callers fall back to the canister itself, sharing a single request
+        assert!(res.iter().all(|x| x.0 == canister_id));
+        assert_eq!(http_client.1.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            agent.smtp_canister_id_cache.get(&canister_id),
+            Some(canister_id)
+        );
+        assert!(agent.smtp_canister_id_inflight.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
