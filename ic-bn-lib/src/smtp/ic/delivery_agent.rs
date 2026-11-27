@@ -378,6 +378,12 @@ impl IcSmtpDeliveryAgent {
             .as_ref()
             .expect("cell is set until the guard is dropped")
             .get_or_init(|| async {
+                // A lookup that finished after our cache check above has already
+                // filled the cache, don't repeat it
+                if let Some(v) = self.smtp_canister_id_cache.get(&canister_id) {
+                    return v;
+                }
+
                 // Otherwise do a lookup with a fallback to canister_id
                 let smtp_canister_id = self
                     .lookup_smtp_canister_id(canister_id)
@@ -1645,6 +1651,37 @@ mod tests {
             .timeout(Duration::from_millis(10))
             .await;
         assert!(agent.smtp_canister_id_inflight.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_smtp_canister_id_rechecks_cache() {
+        let canister_id = principal!("lusdn-iiaaa-aaaam-qivpa-cai");
+        let cached_id = principal!("aaaaa-aa");
+        let (agent, http_client) = create_lookup_agent(LookupStubResponse::Slow(principal!(
+            "6hsbt-vqaaa-aaaaf-aaafq-cai"
+        )));
+
+        // Occupy the initializer slot with a lookup that never finishes
+        let cell = agent
+            .smtp_canister_id_inflight
+            .lock()
+            .unwrap()
+            .entry(canister_id)
+            .or_default()
+            .clone();
+        let mut blocker = Box::pin(cell.get_or_init(std::future::pending));
+        assert!(futures::poll!(&mut blocker).is_pending());
+
+        // A resolver misses the cache and waits for the in-flight lookup
+        let mut resolve = Box::pin(agent.resolve_smtp_canister_id(canister_id));
+        assert!(futures::poll!(&mut resolve).is_pending());
+
+        // Meanwhile the cache gets populated, then the in-flight lookup goes away.
+        // The resolver takes over and must use the cache instead of doing HTTP.
+        agent.smtp_canister_id_cache.insert(canister_id, cached_id);
+        drop(blocker);
+        assert_eq!(resolve.await.0, cached_id);
+        assert_eq!(http_client.1.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
