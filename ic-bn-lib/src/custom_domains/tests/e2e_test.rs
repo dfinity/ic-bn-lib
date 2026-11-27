@@ -7,7 +7,7 @@ use candid::Principal;
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, aead::OsRng};
 use fqdn::FQDN;
 use pem::parse_many;
-use prometheus::Registry;
+use prometheus::{Registry, core::Collector};
 use tokio::{spawn, time::sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
@@ -45,6 +45,14 @@ const MAX_CANISTER_CALL_RETRY_DELAY: Duration = Duration::from_secs(2);
 const DOMAINS_COUNT: usize = 160;
 const WORKERS_COUNT: usize = 4;
 
+/// Delete tasks expected over the whole test: half of the bulk-registered domains (Step 6),
+/// plus the cleanup deletes in `wildcard_domain_e2e` and `bypass_canister_id_e2e`.
+const EXPECTED_DELETE_TASKS: u64 = DOMAINS_COUNT as u64 / 2 + 2;
+
+/// Idle polling interval for the test workers. The production default (20s) would leave
+/// idle workers asleep through short bursts of tasks and add dead time to single-task steps.
+const WORKER_POLLING_INTERVAL_NO_TASKS: Duration = Duration::from_secs(1);
+
 /// Bypass token configured on the API server, used by `bypass_canister_id_e2e` to submit a
 /// registration with an explicit `canister_id` instead of going through `MockValidator::validate()`.
 const BYPASS_TOKEN: &str = "e2e-test-bypass-token";
@@ -68,7 +76,8 @@ const BYPASS_TOKEN: &str = "e2e-test-bypass-token";
 // 6. Submit half of the registered domains for deletion via the API calls
 // 7. Verify all these domains are eventually deleted from the canister
 // 8. Get canister metrics and verify the expected stats of domain registrations
-// 9. Get workers metrics and verify they all have processed more than one task each
+// 9. Get workers metrics and verify each worker processed at least one issue task,
+//    and that together they processed every delete task
 
 #[ignore]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -111,7 +120,8 @@ async fn e2e_pebble_test() -> anyhow::Result<()> {
     verify_canister_metrics(&ctx).await?;
 
     info!(
-        "Step 9: Getting workers metrics and verifying they all have processed more than one task each"
+        "Step 9: Getting workers metrics and verifying each worker processed at least one issue task, \
+         and that together they processed every delete task"
     );
     verify_workers_metrics_with_retries(workers_metrics).await?;
 
@@ -264,7 +274,8 @@ async fn spawn_workers(
             repository.clone(),
             validator.clone(),
             acme_client.clone(),
-            WorkerConfig::default(),
+            WorkerConfig::default()
+                .with_polling_interval_no_tasks(WORKER_POLLING_INTERVAL_NO_TASKS),
             metrics.clone(),
             cancellation_token.clone(),
         );
@@ -588,41 +599,54 @@ async fn verify_canister_metrics(ctx: &TestContext) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Sums the successfully submitted tasks of `task_kind`, across every `attempts` and
+/// `last_failure` label value, for one worker or (with `worker = None`) for all of them.
+fn successful_submissions(metrics: &WorkerMetrics, worker: Option<&str>, task_kind: &str) -> u64 {
+    metrics
+        .task_submissions
+        .collect()
+        .iter()
+        .flat_map(|family| family.get_metric())
+        .filter(|metric| {
+            let label = |name: &str| {
+                metric
+                    .get_label()
+                    .iter()
+                    .find(|l| l.name() == name)
+                    .map(|l| l.value())
+            };
+            label("task_kind") == Some(task_kind)
+                && label("status") == Some("success")
+                && worker.is_none_or(|w| label("worker_name") == Some(w))
+        })
+        .map(|metric| metric.get_counter().value() as u64)
+        .sum()
+}
+
+/// Every worker must have issued at least one certificate: issue tasks are slow and plentiful,
+/// so all workers get a share. Delete tasks are fast and come in a short burst that the busy
+/// workers can drain on their own, so they are only checked in aggregate: each of them must
+/// have been processed and submitted, whichever worker picked it up.
 async fn verify_workers_metrics(metrics: Arc<WorkerMetrics>) -> anyhow::Result<bool> {
+    let mut ok = true;
+
     for i in 0..WORKERS_COUNT {
         let worker_name = format!("worker_{}", i + 1);
         let worker_name = worker_name.as_str();
 
-        let issue_tasks = metrics
-            .task_submissions
-            .get_metric_with_label_values(&[
-                worker_name, // worker_name
-                "issue",     // task_kind
-                "success",   // status
-                "1",         // attempts
-                "",          // last_failure
-            ])?
-            .get();
-
-        let delete_tasks = metrics
-            .task_submissions
-            .get_metric_with_label_values(&[
-                worker_name, // worker_name
-                "delete",    // task_kind
-                "success",   // status
-                "1",         // attempts
-                "",          // last_failure
-            ])?
-            .get();
+        let issue_tasks = successful_submissions(&metrics, Some(worker_name), "issue");
+        let delete_tasks = successful_submissions(&metrics, Some(worker_name), "delete");
 
         info!("Worker {worker_name} has processed {issue_tasks} issue tasks");
         info!("Worker {worker_name} has processed {delete_tasks} delete tasks");
 
-        if issue_tasks == 0 || delete_tasks == 0 {
-            return Ok(false);
-        }
+        ok &= issue_tasks > 0;
     }
-    Ok(true)
+
+    let delete_tasks = successful_submissions(&metrics, None, "delete");
+    info!("Workers have processed {delete_tasks} of {EXPECTED_DELETE_TASKS} delete tasks in total");
+
+    Ok(ok && delete_tasks == EXPECTED_DELETE_TASKS)
 }
 
 async fn verify_workers_metrics_with_retries(metrics: Arc<WorkerMetrics>) -> anyhow::Result<bool> {
