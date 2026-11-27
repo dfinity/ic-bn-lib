@@ -79,8 +79,8 @@ jobs:
           check_principal CUSTOM_DOMAINS_CANISTER_ID "${CANISTER_ID:-}"
           check_principal CUSTOM_DOMAINS_AUTHORIZED_PRINCIPAL "${AUTHORIZED_PRINCIPAL:-}"
 
-          # post_upgrade() calls init(), which overwrites AUTHORIZED_PRINCIPAL. If it ends up None,
-          # every caller becomes authorized.
+          # The canister keeps its authorized principal in stable memory; passing it here sets
+          # (or changes) it on upgrade. Without one configured, the canister rejects every caller.
           init_arg="(record { authorized_principal = opt principal \"${AUTHORIZED_PRINCIPAL}\" })"
 
           echo "environment:  ${ENVIRONMENT}"
