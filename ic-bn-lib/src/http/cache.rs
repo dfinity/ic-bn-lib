@@ -36,7 +36,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::{body::buffer_body, calc_headers_size, extract_authority};
 use crate::{
-    http::{Error as HttpError, headers::X_CACHE_TTL},
+    http::{
+        Error as HttpError,
+        headers::{X_CACHE_TTL, set_header},
+    },
     tasks::Run,
 };
 
@@ -590,7 +593,7 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
         };
 
         if ttl_left >= 0 {
-            parts.headers.insert(X_CACHE_TTL, ttl_left.into());
+            set_header(&mut parts.headers, &X_CACHE_TTL, ttl_left.into());
         }
 
         Some((Response::from_parts(parts, Body::from(body)), ttl_left))
@@ -740,7 +743,7 @@ impl<K: KeyExtractor + 'static, B: Bypasser + 'static> Cache<K, B> {
 
                 let ttl = ttl.as_secs();
                 let (mut parts, body) = v.into_parts();
-                parts.headers.insert(X_CACHE_TTL, ttl.into());
+                set_header(&mut parts.headers, &X_CACHE_TTL, ttl.into());
                 let response = Response::from_parts(parts, Body::from(body));
                 (CacheStatus::Miss(ttl as i64), response)
             }
@@ -901,7 +904,7 @@ fn hash_field(hash: &mut Sha1, field: &[u8]) {
     hash.update(field);
 }
 
-/// Key extractor that is keyed by authority, path & query and the values of
+/// Key extractor that is keyed by method, authority, path & query and the values of
 /// `Range`, `Accept-Encoding`, `Origin` and CORS preflight request headers.
 #[derive(Clone, Debug)]
 pub struct KeyExtractorUriRange;
@@ -922,6 +925,7 @@ impl KeyExtractor for KeyExtractorUriRange {
 
         // Compute a composite hash
         let mut hash = Sha1::new();
+        hash_field(&mut hash, request.method().as_str().as_bytes());
         hash_field(&mut hash, authority);
         hash_field(&mut hash, paq);
 
@@ -945,7 +949,7 @@ impl KeyExtractor for KeyExtractorUriRange {
 
 #[cfg(test)]
 mod tests {
-    use crate::hval;
+    use crate::{http::headers::full_header_map, hval};
 
     use super::*;
 
@@ -961,7 +965,7 @@ mod tests {
 
     use http::{
         HeaderValue, Request, Response, StatusCode, Uri,
-        header::{ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_ENCODING, COOKIE},
+        header::{ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_ENCODING, CONTENT_LENGTH, COOKIE},
     };
     use sha1::Digest;
     use tower::{Service, ServiceExt};
@@ -1131,6 +1135,17 @@ mod tests {
         request.uri().path().to_string()
     }
 
+    /// Returns a response whose header map is full, with an `X-Cache-TTL` of its own
+    async fn handler_full_headers(_request: Request<Body>) -> Response<Body> {
+        let mut response = Response::new(Body::from("full"));
+        *response.headers_mut() = full_header_map(&[
+            // Otherwise axum adds Content-Length itself, which would panic on its own
+            (CONTENT_LENGTH, hval!("4")),
+            (X_CACHE_TTL, hval!("31337")),
+        ]);
+        response
+    }
+
     /// Sends a GET request with an optional header, returns the cache status, response headers & body
     async fn dispatch_with_header(
         router: &mut Router,
@@ -1232,6 +1247,38 @@ mod tests {
         *req.uri_mut() = Uri::from_static("http://foo.bar.baz/");
         req.headers_mut().insert(RANGE, hval!("main.js"));
         assert_ne!(key_path, x.extract(&req).unwrap());
+
+        // Computes the key of a request for the given URI with an optional Range header
+        let key_range = |uri: &'static str, range: Option<&'static str>| {
+            let mut req = Request::new("foo");
+            *req.uri_mut() = Uri::from_static(uri);
+            if let Some(v) = range {
+                req.headers_mut().insert(RANGE, HeaderValue::from_static(v));
+            }
+            x.extract(&req).unwrap()
+        };
+
+        // A path prefix plus the rest of the path in Range doesn't collide with the full path
+        assert_ne!(
+            key_range("http://foo.bar.baz/app.js", None),
+            key_range("http://foo.bar.baz/a", Some("pp.js")),
+        );
+
+        // The boundary between the path and Range can't be shifted when both carry Range
+        assert_ne!(
+            key_range("http://foo.bar.baz/app", Some(".js")),
+            key_range("http://foo.bar.baz/a", Some("pp.js")),
+        );
+        assert_ne!(
+            key_range("http://foo.bar.baz/a?b", Some("=1")),
+            key_range("http://foo.bar.baz/a?b=1", Some("")),
+        );
+
+        // Different methods give different keys
+        let mut req = Request::new("foo");
+        *req.uri_mut() = Uri::from_static("http://foo.bar.baz:80/foo/bar?abc=1");
+        *req.method_mut() = Method::HEAD;
+        assert_ne!(key1, x.extract(&req).unwrap());
 
         // Computes the key of the baseline request with given headers added
         let key = |headers: &[(&HeaderName, &'static str)]| {
@@ -1511,6 +1558,54 @@ mod tests {
         );
         assert_eq!(result.status(), StatusCode::OK);
         assert_eq!(cache.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_cache_full_headers() {
+        // Default cache size, since the full header map alone weighs hundreds of KBs
+        let cache = Arc::new(
+            CacheBuilder::new(KeyExtractorTest)
+                .max_item_size(MAX_ITEM_SIZE)
+                .build()
+                .unwrap(),
+        );
+
+        let mut app = Router::new()
+            .route("/full", get(handler_full_headers))
+            .layer(from_fn_with_state(Arc::clone(&cache), middleware));
+
+        // There's no room for X-Cache-TTL, so the response is passed on without it
+        // instead of panicking, and the upstream one isn't passed on in its place.
+        let (cache_status, headers, body) = dispatch_with_header(&mut app, "/full", None).await;
+        assert!(matches!(cache_status, CacheStatus::Miss(_)));
+        assert!(headers.get(X_CACHE_TTL).is_none());
+        assert!(headers.contains_key("x-fill-0"));
+        assert_eq!(body, "full");
+        cache.housekeep();
+        assert_eq!(cache.len(), 1);
+
+        // Same when it's served from the cache
+        let (cache_status, headers, body) = dispatch_with_header(&mut app, "/full", None).await;
+        assert!(matches!(cache_status, CacheStatus::Hit(_)));
+        assert!(headers.get(X_CACHE_TTL).is_none());
+        assert!(headers.contains_key("x-fill-0"));
+        assert_eq!(body, "full");
+    }
+
+    #[test]
+    fn test_cache_get_full_headers() {
+        let cache = CacheBuilder::new(KeyExtractorTest).build().unwrap();
+
+        let mut response = Response::new(Bytes::from_static(b"full"));
+        *response.headers_mut() = full_header_map(&[(X_CACHE_TTL, hval!("31337"))]);
+
+        let now = Instant::now();
+        let ttl = Duration::from_secs(10);
+        cache.insert([0; 20], now, ttl, Duration::ZERO, response);
+
+        let (response, ttl_left) = cache.get(&[0; 20], now, 0.0).unwrap();
+        assert_eq!(ttl_left, 10);
+        assert!(response.headers().get(X_CACHE_TTL).is_none());
     }
 
     #[tokio::test]
