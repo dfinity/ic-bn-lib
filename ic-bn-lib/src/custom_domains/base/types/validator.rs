@@ -1,6 +1,7 @@
 use std::{
     net::{IpAddr, Ipv4Addr},
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Context, anyhow};
@@ -18,8 +19,17 @@ use crate::{
         resolvers::Resolves,
         resolvers::{Resolver, SingleResolver},
     },
-    http::{ReqwestClient, client::Client, client::ClientOptions},
+    http::{
+        Error as HttpError, ReqwestClient, body::buffer_body, client::Client, client::ClientOptions,
+    },
 };
+
+/// Maximum size of the canister's `/.well-known/ic-domains` body, measured after
+/// content decoding. The body is controlled by whoever owns the canister, so it must be capped.
+const KNOWN_DOMAINS_MAX_SIZE: usize = 64 * 1024;
+
+/// Maximum time to spend reading the canister's `/.well-known/ic-domains` body
+const KNOWN_DOMAINS_BODY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// DNS validator for custom domain registration.
 ///
@@ -170,10 +180,33 @@ impl Validator {
                 error: e.to_string(),
             })?;
 
-        let text = response
-            .text()
-            .await
-            .map_err(|e| ValidationError::UnexpectedError(e.into()))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(ValidationError::KnownDomainsUnavailable {
+                id: canister_id.to_string(),
+                error: format!("unexpected HTTP status {status}"),
+            });
+        }
+
+        // Read the (already decompressed) body with a size limit.
+        // The canister controls it and could otherwise make us buffer an arbitrarily large body.
+        let body = buffer_body(
+            reqwest::Body::from(response),
+            KNOWN_DOMAINS_MAX_SIZE,
+            KNOWN_DOMAINS_BODY_TIMEOUT,
+        )
+        .await
+        .map_err(|e| ValidationError::KnownDomainsUnavailable {
+            id: canister_id.to_string(),
+            error: match e {
+                HttpError::BodyTooBig => {
+                    format!("response body exceeds {KNOWN_DOMAINS_MAX_SIZE} bytes")
+                }
+                e => e.to_string(),
+            },
+        })?;
+
+        let text = String::from_utf8_lossy(&body);
 
         // Check if the file contains our domain on one of the lines
         if text
@@ -974,6 +1007,207 @@ mod test {
         match err {
             ValidationError::KnownDomainsUnavailable { id, .. } => {
                 assert_eq!(id, canister_id.to_string());
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn canister_owner_fails_on_non_success_status() {
+        let canister_id = principal!("aaaaa-aa");
+        // The body lists the domain, but it must not be trusted on an error status
+        let client = MockClient::new(|_: &reqwest::Request| {
+            Ok(HttpResponse::builder()
+                .status(404)
+                .body("example.com".to_string())
+                .unwrap()
+                .into())
+        });
+        let validator = mk_validator(Arc::new(client), Arc::new(UnusedResolver));
+
+        let err = validator
+            .validate_canister_owner(canister_id, &fqdn!("example.com"))
+            .await
+            .unwrap_err();
+
+        match err {
+            ValidationError::KnownDomainsUnavailable { id, error } => {
+                assert_eq!(id, canister_id.to_string());
+                assert!(error.contains("404"), "{error}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    /// Builds a known-domains body listing `example.com` and padded with newlines to `size` bytes
+    fn padded_known_domains(size: usize) -> String {
+        let mut body = "example.com\n".to_string();
+        body.push_str(&"\n".repeat(size - body.len()));
+        body
+    }
+
+    #[tokio::test]
+    async fn canister_owner_fails_when_body_exceeds_limit() {
+        let canister_id = principal!("aaaaa-aa");
+        let client = MockClient::new(|_: &reqwest::Request| {
+            Ok(text_response(&padded_known_domains(
+                KNOWN_DOMAINS_MAX_SIZE + 1,
+            )))
+        });
+        let validator = mk_validator(Arc::new(client), Arc::new(UnusedResolver));
+
+        let err = validator
+            .validate_canister_owner(canister_id, &fqdn!("example.com"))
+            .await
+            .unwrap_err();
+
+        match err {
+            ValidationError::KnownDomainsUnavailable { id, error } => {
+                assert_eq!(id, canister_id.to_string());
+                assert!(error.contains("exceeds"), "{error}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn canister_owner_succeeds_when_body_at_limit() {
+        let canister_id = principal!("aaaaa-aa");
+        let client = MockClient::new(|_: &reqwest::Request| {
+            Ok(text_response(&padded_known_domains(KNOWN_DOMAINS_MAX_SIZE)))
+        });
+        let validator = mk_validator(Arc::new(client), Arc::new(UnusedResolver));
+
+        validator
+            .validate_canister_owner(canister_id, &fqdn!("example.com"))
+            .await
+            .unwrap();
+    }
+
+    fn gzip(chunks: &[&[u8]]) -> Vec<u8> {
+        use std::io::Write;
+
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        for chunk in chunks {
+            enc.write_all(chunk).unwrap();
+        }
+        enc.finish().unwrap()
+    }
+
+    /// Serves the body produced by `body` with `Content-Encoding: gzip` on a local port and returns its URL
+    async fn serve_gzip(
+        body: impl Fn() -> axum::body::Body + Clone + Send + Sync + 'static,
+    ) -> String {
+        let router = axum::Router::new().route(
+            "/.well-known/ic-domains",
+            axum::routing::get(move || {
+                let body = body();
+                async move { ([(::http::header::CONTENT_ENCODING, "gzip")], body) }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        format!("http://{addr}/.well-known/ic-domains")
+    }
+
+    fn real_client() -> Arc<dyn Client> {
+        Arc::new(ReqwestClient::new(ClientOptions::default(), None::<SingleResolver>).unwrap())
+    }
+
+    #[tokio::test]
+    async fn canister_owner_accepts_small_gzip_body() {
+        let body = gzip(&[b"foo.bar\nexample.com\n"]);
+        let url = serve_gzip(move || body.clone().into()).await;
+        let validator = mk_validator(real_client(), Arc::new(UnusedResolver));
+
+        validator
+            .fetch_and_verify_domain_ownership(&url, "example.com", principal!("aaaaa-aa"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn canister_owner_rejects_gzip_bomb() {
+        // 16 MiB of newlines after a valid entry: small on the wire, huge once inflated
+        let filler = vec![b'\n'; 1024 * 1024];
+        let mut chunks: Vec<&[u8]> = vec![b"example.com\n"];
+        chunks.extend(std::iter::repeat_n(filler.as_slice(), 16));
+        let body = gzip(&chunks);
+        // The limit must apply to the decoded size, not to what goes over the wire
+        assert!(body.len() < KNOWN_DOMAINS_MAX_SIZE);
+
+        let url = serve_gzip(move || body.clone().into()).await;
+        let validator = mk_validator(real_client(), Arc::new(UnusedResolver));
+
+        let err = validator
+            .fetch_and_verify_domain_ownership(&url, "example.com", principal!("aaaaa-aa"))
+            .await
+            .unwrap_err();
+
+        match err {
+            ValidationError::KnownDomainsUnavailable { error, .. } => {
+                assert!(error.contains("exceeds"), "{error}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    /// Raw-deflates `input` and sync-flushes, so the output ends on a byte boundary
+    /// and further blocks can be appended to it
+    fn deflate_sync(c: &mut flate2::Compress, input: &[u8]) -> bytes::Bytes {
+        let mut out = Vec::with_capacity(input.len() + 1024);
+        let before = c.total_in();
+        c.compress_vec(input, &mut out, flate2::FlushCompress::Sync)
+            .unwrap();
+        assert_eq!((c.total_in() - before) as usize, input.len());
+        out.into()
+    }
+
+    #[tokio::test]
+    async fn canister_owner_rejects_endless_gzip_stream_quickly() {
+        use bytes::Bytes;
+        use futures_util::StreamExt;
+
+        // A gzip stream that never ends: a header, a block listing the domain, then the same
+        // block of 1 MiB of newlines forever. All its back-references point at newlines, so
+        // repeating it stays valid. Rejecting it requires enforcing the limit while streaming,
+        // buffering it first would never finish.
+        const GZIP_HEADER: &[u8] = &[0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff];
+        let filler = vec![b'\n'; 1024 * 1024];
+        let mut c = flate2::Compress::new(flate2::Compression::best(), false);
+        let mut first = b"example.com\n".to_vec();
+        first.extend_from_slice(&filler);
+        let first = deflate_sync(&mut c, &first);
+        let block = deflate_sync(&mut c, &filler);
+
+        let url = serve_gzip(move || {
+            let head = [Bytes::from_static(GZIP_HEADER), first.clone()];
+            let stream = futures_util::stream::iter(head)
+                .chain(futures_util::stream::repeat(block.clone()))
+                .map(Ok::<_, std::convert::Infallible>);
+            axum::body::Body::from_stream(stream)
+        })
+        .await;
+        let validator = mk_validator(real_client(), Arc::new(UnusedResolver));
+
+        let err = tokio::time::timeout(
+            Duration::from_secs(10),
+            validator.fetch_and_verify_domain_ownership(
+                &url,
+                "example.com",
+                principal!("aaaaa-aa"),
+            ),
+        )
+        .await
+        .expect("validation must fail quickly instead of reading the whole body")
+        .unwrap_err();
+
+        match err {
+            ValidationError::KnownDomainsUnavailable { error, .. } => {
+                assert!(error.contains("exceeds"), "{error}");
             }
             other => panic!("unexpected error: {other:?}"),
         }
