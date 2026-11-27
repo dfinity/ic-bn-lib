@@ -27,6 +27,7 @@ async fn test_canister_authorization() -> anyhow::Result<()> {
     init_logging();
 
     let sender = Principal::from_text("oqjvn-fqaaa-aaaab-qab5q-cai")?;
+    let other = Principal::from_text(OTHER_PRINCIPAL)?;
     let authorized_principal = Some(sender);
     let env = TestEnv::new(authorized_principal, sender).await?;
 
@@ -36,20 +37,41 @@ async fn test_canister_authorization() -> anyhow::Result<()> {
     info!("Step 2: Test call rejection by unauthorized principal");
     verify_unauthorized_principal_rejection(&env).await?;
 
-    info!("Step 3: Upgrade without a principal keeps the stored one");
-    env.pic
-        .upgrade_canister(
+    info!("Step 3: Ingress inspection only accepts the authorized principal");
+    verify_ingress_inspection(&env, sender, true).await?;
+    verify_ingress_inspection(&env, env.controller, false).await?;
+    verify_ingress_inspection(&env, other, false).await?;
+
+    info!("Step 4: Upgrade without a principal keeps the stored one");
+    upgrade(&env, None).await?;
+    verify_authorized_principal_access(&env).await?;
+    verify_unauthorized_principal_rejection(&env).await?;
+
+    info!("Step 5: The anonymous principal cannot be configured");
+    let anonymous = Some(Principal::anonymous());
+    assert_trap(upgrade(&env, anonymous).await, "anonymous principal")?;
+    let reinstall = env
+        .pic
+        .reinstall_canister(
             env.canister_id,
             env.wasm.clone(),
             Encode!(&InitArg {
-                authorized_principal: None
+                authorized_principal: anonymous
             })?,
             Some(env.controller),
         )
         .await
-        .map_err(|err| anyhow!("Upgrade failed: {err:?}"))?;
+        .map_err(|err| anyhow!("Reinstall failed: {err:?}"));
+    assert_trap(reinstall, "anonymous principal")?;
     verify_authorized_principal_access(&env).await?;
-    verify_unauthorized_principal_rejection(&env).await?;
+
+    info!("Step 6: Upgrade with a different principal replaces the stored one");
+    upgrade(&env, Some(other)).await?;
+    assert_eq!(has_next_task_as(&env, other).await?, Ok(false));
+    assert_eq!(
+        has_next_task_as(&env, sender).await?,
+        Err(HasNextTaskError::Unauthorized)
+    );
 
     Ok(())
 }
@@ -63,36 +85,82 @@ async fn test_canister_without_authorized_principal() -> anyhow::Result<()> {
     let sender = Principal::from_text("oqjvn-fqaaa-aaaab-qab5q-cai")?;
     let env = TestEnv::new(None, sender).await?;
 
-    let arg = Encode!(&())?;
-    let result = env
-        .pic
-        .query_call(env.canister_id, env.sender, "has_next_task", arg)
-        .await
-        .map_err(|err| anyhow!("Query call rejected: {err:?}"))?;
     assert_eq!(
-        Decode!(&result, HasNextTaskResult)?,
+        has_next_task_as(&env, sender).await?,
         Err(HasNextTaskError::Unauthorized)
     );
+    verify_ingress_inspection(&env, sender, false).await?;
 
     // Same state as after upgrading from a version that kept the principal only on the heap
     info!("An upgrade with no principal stored or provided must fail");
-    async fn upgrade(env: &TestEnv, authorized_principal: Option<Principal>) -> anyhow::Result<()> {
-        env.pic
-            .upgrade_canister(
-                env.canister_id,
-                env.wasm.clone(),
-                Encode!(&InitArg {
-                    authorized_principal
-                })?,
-                Some(env.controller),
-            )
-            .await
-            .map_err(|err| anyhow!("Upgrade failed: {err:?}"))
-    }
-    assert!(upgrade(&env, None).await.is_err());
+    assert_trap(upgrade(&env, None).await, "no authorized principal")?;
     upgrade(&env, Some(sender)).await?;
     verify_authorized_principal_access(&env).await?;
     verify_unauthorized_principal_rejection(&env).await?;
+
+    Ok(())
+}
+
+/// A non-anonymous principal that is never authorized
+const OTHER_PRINCIPAL: &str = "rrkah-fqaaa-aaaaa-aaaaq-cai";
+
+async fn upgrade(env: &TestEnv, authorized_principal: Option<Principal>) -> anyhow::Result<()> {
+    env.pic
+        .upgrade_canister(
+            env.canister_id,
+            env.wasm.clone(),
+            Encode!(&InitArg {
+                authorized_principal
+            })?,
+            Some(env.controller),
+        )
+        .await
+        .map_err(|err| anyhow!("Upgrade failed: {err:?}"))
+}
+
+fn assert_trap(result: anyhow::Result<()>, message: &str) -> anyhow::Result<()> {
+    let err = result
+        .err()
+        .ok_or_else(|| anyhow!("Expected a trap containing '{message}'"))?;
+    assert!(err.to_string().contains(message), "Unexpected error: {err}");
+    Ok(())
+}
+
+async fn has_next_task_as(env: &TestEnv, caller: Principal) -> anyhow::Result<HasNextTaskResult> {
+    let result = env
+        .pic
+        .query_call(env.canister_id, caller, "has_next_task", Encode!(&())?)
+        .await
+        .map_err(|err| anyhow!("Query call rejected: {err:?}"))?;
+    Ok(Decode!(&result, HasNextTaskResult)?)
+}
+
+/// Submit an ingress update call, which goes through `inspect_message`
+async fn verify_ingress_inspection(
+    env: &TestEnv,
+    caller: Principal,
+    accepted: bool,
+) -> anyhow::Result<()> {
+    let submitted = env
+        .pic
+        .submit_call(env.canister_id, caller, "fetch_next_task", Encode!(&())?)
+        .await;
+
+    if accepted {
+        let message_id = submitted.map_err(|err| anyhow!("Ingress call rejected: {err:?}"))?;
+        env.pic
+            .await_call(message_id)
+            .await
+            .map_err(|err| anyhow!("Ingress call failed: {err:?}"))?;
+    } else {
+        let err = submitted
+            .err()
+            .ok_or_else(|| anyhow!("Ingress call from {caller} was not rejected"))?;
+        assert!(
+            err.reject_message.contains("message_inspection_failed"),
+            "Unexpected rejection: {err:?}"
+        );
+    }
 
     Ok(())
 }
@@ -395,7 +463,7 @@ async fn verify_authorized_principal_access(env: &TestEnv) -> anyhow::Result<()>
 
 async fn verify_unauthorized_principal_rejection(env: &TestEnv) -> anyhow::Result<()> {
     // The controller is the anonymous principal; also check a non-anonymous one
-    let other = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai")?;
+    let other = Principal::from_text(OTHER_PRINCIPAL)?;
 
     for caller in [env.controller, other] {
         let arg = Encode!(&()).map_err(|err| anyhow!("Failed to encode arguments: {err:?}"))?;
