@@ -720,6 +720,9 @@ mod test {
         let mut cfg = test_config();
         cfg.tls_mode = SessionTlsMode::Allowed(tls_server_config());
         cfg.notifications_handler = Some(Arc::new(Notifications(tx)));
+        // If the EOF handling regresses the session spins without yielding, so the
+        // timeout below can't fire: let the session TTL bound the test instead
+        cfg.max_session_duration = Duration::from_secs(3);
 
         let metrics = Metrics::new(&Registry::new());
         let (server, mut client) = duplex(64 * 1024);

@@ -230,10 +230,15 @@ async fn test_client_sends_before_greeting() {
 
 #[tokio::test]
 async fn test_client_closes_connection() {
+    // If the EOF handling regresses the session spins without yielding, so the
+    // timeouts below can't fire: let the session TTL bound the test instead
+    let ttl = Duration::from_secs(3);
+
     // Before the banner (during the greeting delay): client half-closes the connection
     let (server, mut client) = duplex(8192);
     client.shutdown().await.unwrap();
     let mut session = create_session(server, Some(Duration::from_secs(1)));
+    Arc::get_mut(&mut session.cfg).unwrap().max_session_duration = ttl;
     let res = tokio::time::timeout(
         Duration::from_secs(5),
         session.handle(CancellationToken::new()),
@@ -274,6 +279,7 @@ async fn test_client_closes_connection() {
 
     for (i, stream) in streams.into_iter().enumerate() {
         let mut session = create_session(stream, None);
+        Arc::get_mut(&mut session.cfg).unwrap().max_session_duration = ttl;
 
         let res = tokio::time::timeout(
             Duration::from_secs(5),
