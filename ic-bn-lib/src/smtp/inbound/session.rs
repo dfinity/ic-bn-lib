@@ -442,6 +442,10 @@ impl<S: AsyncReadWrite> Session<S> {
                 // Read from the client with a timeout
                 res = self.stream.read(&mut buf).timeout(self.cfg.timeout) => {
                     match res {
+                        // Zero-length read means that the client has closed the connection
+                        Ok(Ok(0)) => {
+                            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+                        }
                         Ok(Ok(bytes_read)) => {
                             let upgrade = self.ingest(&buf[..bytes_read]).await?;
                             if matches!(upgrade, SessionUpgrade::StartTls) {

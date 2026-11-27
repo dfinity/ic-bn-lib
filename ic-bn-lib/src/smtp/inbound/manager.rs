@@ -211,6 +211,7 @@ impl<S: AsyncReadWrite> Session<S> {
 #[cfg(test)]
 mod test {
     use std::{
+        io,
         net::{IpAddr, Ipv4Addr},
         str::FromStr,
         time::Duration,
@@ -707,6 +708,71 @@ mod test {
                 .session_duration
                 .with_label_values(&["v4", "TLSv1_3"])
                 .get_sample_count(),
+            1
+        );
+    }
+
+    /// A client closing the TLS session (close_notify) without QUIT must end the
+    /// session right away & still be accounted for
+    #[tokio::test]
+    async fn test_handle_connection_starttls_client_closes() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut cfg = test_config();
+        cfg.tls_mode = SessionTlsMode::Allowed(tls_server_config());
+        cfg.notifications_handler = Some(Arc::new(Notifications(tx)));
+
+        let metrics = Metrics::new(&Registry::new());
+        let (server, mut client) = duplex(64 * 1024);
+
+        let task = tokio::spawn({
+            let metrics = metrics.clone();
+            async move {
+                SessionManager::handle_connection(
+                    server,
+                    SocketAddr::from_str("1.2.3.4:25").unwrap(),
+                    Arc::new(cfg),
+                    metrics,
+                    CancellationToken::new(),
+                )
+                .await;
+            }
+        });
+
+        let mut buf = vec![0; 4096];
+        let n = client.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], GREETING);
+
+        client.write_all(b"STARTTLS\r\n").await.unwrap();
+        let n = client.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"220 2.0.0 Ready to start TLS.\r\n");
+
+        let tls_cfg = ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoopServerCertVerifier::default()))
+            .with_no_client_auth();
+        let mut client = TlsConnector::from(Arc::new(tls_cfg))
+            .connect(ServerName::try_from("foo").unwrap(), client)
+            .await
+            .unwrap();
+
+        // Sends close_notify
+        client.shutdown().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session must finish promptly when the client closes the connection")
+            .unwrap();
+
+        let (_, error) = rx.recv().await.unwrap();
+        assert!(
+            matches!(&error, Some(SessionError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof),
+            "{error:?}"
+        );
+        assert_eq!(metrics.sessions_open.with_label_values(&["v4"]).get(), 0);
+        assert_eq!(
+            metrics
+                .sessions_processed
+                .with_label_values(&["v4", "TLSv1_3", "io"])
+                .get(),
             1
         );
     }
