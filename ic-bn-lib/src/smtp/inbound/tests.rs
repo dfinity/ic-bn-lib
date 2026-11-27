@@ -229,6 +229,73 @@ async fn test_client_sends_before_greeting() {
 }
 
 #[tokio::test]
+async fn test_client_closes_connection() {
+    // If the EOF handling regresses the session spins without yielding, so the
+    // timeouts below can't fire: let the session TTL bound the test instead
+    let ttl = Duration::from_secs(3);
+
+    // Before the banner (during the greeting delay): client half-closes the connection
+    let (server, mut client) = duplex(8192);
+    client.shutdown().await.unwrap();
+    let mut session = create_session(server, Some(Duration::from_secs(1)));
+    Arc::get_mut(&mut session.cfg).unwrap().max_session_duration = ttl;
+    let res = tokio::time::timeout(
+        Duration::from_secs(5),
+        session.handle(CancellationToken::new()),
+    )
+    .await
+    .expect("session must finish promptly when the client closes the connection");
+    assert!(
+        matches!(&res, Err(SessionError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof),
+        "{res:?}"
+    );
+
+    let streams = [
+        // Right after the banner
+        tokio_test::io::Builder::new()
+            .write(b"220 test ESMTP IC SMTP Gateway\r\n")
+            .build(),
+        // Between commands
+        create_basic_stream().build(),
+        // In the middle of DATA
+        create_basic_stream()
+            .read(b"MAIL FROM:<foo@bar>\r\n")
+            .write(b"250 2.1.0 OK\r\n")
+            .read(b"RCPT TO:<dead@beef>\r\n")
+            .write(b"250 2.1.5 OK\r\n")
+            .read(b"DATA\r\n")
+            .write(b"354 Start mail input; end with <CRLF>.<CRLF>\r\n")
+            .read(b"foobar")
+            .build(),
+        // In the middle of BDAT
+        create_basic_stream()
+            .read(b"MAIL FROM:<foo@bar>\r\n")
+            .write(b"250 2.1.0 OK\r\n")
+            .read(b"RCPT TO:<dead@beef>\r\n")
+            .write(b"250 2.1.5 OK\r\n")
+            .read(b"BDAT 10\r\n01234")
+            .build(),
+    ];
+
+    for (i, stream) in streams.into_iter().enumerate() {
+        let mut session = create_session(stream, None);
+        Arc::get_mut(&mut session.cfg).unwrap().max_session_duration = ttl;
+
+        let res = tokio::time::timeout(
+            Duration::from_secs(5),
+            session.handle(CancellationToken::new()),
+        )
+        .await
+        .expect("session must finish promptly when the client closes the connection");
+
+        assert!(
+            matches!(&res, Err(SessionError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof),
+            "{i}: {res:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_bdat() {
     let stream = create_basic_stream()
         .read(b"MAIL FROM:<foo@bar>\r\n")
