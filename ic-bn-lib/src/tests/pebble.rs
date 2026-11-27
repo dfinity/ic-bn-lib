@@ -56,6 +56,36 @@ fn untar(targz: Bytes, file: &str) -> Result<Bytes, Error> {
     Err(anyhow!("File not found in the archive"))
 }
 
+/// How many times to try downloading each binary before giving up
+const DOWNLOAD_ATTEMPTS: u32 = 5;
+/// Delay before the first retry, doubled after each failed attempt
+const DOWNLOAD_INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+/// Downloads the given URL, retrying any failure up to `DOWNLOAD_ATTEMPTS` times with exponential backoff
+async fn download_with_retries(url: &str) -> Result<Bytes, Error> {
+    let mut delay = DOWNLOAD_INITIAL_RETRY_DELAY;
+    let mut attempt = 1;
+
+    loop {
+        match download_url_async(url).await {
+            Ok(v) => return Ok(v),
+            Err(e) if attempt < DOWNLOAD_ATTEMPTS => {
+                println!(
+                    "Download of {url} failed (attempt {attempt}/{DOWNLOAD_ATTEMPTS}), retrying in {delay:?}: {e:#}"
+                );
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+                attempt += 1;
+            }
+            Err(e) => {
+                return Err(Error::from(e).context(format!(
+                    "download of {url} failed after {DOWNLOAD_ATTEMPTS} attempts"
+                )));
+            }
+        }
+    }
+}
+
 /// Downloads pebble & pebble-challtestsrv to the given directory, checks hashes & extracts the binaries.
 /// If the binaries already exist - then we don't download anything.
 pub async fn download(path: &Path) -> Result<(), Error> {
@@ -120,10 +150,12 @@ pub async fn download(path: &Path) -> Result<(), Error> {
 
         let url = &urls[name][os][arch];
 
-        // Download the .tar.gz and check hash
-        let buf = download_url_async(url["url"].as_str().unwrap())
+        // Download the .tar.gz, retrying transient failures (GitHub occasionally answers 503)
+        let buf = download_with_retries(url["url"].as_str().unwrap())
             .await
             .context(format!("unable to download {name}"))?;
+
+        // Check hash
         let hash = Sha256::digest(&buf);
         if hash[..] != hex::decode(url["sha"].as_str().unwrap()).unwrap()[..] {
             return Err(anyhow!("{name} hash mismatch"));
