@@ -70,15 +70,20 @@ pub fn strip_connection_headers(headers: &mut HeaderMap) {
         headers.remove(TE);
     }
 
-    if let Some(header) = headers.remove(CONNECTION) {
-        let header_contents = header.to_str().unwrap();
+    // A `Connection` header may have a comma-separated list of names of other headers that
+    // are meant for only this specific connection, and it may appear more than once.
+    // Parse the raw bytes of every value: they come from the client and can contain
+    // non-visible-ASCII bytes (obs-text), which must not cause a panic.
+    // Tokens that are not valid header names are skipped.
+    // Look the names up as `&str` so that no allocation is made per token.
+    let values: Vec<HeaderValue> = headers.get_all(CONNECTION).iter().cloned().collect();
+    headers.remove(CONNECTION);
 
-        // A `Connection` header may have a comma-separated list of names of other headers that
-        // are meant for only this specific connection.
-        // Iterate these names and remove them as headers.
-        for name in header_contents.split(',') {
-            let name = name.trim();
-            headers.remove(name);
+    for value in &values {
+        for name in value.as_bytes().split(|&b| b == b',') {
+            if let Ok(name) = std::str::from_utf8(name.trim_ascii()) {
+                headers.remove(name);
+            }
         }
     }
 }
@@ -205,6 +210,140 @@ mod test {
         assert!(headers.get("x-foo").is_none());
         assert!(headers.get("x-bar").is_none());
         assert_eq!(headers.get("x-baz").unwrap(), "3");
+    }
+
+    #[test]
+    fn test_non_ascii_connection_does_not_panic() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONNECTION, HeaderValue::from_bytes(b"\xff\x80").unwrap());
+        headers.insert(
+            HeaderName::from_static("x-baz"),
+            HeaderValue::from_static("3"),
+        );
+
+        strip_connection_headers(&mut headers);
+
+        assert!(headers.get(CONNECTION).is_none());
+        assert_eq!(headers.get("x-baz").unwrap(), "3");
+    }
+
+    #[test]
+    fn test_non_ascii_connection_valid_tokens_are_removed() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONNECTION,
+            HeaderValue::from_bytes(b"x-foo, \xff, x-bar").unwrap(),
+        );
+        headers.insert(
+            HeaderName::from_static("x-foo"),
+            HeaderValue::from_static("1"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-bar"),
+            HeaderValue::from_static("2"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-baz"),
+            HeaderValue::from_static("3"),
+        );
+
+        strip_connection_headers(&mut headers);
+
+        assert!(headers.get(CONNECTION).is_none());
+        assert!(headers.get("x-foo").is_none());
+        assert!(headers.get("x-bar").is_none());
+        assert_eq!(headers.get("x-baz").unwrap(), "3");
+    }
+
+    #[test]
+    fn test_multiple_connection_headers() {
+        let valid = HeaderValue::from_static("x-bar");
+        let invalid = HeaderValue::from_bytes(b"\xfe\xff").unwrap();
+
+        // Check both orders so that names from any `Connection` value are honored
+        for values in [[&valid, &invalid], [&invalid, &valid]] {
+            let mut headers = HeaderMap::new();
+            for v in values {
+                headers.append(CONNECTION, v.clone());
+            }
+            headers.insert(
+                HeaderName::from_static("x-bar"),
+                HeaderValue::from_static("2"),
+            );
+            headers.insert(
+                HeaderName::from_static("x-baz"),
+                HeaderValue::from_static("3"),
+            );
+
+            strip_connection_headers(&mut headers);
+
+            assert!(headers.get(CONNECTION).is_none());
+            assert!(headers.get("x-bar").is_none());
+            assert_eq!(headers.get("x-baz").unwrap(), "3");
+        }
+    }
+
+    #[test]
+    fn test_connection_invalid_tokens_are_skipped() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONNECTION,
+            HeaderValue::from_bytes(b"x-foo, , \t,x;y, a b, x-f\xffoo, \"q\",").unwrap(),
+        );
+        headers.insert(
+            HeaderName::from_static("x-foo"),
+            HeaderValue::from_static("1"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-baz"),
+            HeaderValue::from_static("3"),
+        );
+
+        strip_connection_headers(&mut headers);
+
+        assert!(headers.get(CONNECTION).is_none());
+        assert!(headers.get("x-foo").is_none());
+        assert_eq!(headers.get("x-baz").unwrap(), "3");
+    }
+
+    #[test]
+    fn test_connection_long_name_is_removed() {
+        // Names longer than 64 bytes take a different parsing path in `http`
+        let name = format!("x-{}", "a".repeat(100));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONNECTION,
+            HeaderValue::from_str(&name.to_uppercase()).unwrap(),
+        );
+        headers.insert(
+            HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            HeaderValue::from_static("1"),
+        );
+
+        strip_connection_headers(&mut headers);
+
+        assert!(headers.get(CONNECTION).is_none());
+        assert!(headers.get(name.as_str()).is_none());
+    }
+
+    #[test]
+    fn test_connection_names_are_normalized() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONNECTION, HeaderValue::from_static("X-Foo ,\tx-bar"));
+        headers.insert(
+            HeaderName::from_static("x-foo"),
+            HeaderValue::from_static("1"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-bar"),
+            HeaderValue::from_static("2"),
+        );
+
+        strip_connection_headers(&mut headers);
+
+        assert!(headers.get(CONNECTION).is_none());
+        assert!(headers.get("x-foo").is_none());
+        assert!(headers.get("x-bar").is_none());
     }
 
     #[test]
