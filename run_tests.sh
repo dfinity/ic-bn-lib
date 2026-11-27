@@ -12,6 +12,12 @@ export BENCH_CANISTER_TARGET_DIR="${WORKDIR}/target/bench"
 export BENCH_CANISTER_WASM_PATH="${BENCH_CANISTER_TARGET_DIR}/wasm32-unknown-unknown/release/ic_custom_domains_canister.wasm"
 # PoC canister implementing the IC SMTP protocol, used by the SMTP E2E tests.
 export SMTP_CANISTER_WASM_PATH="${CARGO_TARGET_DIR}/wasm32-unknown-unknown/release/ic_smtp_poc_canister.wasm"
+# Last canister version that kept the authorized principal only on the heap, used to test
+# upgrades from it. Built from its own source tree into a separate target dir.
+readonly LEGACY_CANISTER_COMMIT="25c336ed19d039475aaa5fc3044e439f3087fc0a"
+readonly LEGACY_CANISTER_SRC_DIR="${WORKDIR}/target/legacy-canister-src"
+readonly LEGACY_CANISTER_TARGET_DIR="${WORKDIR}/target/legacy-canister"
+export LEGACY_CANISTER_WASM_PATH="${LEGACY_CANISTER_TARGET_DIR}/wasm32-unknown-unknown/release/ic_custom_domains_canister.wasm"
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >&2; }
 
@@ -72,6 +78,15 @@ log "Bench canister wasm built successfully at ${BENCH_CANISTER_WASM_PATH}"
 log "Building the SMTP PoC canister wasm"
 cargo build --package ic-smtp-poc-canister --target wasm32-unknown-unknown --release || { log "Failed to build the SMTP PoC canister wasm"; exit 1; }
 log "SMTP PoC canister wasm built successfully at ${SMTP_CANISTER_WASM_PATH}"
+
+log "Building the legacy canister wasm from ${LEGACY_CANISTER_COMMIT}"
+git cat-file -e "${LEGACY_CANISTER_COMMIT}^{commit}" 2>/dev/null \
+  || git fetch --depth=1 origin "${LEGACY_CANISTER_COMMIT}" \
+  || { log "Failed to fetch ${LEGACY_CANISTER_COMMIT}"; exit 1; }
+rm -rf "${LEGACY_CANISTER_SRC_DIR}" && mkdir -p "${LEGACY_CANISTER_SRC_DIR}"
+git archive "${LEGACY_CANISTER_COMMIT}" | tar -x -C "${LEGACY_CANISTER_SRC_DIR}" || { log "Failed to extract the legacy canister source"; exit 1; }
+CARGO_TARGET_DIR="${LEGACY_CANISTER_TARGET_DIR}" cargo build --manifest-path "${LEGACY_CANISTER_SRC_DIR}/Cargo.toml" --package ic-custom-domains-canister --target wasm32-unknown-unknown --release --locked || { log "Failed to build the legacy canister wasm"; exit 1; }
+log "Legacy canister wasm built successfully at ${LEGACY_CANISTER_WASM_PATH}"
 
 log "Running canister interface compatibility test (without bench feature)"
 cargo test --profile dev -p ic-custom-domains-canister --lib || { log "Canister unit tests failed"; exit 1; }

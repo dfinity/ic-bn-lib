@@ -69,6 +69,15 @@ pub type HasNextTaskResult = Result<bool, HasNextTaskError>;
 
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug)]
 pub struct InitArg {
+    /// The only principal allowed to call the guarded methods. It is kept in stable memory
+    /// and must not be the anonymous principal.
+    ///
+    /// - On install, `None` configures no principal, so every caller is rejected.
+    /// - On upgrade, `Some` replaces the stored principal and `None` keeps it. If none is
+    ///   stored, the upgrade fails.
+    /// - The first upgrade from a version that kept the principal only on the heap must pass
+    ///   `Some`: nothing is stored yet, so without it the upgrade fails and the old module keeps
+    ///   running with its old behavior, which authorized every caller if no principal was set.
     pub authorized_principal: Option<Principal>,
 }
 

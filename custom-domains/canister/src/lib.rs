@@ -85,7 +85,8 @@ fn post_upgrade(init_arg: InitArg) {
     init(init_arg);
 
     // Upgrading from a version that kept the principal only on the heap leaves none stored:
-    // fail the upgrade instead of silently locking out the authorized client.
+    // fail the upgrade instead of silently locking out the authorized client. That first
+    // upgrade must therefore pass a principal (see `InitArg::authorized_principal`).
     if AUTHORIZED_PRINCIPAL.with(|p| p.borrow().get().is_none()) {
         trap("no authorized principal stored or provided in the upgrade argument");
     }

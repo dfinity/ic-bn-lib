@@ -101,6 +101,86 @@ async fn test_canister_without_authorized_principal() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Upgrade from the last version that kept the authorized principal only on the heap
+/// (`LEGACY_CANISTER_WASM_PATH`, built by `run_tests.sh`) with existing domains and certificates
+#[ignore]
+#[tokio::test]
+async fn test_upgrade_from_heap_only_version() -> anyhow::Result<()> {
+    init_logging();
+
+    let sender = Principal::from_text("oqjvn-fqaaa-aaaab-qab5q-cai")?;
+    let other = Principal::from_text(OTHER_PRINCIPAL)?;
+    let canister_id = Principal::from_text("rdmx6-jaaaa-aaaaa-aaadq-cai")?;
+    let mut env =
+        TestEnv::new_with_wasm_env("LEGACY_CANISTER_WASM_PATH", Some(sender), sender).await?;
+
+    info!("Step 1: Seed the old version with a registered and a registering domain");
+    add_task(&env, "example1.com", TaskKind::Issue).await?;
+    add_task(&env, "example2.com", TaskKind::Issue).await?;
+    let task = fetch_next_task(&env).await?;
+    submit_successful_task_result(&env, &task, canister_id).await?;
+    let registered = task.domain;
+    let registering = if registered == "example1.com" {
+        "example2.com"
+    } else {
+        "example1.com"
+    };
+    verify_seeded_domains(&env, &registered, registering, canister_id).await?;
+    let legacy_hash = module_hash(&env).await?;
+
+    info!("Step 2: Upgrading without a principal fails and keeps the old version running");
+    env.wasm = std::fs::read(std::env::var("CANISTER_WASM_PATH")?)?;
+    assert_trap(upgrade(&env, None).await, "no authorized principal")?;
+    assert_eq!(module_hash(&env).await?, legacy_hash);
+    verify_seeded_domains(&env, &registered, registering, canister_id).await?;
+    assert_eq!(
+        has_next_task_as(&env, other).await?,
+        Err(HasNextTaskError::Unauthorized)
+    );
+
+    info!("Step 3: Upgrading with a principal keeps the domains and authorization");
+    upgrade(&env, Some(sender)).await?;
+    assert_ne!(module_hash(&env).await?, legacy_hash);
+    verify_seeded_domains(&env, &registered, registering, canister_id).await?;
+    assert!(has_next_task_as(&env, sender).await?.is_ok());
+    verify_unauthorized_principal_rejection(&env).await?;
+    verify_ingress_inspection(&env, other, false).await?;
+
+    info!("Step 4: Later upgrades without a principal keep the stored one");
+    upgrade(&env, None).await?;
+    verify_seeded_domains(&env, &registered, registering, canister_id).await?;
+    assert!(has_next_task_as(&env, sender).await?.is_ok());
+    verify_unauthorized_principal_rejection(&env).await?;
+
+    Ok(())
+}
+
+async fn verify_seeded_domains(
+    env: &TestEnv,
+    registered: &str,
+    registering: &str,
+    canister_id: Principal,
+) -> anyhow::Result<()> {
+    verify_domain_status(
+        env,
+        registered,
+        Some(canister_id),
+        RegistrationStatus::Registered,
+    )
+    .await?;
+    verify_certificate_exists(env, registered).await?;
+    verify_domain_status(env, registering, None, RegistrationStatus::Registering).await
+}
+
+async fn module_hash(env: &TestEnv) -> anyhow::Result<Vec<u8>> {
+    env.pic
+        .canister_status(env.canister_id, None)
+        .await
+        .map_err(|err| anyhow!("Status call failed: {err:?}"))?
+        .module_hash
+        .ok_or_else(|| anyhow!("No module hash"))
+}
+
 /// A non-anonymous principal that is never authorized
 const OTHER_PRINCIPAL: &str = "rrkah-fqaaa-aaaaa-aaaaq-cai";
 
