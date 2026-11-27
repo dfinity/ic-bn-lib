@@ -153,6 +153,8 @@ where
     /// Request types and their target latency, colon separated e.g. "query:100ms".
     /// This specifies target latency for Little's load-shedding algorithm for a given request type.
     /// Can be specified several times.
+    /// A queued request waits for at most the target latency, and a running request
+    /// counts against the concurrency limit for at most 4x the target latency.
     /// Important: if the request type is not specified in the list then it's not shedded at all.
     #[clap(env, long, value_delimiter = ',')]
     pub shed_sharded_latency: Vec<TypeLatency<T>>,
