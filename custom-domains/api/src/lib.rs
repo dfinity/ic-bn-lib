@@ -37,11 +37,16 @@ pub const UNREGISTERED_DOMAIN_EXPIRATION_TIME: Duration = Duration::from_secs(24
 pub const EXPIRED_DOMAIN_EXPIRATION_TIME: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 // If a task fails this many times with a recoverable error, it is no longer rescheduled.
+// The same limit applies to rate-limited attempts of domains that never had a certificate issued.
 // User is expected to resubmit the task.
 pub const MAX_TASK_FAILURES: u32 = 20;
 
 // If a task fails, it will not be rescheduled earlier than this interval.
+// The delay doubles with every consecutive failure, up to MAX_TASK_RETRY_DELAY.
 pub const MIN_TASK_RETRY_DELAY: Duration = Duration::from_secs(30);
+
+// Upper bound for the exponential retry delay of failed tasks.
+pub const MAX_TASK_RETRY_DELAY: Duration = Duration::from_secs(60 * 60);
 
 // Default number of domains returned per page when no limit is specified or limit is zero
 pub const DEFAULT_PAGE_LIMIT: u32 = 100;
@@ -64,6 +69,15 @@ pub type HasNextTaskResult = Result<bool, HasNextTaskError>;
 
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug)]
 pub struct InitArg {
+    /// The only principal allowed to call the guarded methods. It is kept in stable memory
+    /// and must not be the anonymous principal.
+    ///
+    /// - On install, `None` configures no principal, so every caller is rejected.
+    /// - On upgrade, `Some` replaces the stored principal and `None` keeps it. If none is
+    ///   stored, the upgrade fails.
+    /// - The first upgrade from a version that kept the principal only on the heap must pass
+    ///   `Some`: nothing is stored yet, so without it the upgrade fails and the old module keeps
+    ///   running with its old behavior, which authorized every caller if no principal was set.
     pub authorized_principal: Option<Principal>,
 }
 

@@ -1,8 +1,8 @@
 use anyhow::anyhow;
 use candid::{Decode, Encode, Principal};
 use ic_custom_domains_canister_api::{
-    CERTIFICATE_VALIDITY_FRACTION, DomainStatus, HasNextTaskError, HasNextTaskResult,
-    IssueCertificateOutput, MAX_TASK_FAILURES, MIN_TASK_RETRY_DELAY, RegistrationStatus,
+    CERTIFICATE_VALIDITY_FRACTION, DomainStatus, HasNextTaskError, HasNextTaskResult, InitArg,
+    IssueCertificateOutput, MAX_TASK_FAILURES, MAX_TASK_RETRY_DELAY, RegistrationStatus,
     STALE_DOMAINS_CLEANUP_INTERVAL, ScheduledTask as ScheduledTaskApi, ScheduledTask,
     SubmitTaskError, TASK_TIMEOUT, TaskFailReason, TaskKind, TaskOutcome, TaskOutput, TaskResult,
     UNREGISTERED_DOMAIN_EXPIRATION_TIME,
@@ -14,8 +14,8 @@ use tracing::info;
 use helpers::{TestEnv, init_logging};
 
 const TICKS_AFTER_TIME_ADVANCE: u32 = 5; // make pocket-ic progress by some blocks to ensure time advancement takes place
-const CERTIFICATE_VALIDITY_DURATION_SECS: u64 = 100_000;
-const RATE_LIMIT_MAX_ATTEMPTS: u32 = 25;
+const CERTIFICATE_VALIDITY_DURATION_SECS: u64 = 500_000;
+const RATE_LIMIT_MAX_ATTEMPTS: u32 = 3;
 
 mod e2e_test;
 mod helpers;
@@ -27,6 +27,7 @@ async fn test_canister_authorization() -> anyhow::Result<()> {
     init_logging();
 
     let sender = Principal::from_text("oqjvn-fqaaa-aaaab-qab5q-cai")?;
+    let other = Principal::from_text(OTHER_PRINCIPAL)?;
     let authorized_principal = Some(sender);
     let env = TestEnv::new(authorized_principal, sender).await?;
 
@@ -35,6 +36,211 @@ async fn test_canister_authorization() -> anyhow::Result<()> {
 
     info!("Step 2: Test call rejection by unauthorized principal");
     verify_unauthorized_principal_rejection(&env).await?;
+
+    info!("Step 3: Ingress inspection only accepts the authorized principal");
+    verify_ingress_inspection(&env, sender, true).await?;
+    verify_ingress_inspection(&env, env.controller, false).await?;
+    verify_ingress_inspection(&env, other, false).await?;
+
+    info!("Step 4: Upgrade without a principal keeps the stored one");
+    upgrade(&env, None).await?;
+    verify_authorized_principal_access(&env).await?;
+    verify_unauthorized_principal_rejection(&env).await?;
+
+    info!("Step 5: The anonymous principal cannot be configured");
+    let anonymous = Some(Principal::anonymous());
+    assert_trap(upgrade(&env, anonymous).await, "anonymous principal")?;
+    let reinstall = env
+        .pic
+        .reinstall_canister(
+            env.canister_id,
+            env.wasm.clone(),
+            Encode!(&InitArg {
+                authorized_principal: anonymous
+            })?,
+            Some(env.controller),
+        )
+        .await
+        .map_err(|err| anyhow!("Reinstall failed: {err:?}"));
+    assert_trap(reinstall, "anonymous principal")?;
+    verify_authorized_principal_access(&env).await?;
+
+    info!("Step 6: Upgrade with a different principal replaces the stored one");
+    upgrade(&env, Some(other)).await?;
+    assert_eq!(has_next_task_as(&env, other).await?, Ok(false));
+    assert_eq!(
+        has_next_task_as(&env, sender).await?,
+        Err(HasNextTaskError::Unauthorized)
+    );
+
+    Ok(())
+}
+
+/// Without a configured principal, the canister must reject every caller
+#[ignore]
+#[tokio::test]
+async fn test_canister_without_authorized_principal() -> anyhow::Result<()> {
+    init_logging();
+
+    let sender = Principal::from_text("oqjvn-fqaaa-aaaab-qab5q-cai")?;
+    let env = TestEnv::new(None, sender).await?;
+
+    assert_eq!(
+        has_next_task_as(&env, sender).await?,
+        Err(HasNextTaskError::Unauthorized)
+    );
+    verify_ingress_inspection(&env, sender, false).await?;
+
+    // Same state as after upgrading from a version that kept the principal only on the heap
+    info!("An upgrade with no principal stored or provided must fail");
+    assert_trap(upgrade(&env, None).await, "no authorized principal")?;
+    upgrade(&env, Some(sender)).await?;
+    verify_authorized_principal_access(&env).await?;
+    verify_unauthorized_principal_rejection(&env).await?;
+
+    Ok(())
+}
+
+/// Upgrade from the last version that kept the authorized principal only on the heap
+/// (`LEGACY_CANISTER_WASM_PATH`, built by `run_tests.sh`) with existing domains and certificates
+#[ignore]
+#[tokio::test]
+async fn test_upgrade_from_heap_only_version() -> anyhow::Result<()> {
+    init_logging();
+
+    let sender = Principal::from_text("oqjvn-fqaaa-aaaab-qab5q-cai")?;
+    let other = Principal::from_text(OTHER_PRINCIPAL)?;
+    let canister_id = Principal::from_text("rdmx6-jaaaa-aaaaa-aaadq-cai")?;
+    let mut env =
+        TestEnv::new_with_wasm_env("LEGACY_CANISTER_WASM_PATH", Some(sender), sender).await?;
+
+    info!("Step 1: Seed the old version with a registered and a registering domain");
+    add_task(&env, "example1.com", TaskKind::Issue).await?;
+    add_task(&env, "example2.com", TaskKind::Issue).await?;
+    let task = fetch_next_task(&env).await?;
+    submit_successful_task_result(&env, &task, canister_id).await?;
+    let registered = task.domain;
+    let registering = if registered == "example1.com" {
+        "example2.com"
+    } else {
+        "example1.com"
+    };
+    verify_seeded_domains(&env, &registered, registering, canister_id).await?;
+    let legacy_hash = module_hash(&env).await?;
+
+    info!("Step 2: Upgrading without a principal fails and keeps the old version running");
+    env.wasm = std::fs::read(std::env::var("CANISTER_WASM_PATH")?)?;
+    assert_trap(upgrade(&env, None).await, "no authorized principal")?;
+    assert_eq!(module_hash(&env).await?, legacy_hash);
+    verify_seeded_domains(&env, &registered, registering, canister_id).await?;
+    assert_eq!(
+        has_next_task_as(&env, other).await?,
+        Err(HasNextTaskError::Unauthorized)
+    );
+
+    info!("Step 3: Upgrading with a principal keeps the domains and authorization");
+    upgrade(&env, Some(sender)).await?;
+    assert_ne!(module_hash(&env).await?, legacy_hash);
+    verify_seeded_domains(&env, &registered, registering, canister_id).await?;
+    assert!(has_next_task_as(&env, sender).await?.is_ok());
+    verify_unauthorized_principal_rejection(&env).await?;
+    verify_ingress_inspection(&env, other, false).await?;
+
+    info!("Step 4: Later upgrades without a principal keep the stored one");
+    upgrade(&env, None).await?;
+    verify_seeded_domains(&env, &registered, registering, canister_id).await?;
+    assert!(has_next_task_as(&env, sender).await?.is_ok());
+    verify_unauthorized_principal_rejection(&env).await?;
+
+    Ok(())
+}
+
+async fn verify_seeded_domains(
+    env: &TestEnv,
+    registered: &str,
+    registering: &str,
+    canister_id: Principal,
+) -> anyhow::Result<()> {
+    verify_domain_status(
+        env,
+        registered,
+        Some(canister_id),
+        RegistrationStatus::Registered,
+    )
+    .await?;
+    verify_certificate_exists(env, registered).await?;
+    verify_domain_status(env, registering, None, RegistrationStatus::Registering).await
+}
+
+async fn module_hash(env: &TestEnv) -> anyhow::Result<Vec<u8>> {
+    env.pic
+        .canister_status(env.canister_id, None)
+        .await
+        .map_err(|err| anyhow!("Status call failed: {err:?}"))?
+        .module_hash
+        .ok_or_else(|| anyhow!("No module hash"))
+}
+
+/// A non-anonymous principal that is never authorized
+const OTHER_PRINCIPAL: &str = "rrkah-fqaaa-aaaaa-aaaaq-cai";
+
+async fn upgrade(env: &TestEnv, authorized_principal: Option<Principal>) -> anyhow::Result<()> {
+    env.pic
+        .upgrade_canister(
+            env.canister_id,
+            env.wasm.clone(),
+            Encode!(&InitArg {
+                authorized_principal
+            })?,
+            Some(env.controller),
+        )
+        .await
+        .map_err(|err| anyhow!("Upgrade failed: {err:?}"))
+}
+
+fn assert_trap(result: anyhow::Result<()>, message: &str) -> anyhow::Result<()> {
+    let err = result
+        .err()
+        .ok_or_else(|| anyhow!("Expected a trap containing '{message}'"))?;
+    assert!(err.to_string().contains(message), "Unexpected error: {err}");
+    Ok(())
+}
+
+async fn has_next_task_as(env: &TestEnv, caller: Principal) -> anyhow::Result<HasNextTaskResult> {
+    let result = env
+        .pic
+        .query_call(env.canister_id, caller, "has_next_task", Encode!(&())?)
+        .await
+        .map_err(|err| anyhow!("Query call rejected: {err:?}"))?;
+    Ok(Decode!(&result, HasNextTaskResult)?)
+}
+
+/// Submit an ingress update call, which goes through `inspect_message`
+async fn verify_ingress_inspection(
+    env: &TestEnv,
+    caller: Principal,
+    accepted: bool,
+) -> anyhow::Result<()> {
+    let submitted = env
+        .pic
+        .submit_call(env.canister_id, caller, "fetch_next_task", Encode!(&())?)
+        .await;
+
+    if accepted {
+        let message_id = submitted.map_err(|err| anyhow!("Ingress call rejected: {err:?}"))?;
+        env.pic
+            .await_call(message_id)
+            .await
+            .map_err(|err| anyhow!("Ingress call failed: {err:?}"))?;
+    } else {
+        let err = submitted
+            .err()
+            .ok_or_else(|| anyhow!("Ingress call from {caller} was not rejected"))?;
+        assert!(
+            err.reject_message.contains("message_inspection_failed"),
+            "Unexpected rejection: {err:?}"
+        );
+    }
 
     Ok(())
 }
@@ -172,9 +378,7 @@ async fn test_comprehensive_registration_scenario() -> anyhow::Result<()> {
     info!("Step 6: Test task timeout and automatic rescheduling for {domain_with_failure}");
     let task2 = simulate_task_timeout_and_rescheduling(&env, &task2, canister_id2).await?;
 
-    info!(
-        "Step 7: Test rate-limited failure handling with unlimited retries for {domain_with_failure}"
-    );
+    info!("Step 7: Test rate-limited failure handling with retries for {domain_with_failure}");
     let task2 =
         simulate_retries_after_rate_limited_errors(&env, task2, RATE_LIMIT_MAX_ATTEMPTS).await?;
 
@@ -338,18 +542,23 @@ async fn verify_authorized_principal_access(env: &TestEnv) -> anyhow::Result<()>
 }
 
 async fn verify_unauthorized_principal_rejection(env: &TestEnv) -> anyhow::Result<()> {
-    let arg = Encode!(&()).map_err(|err| anyhow!("Failed to encode arguments: {err:?}"))?;
+    // The controller is the anonymous principal; also check a non-anonymous one
+    let other = Principal::from_text(OTHER_PRINCIPAL)?;
 
-    let result = env
-        .pic
-        .query_call(env.canister_id, env.controller, "has_next_task", arg)
-        .await
-        .map_err(|err| anyhow!("Query call from unauthorized principal rejected: {err:?}"))?;
+    for caller in [env.controller, other] {
+        let arg = Encode!(&()).map_err(|err| anyhow!("Failed to encode arguments: {err:?}"))?;
 
-    let unauthorized_result = Decode!(&result, HasNextTaskResult)
-        .map_err(|err| anyhow!("Failed to decode unauthorized response: {err:?}"))?;
+        let result = env
+            .pic
+            .query_call(env.canister_id, caller, "has_next_task", arg)
+            .await
+            .map_err(|err| anyhow!("Query call from unauthorized principal rejected: {err:?}"))?;
 
-    assert_eq!(unauthorized_result, Err(HasNextTaskError::Unauthorized));
+        let unauthorized_result = Decode!(&result, HasNextTaskResult)
+            .map_err(|err| anyhow!("Failed to decode unauthorized response: {err:?}"))?;
+
+        assert_eq!(unauthorized_result, Err(HasNextTaskError::Unauthorized));
+    }
 
     Ok(())
 }
@@ -471,7 +680,7 @@ async fn simulate_retries_after_rate_limited_errors(
 
         assert_has_no_next_task(env).await?;
 
-        advance_time_and_tick(env, MIN_TASK_RETRY_DELAY, TICKS_AFTER_TIME_ADVANCE).await;
+        advance_time_and_tick(env, MAX_TASK_RETRY_DELAY, TICKS_AFTER_TIME_ADVANCE).await;
 
         task = fetch_next_task(env).await?;
 
@@ -500,7 +709,7 @@ async fn simulate_retries_after_generic_failures(
 
         assert_has_no_next_task(env).await?;
 
-        advance_time_and_tick(env, MIN_TASK_RETRY_DELAY, TICKS_AFTER_TIME_ADVANCE).await;
+        advance_time_and_tick(env, MAX_TASK_RETRY_DELAY, TICKS_AFTER_TIME_ADVANCE).await;
 
         if attempt < max_attempts {
             task = fetch_next_task(env).await?;
