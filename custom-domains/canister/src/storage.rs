@@ -17,8 +17,11 @@ thread_local! {
 
     /// The only principal allowed to call the guarded methods. Kept in stable memory so that it
     /// survives upgrades. `None` means that no caller is authorized.
+    ///
+    /// MemoryId 3 must not be reused: an earlier version kept a `StableCell<bool>` there
+    /// (`certificates_migrated`), which would decode as `Some(aaaaa-aa)`.
     pub static AUTHORIZED_PRINCIPAL: RefCell<StableCell<Option<Principal>, VirtualMemory<DefaultMemoryImpl>>> = RefCell::new(
-        StableCell::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(3))), None)
+        StableCell::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(4))), None)
     );
 
     pub static STATE: RefCell<CanisterState> = RefCell::new(
@@ -29,4 +32,21 @@ thread_local! {
             max_domains: MAX_STORED_DOMAINS,
         }
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_authorized_principal_ignores_legacy_memory() {
+        // State left by the certificates migration of an earlier version
+        let mut migrated = StableCell::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(3))),
+            false,
+        );
+        migrated.set(true);
+
+        assert_eq!(AUTHORIZED_PRINCIPAL.with(|p| *p.borrow().get()), None);
+    }
 }
